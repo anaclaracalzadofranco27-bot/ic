@@ -191,9 +191,16 @@ def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inici
     if not SIMULADO and reles_z and len(reles_z) >= sensor:
         pino_rele = reles_z[sensor - 1]
         try:
+            ultimo_check = time.monotonic()
             for i in range(num_batidas):
                 if not aguardar_liberacao_z():
                     break
+                if (time.monotonic() - ultimo_check) >= 0.25:
+                    pronto, motivo = validar_conexao_fisica_z()
+                    ultimo_check = time.monotonic()
+                    if not pronto:
+                        info["erro"] = motivo
+                        break
                 pino_rele.on()
                 time.sleep(t_on)
                 pino_rele.off()
@@ -277,6 +284,10 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
         for i, (pino, rele) in enumerate(zip(PINOS_GPIO_Z, reles_z), start=1):
             if abortar_job_evento.is_set():
                 break
+            pronto, erro = validar_conexao_fisica_z()
+            if not pronto:
+                registrar_log(f"Teste Z interrompido: {erro}", "erro")
+                return False
             ESTADO_ESTUDIO["z_atual"] = i
             msg = f"[TESTE] Ordem #{i} -> Rele {i} (GPIO {pino}) LIGADO por {tempo_ligado_s:.1f}s"
             registrar_log(msg, "info")
