@@ -484,6 +484,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           ⬆ Importar G-code X/Y + Z
           <input type="file" id="inp-file-gcode" accept=".gcode,.nc,.tap,.txt" style="display:none;" onchange="importarGcodeHibrido(this)">
         </label>
+        <label style="display:flex;gap:5px;align-items:center;font-size:10px;" title="Desmarcado usa a configuracao Z atual; marcado usa ON/OFF/PULSOS do arquivo.">
+          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;"> Z do arquivo
+        </label>
         <select id="sel-profundidade" style="width:125px;" onchange="reprocessarProfundidade()">
           <option value="distancia">Prof: Distancia EDT</option>
           <option value="luminancia">Prof: Luminancia</option>
@@ -615,7 +618,11 @@ async function apiPost(acao, payload = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: acao, ...payload })
   });
-  return await res.json();
+  let dados;
+  try { dados = await res.json(); }
+  catch (e) { return { ok: false, erro: 'Resposta invalida do servidor: ' + res.status }; }
+  if (!res.ok) console.error('API Smart Matrix:', acao, dados);
+  return dados;
 }
 
 function lerNumeroInput(id, padrao) {
@@ -712,11 +719,12 @@ async function salvarConfigCabecote() {
   for (let i = 1; i <= 8; i++) {
     pulsos.push(parseInt(document.getElementById('p-nv-' + i).value) || i);
   }
-  const on_ms = parseFloat(document.getElementById('inp-on-ms').value) || 10;
-  const off_ms = parseFloat(document.getElementById('inp-off-ms').value) || 10;
-  const pausa_ms = parseFloat(document.getElementById('inp-pausa-ms').value) || 10;
-  const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
-  await apiPost('config_cabecote', { on_ms, off_ms, pausa_ms, feed, pulsos_por_nivel: pulsos });
+  const on_ms = lerNumeroInput('inp-on-ms', 10);
+  const off_ms = lerNumeroInput('inp-off-ms', 10);
+  const pausa_ms = lerNumeroInput('inp-pausa-ms', 10);
+  const feed = lerNumeroInput('inp-feed', 900);
+  const resp = await apiPost('config_cabecote', { on_ms, off_ms, pausa_ms, feed, pulsos_por_nivel: pulsos });
+  if (!resp.ok) { alert(resp.erro || 'Parametros Z invalidos'); return; }
   await carregarEstadoInicial();
 }
 
@@ -742,7 +750,8 @@ async function carregarPadrao(padrao) {
 
 async function reprocessarProfundidade() {
   const modo = document.getElementById('sel-profundidade').value;
-  await apiPost('mudar_profundidade', { modo });
+  const resp = await apiPost('mudar_profundidade', { modo });
+  if (!resp.ok) { alert(resp.erro || 'Nao foi possivel reprocessar.'); return; }
   await carregarEstadoInicial();
 }
 
@@ -755,13 +764,15 @@ async function importarGcodeHibrido(input) {
     return;
   }
   const texto = await arquivo.text();
-  const resp = await apiPost('carregar_gcode', { nome: arquivo.name, conteudo: texto });
+  const usar_parametros_arquivo = document.getElementById('usar-parametros-gcode').checked;
+  const resp = await apiPost('carregar_gcode', { nome: arquivo.name, conteudo: texto, usar_parametros_arquivo });
   if (!resp.ok) {
     alert('Erro ao importar G-code: ' + (resp.erro || 'formato nao suportado'));
     return;
   }
   await carregarEstadoInicial();
-  alert('G-code validado: ' + resp.blocos + ' blocos. O Z sera enviado aos GPIOs, nao ao GRBL.');
+  alert('G-code validado: ' + resp.blocos + ' blocos. Parametros Z: ' +
+        (usar_parametros_arquivo ? 'arquivo' : 'configuracao atual') + '. Z nao sera enviado ao GRBL.');
 }
 
 async function enviarImagemIA(input) {
@@ -769,7 +780,8 @@ async function enviarImagemIA(input) {
   const reader = new FileReader();
   reader.onload = async function(e) {
     const modo = document.getElementById('sel-profundidade').value;
-    await apiPost('upload_imagem', { imagem_b64: e.target.result, modo_profundidade: modo });
+    const resp = await apiPost('upload_imagem', { imagem_b64: e.target.result, modo_profundidade: modo });
+    if (!resp.ok) { alert(resp.erro || 'Falha ao carregar imagem.'); return; }
     await carregarEstadoInicial();
   };
   reader.readAsDataURL(input.files[0]);
@@ -922,6 +934,7 @@ async function carregarEstadoInicial() {
   }
   document.getElementById('box-gcode').textContent = (d.gcode || []).slice(0, 180).join('\n');
   document.getElementById('badge-qtd-pinos').textContent = d.gcode_importado ? String(d.linhas_importadas || 0) + ' linhas importadas' : String(d.pinos_ativos || 0) + ' pinos';
+  if (d.gcode_importado) document.getElementById('usar-parametros-gcode').checked = !!d.usar_parametros_arquivo;
   desenharMatriz();
 }
 
@@ -953,7 +966,8 @@ async function atualizarStatus() {
     if (st.job && st.job.ativo) {
       document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
-      document.getElementById('info-progresso').textContent = 'Pronto';
+      document.getElementById('info-progresso').textContent =
+        st.job.erro ? 'Falha: ' + st.job.erro : (st.job.concluido ? 'Concluido' : 'Pronto');
     }
     if (st.logs) {
       const lb = document.getElementById('box-logs');
@@ -961,7 +975,10 @@ async function atualizarStatus() {
       lb.scrollTop = lb.scrollHeight;
     }
     desenharMatriz();
-  } catch (e) {}
+  } catch (e) {
+    console.error('Falha ao atualizar telemetria Smart Matrix:', e);
+    document.getElementById('info-progresso').textContent = 'Telemetria indisponivel';
+  }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {

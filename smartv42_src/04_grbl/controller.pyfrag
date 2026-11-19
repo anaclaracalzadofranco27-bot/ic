@@ -916,6 +916,8 @@ class ControladorGRBL:
         if "Z" in eixo:
             registrar_log("Z nao e eixo cartesiano; zeramento GRBL limitado a XY.", "aviso")
             eixo = eixo.replace("Z", "")
+        if not eixo or any(letra not in "XY" for letra in eixo):
+            return False
         partes = []
         if "X" in eixo:
             partes.append(f"X{float(valor_x):.3f}")

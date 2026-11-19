@@ -233,7 +233,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "abort":
                 _job_abortar = True
                 _job_pausado = False
-                if _job_em_execucao:
+                if _job_em_execucao or _operacao_manual:
                     abortar_job_evento.set()
                 _grbl_global.soft_reset()
             elif cmd == "jog_cancel":
@@ -282,15 +282,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "config_cabecote":
-            if dados.get("feed") is not None:
-                FEED_RATE = max(50.0, float(dados.get("feed")))
-            configurar_parametros_pulsos_z(
-                on_ms=dados.get("on_ms"),
-                off_ms=dados.get("off_ms"),
-                pausa_ms=dados.get("pausa_ms"),
-                pulsos_por_nivel=dados.get("pulsos_por_nivel"),
-                usar_fixo=False,
-            )
+            try:
+                feed_novo = float(dados.get("feed", FEED_RATE))
+                if not math.isfinite(feed_novo) or not 50 <= feed_novo <= 5000:
+                    raise ValueError("Feed deve estar entre 50 e 5000 mm/min.")
+                parametros = {
+                    "on_ms": dados.get("on_ms"), "off_ms": dados.get("off_ms"),
+                    "pausa_ms": dados.get("pausa_ms"),
+                    "pulsos_por_nivel": dados.get("pulsos_por_nivel"),
+                    "usar_fixo": False,
+                }
+                configurar_parametros_pulsos_z(**parametros)
+                FEED_RATE = feed_novo
+            except (ValueError, TypeError) as exc:
+                self._enviar_json({"ok": False, "erro": str(exc)}, 400)
+                return
             if _matriz_atual is not None:
                 atualizar_matriz_global(_matriz_atual)
             self._enviar_json({"ok": True})
@@ -309,6 +315,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "reset_mecanico":
+            if not SIMULADO and _reset_global.simulado:
+                self._enviar_json({"ok": False, "erro": "Arduino de reset fisico nao conectado."}, 409)
+                return
             sub = dados.get("subcmd", "completo")
             if sub == "completo":
                 ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
@@ -319,14 +328,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                     self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
                     return
             elif sub == "descer":
-                _reset_global.descer_atuadores()
+                ok_reset, _ = _reset_global.descer_atuadores()
             elif sub == "subir":
-                _reset_global.subir_atuadores()
+                ok_reset, _ = _reset_global.subir_atuadores()
             elif sub == "varrer":
-                _reset_global.varrer_eixo_x_linha(250.0)
+                ok_reset, _ = _reset_global.varrer_eixo_x_linha(250.0)
             elif sub == "home":
-                _reset_global.home_eixo_x_linha()
-            self._enviar_json({"ok": True})
+                ok_reset, _ = _reset_global.home_eixo_x_linha()
+            else:
+                self._enviar_json({"ok": False, "erro": "Subcomando reset desconhecido."}, 400)
+                return
+            self._enviar_json({"ok": bool(ok_reset)})
             return
 
         if acao == "gerar_padrao":
