@@ -265,9 +265,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "wcs":
                 _grbl_global.selecionar_wcs(dados.get("wcs", "G54"))
             elif cmd == "teste_t":
-                testar_reles_um_a_um()
+                if not testar_reles_um_a_um():
+                    self._enviar_json({"ok": False, "erro": "Teste Z interrompido ou bloqueado."}, 409)
+                    return
             elif cmd == "seq_cabecote":
-                acionar_sequencia_cabecote()
+                if not acionar_sequencia_cabecote():
+                    self._enviar_json({"ok": False, "erro": "Sequencia Z interrompida ou bloqueada."}, 409)
+                    return
             self._enviar_json({"ok": True})
             return
 

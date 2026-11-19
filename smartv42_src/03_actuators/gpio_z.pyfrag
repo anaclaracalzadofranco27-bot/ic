@@ -227,21 +227,27 @@ def acionar_sequencia_cabecote(ate_nivel=8, pulsos_por_pino=None, on_ms=None, of
         "info",
     )
     total_pulsos = 0
+    falhou = False
     t0 = time.perf_counter()
     for nv in range(1, ate_nivel + 1):
         if abortar_job_evento.is_set():
             break
         ok, info = acionar_eixo_z(nv, pulsos_override=pulsos_por_pino, on_ms_override=on_ms, off_ms_override=off_ms)
         total_pulsos += info.get("pulsos", 0)
+        if not ok:
+            falhou = True
         registrar_terminal(
             "Z-SEQ",
             f"Ordem #{nv} -> GPIO {PINOS_GPIO_Z[nv-1]} acionado ({info.get('pulsos', 0)} pulsos, {info.get('tempo_ms', 0)} ms)",
             "ok" if ok else "erro",
         )
+        if not ok:
+            break
     ESTADO_ESTUDIO["z_atual"] = 0
     dt_ms = int((time.perf_counter() - t0) * 1000)
-    registrar_log(f"[SEQUENCIA CABECOTE] Concluida ({ate_nivel} pinos, {total_pulsos} pulsos totais em {dt_ms} ms).", "ok")
-    return True
+    sucesso = not falhou and not abortar_job_evento.is_set()
+    registrar_log(f"[SEQUENCIA CABECOTE] {('Concluida' if sucesso else 'Interrompida')} ({total_pulsos} pulsos em {dt_ms} ms).", "ok" if sucesso else "erro")
+    return sucesso
 
 
 def testar_reles_um_a_um(tempo_ligado_s=0.5):
@@ -263,7 +269,7 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
             registrar_terminal("TESTE-Z", msg, "info")
             time.sleep(tempo_ligado_s)
         ESTADO_ESTUDIO["z_atual"] = 0
-        return
+        return not abortar_job_evento.is_set()
     try:
         for i, (pino, rele) in enumerate(zip(PINOS_GPIO_Z, reles_z), start=1):
             if abortar_job_evento.is_set():
