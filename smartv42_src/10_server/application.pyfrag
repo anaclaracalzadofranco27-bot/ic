@@ -80,6 +80,23 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
         dados = json.loads(bruto) if bruto else {}
         acao = dados.get("action", "")
+        # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
+        # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
+        simultanea = acao == "iniciar_job" or (
+            acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
+        )
+        if simultanea:
+            return self._executar_acao_POST(acao, dados)
+        if not reservar_operacao_manual():
+            self._enviar_json({"ok": False, "erro": "Maquina ocupada: finalize ou aborte o trabalho atual."}, 409)
+            return
+        try:
+            return self._executar_acao_POST(acao, dados)
+        finally:
+            liberar_operacao_manual()
+
+    def _executar_acao_POST(self, acao, dados):
+        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE
 
         if acao == "carregar_gcode":
             if _job_em_execucao:
@@ -167,7 +184,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                             registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
                             return
                     registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                threading.Thread(target=_rodar_perimetro, daemon=True).start()
+                # Executa enquanto a reserva da maquina esta ativa.
+                _rodar_perimetro()
                 self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
                 return
 
@@ -187,9 +205,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if acao == "conectar_portas":
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
-            _grbl_global.conectar(p_grbl)
-            _reset_global.conectar(p_reset)
-            self._enviar_json({"ok": True})
+            ok_grbl = _grbl_global.conectar(p_grbl)
+            ok_reset = _reset_global.conectar(p_reset)
+            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl, "reset": ok_reset})
             return
 
         if acao == "jog":
@@ -243,9 +261,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "wcs":
                 _grbl_global.selecionar_wcs(dados.get("wcs", "G54"))
             elif cmd == "teste_t":
-                threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
+                testar_reles_um_a_um()
             elif cmd == "seq_cabecote":
-                threading.Thread(target=acionar_sequencia_cabecote, daemon=True).start()
+                acionar_sequencia_cabecote()
             self._enviar_json({"ok": True})
             return
 

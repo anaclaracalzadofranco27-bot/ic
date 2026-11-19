@@ -32,8 +32,8 @@ def explicar_pinos(status):
 def avaliar_status_para_mover(status):
     if not status:
         return False, "GRBL nao respondeu ao '?'"
-    if status.startswith("<Alarm"):
-        return False, "GRBL em alarme com a maquina parada"
+    if not status.startswith("<Idle"):
+        return False, f"GRBL nao esta Idle para movimento: {status}"
     fins_xy = "/".join(p for p in pinos_ativos(status) if p in "XY")
     if fins_xy and not IGNORAR_FIM_DE_CURSO:
         return False, f"fim de curso {fins_xy} acionado com a maquina parada"
@@ -411,6 +411,8 @@ class ControladorGRBL:
         self.pinos_pn = ""
         self.ultimo_status_raw = ""
         self.porta_atual = PORTA_GRBL
+        self.conexao_real = False
+        self.modo_simulacao = False
         self.em_execucao_job = False
         self.config_eeprom = {}
         self.offsets_wcs = {}
@@ -438,9 +440,17 @@ class ControladorGRBL:
                 except Exception:
                     pass
 
-            if porta.upper() == "SIMULADO" or serial is None:
+            self.conexao_real = False
+            self.modo_simulacao = False
+            if porta.upper() == "SIMULADO" or SIMULADO:
                 self.porta_atual = "SIMULADO"
+                self.modo_simulacao = True
                 self.ser = PortaSimulada("grbl")
+            elif serial is None:
+                self.ser = None
+                self.porta_atual = "DESCONECTADO"
+                registrar_log("pyserial ausente: conexao fisica indisponivel. Sem fallback para simulacao.", "erro")
+                return False
                 registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
                 registrar_terminal("SYS", "Conectado ao Simulador GRBL 1.1h (UGS Completo)", "ok")
             else:
@@ -456,8 +466,8 @@ class ControladorGRBL:
                             self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S, exclusive=True)
                         except TypeError:
                             self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S)
-                        SIMULADO = False
                         self.porta_atual = p_tentativa
+                        self.conexao_real = True
                         conectou_real = True
                         if p_tentativa != porta:
                             registrar_log(f"Porta {porta} mudou para {p_tentativa}! Conectado automaticamente em {p_tentativa}.", "ok")
@@ -468,10 +478,12 @@ class ControladorGRBL:
                     except Exception as e:
                         ultimo_erro = str(e)
                 if not conectou_real:
-                    self.porta_atual = "SIMULADO"
-                    self.ser = PortaSimulada("grbl")
-                    registrar_log(f"Porta {porta} indisponivel ({ultimo_erro}). Verifique o cabo USB! Usando Modo Simulado temporario.", "aviso")
-                    registrar_terminal("SYS", f"Sem USB ({ultimo_erro}) -> Modo Simulado temporario", "aviso")
+                    self.porta_atual = "DESCONECTADO"
+                    self.ser = None
+                    self.conexao_real = False
+                    registrar_log(f"Porta GRBL indisponivel ({ultimo_erro}). JOB BLOQUEADO; reconecte ou execute --simulado.", "erro")
+                    registrar_terminal("SYS", "Falha USB: nenhum movimento sera simulado automaticamente.", "erro")
+                    return False
 
             t0 = time.perf_counter()
             if self._aguardar_grbl_pronto_nolock(TIMEOUT_BOOT_GRBL_S):
@@ -489,7 +501,7 @@ class ControladorGRBL:
             registrar_log(f"ATENCAO: {motivo}. Do jeito que esta, a trajetoria nao vai comecar.", "aviso")
             if "fim de curso" in motivo:
                 registrar_log(DICA_FIM_DE_CURSO, "aviso")
-        return True
+        return bool(pronto and status_grbl.startswith("<Idle"))
 
     def recuperar_usb_grbl(self, pos_atual=None):
         registrar_log("[AUTO-RECUPERACAO USB] Reconectando porta serial do GRBL apos interferencia...", "aviso")
@@ -602,22 +614,22 @@ class ControladorGRBL:
             self.spindle_override = int(m_ov.group(3))
 
     def preparar_grbl(self):
+        """Nunca desbloqueia alarmes, ativa modo Check ou simula movimento silenciosamente."""
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            registrar_log("GRBL fisico nao conectado: job bloqueado.", "erro")
+            return ""
         status = self.ler_status_grbl()
-        if not status or status.startswith("<Alarm"):
-            registrar_log(
-                f"GRBL em alarme/sem resposta ao conectar ({status or 'sem status'}). Enviando soft-reset.",
-                "aviso",
-            )
-            self.soft_reset()
-        for comando in ("$X", "G21 G90"):
+        pronto, motivo = avaliar_status_para_mover(status)
+        if not pronto:
+            registrar_log(f"GRBL nao esta pronto: {motivo}; corrija manualmente.", "erro")
+            return ""
+        for comando in ("G21", "G90", "G54"):
             ok, msg = self.enviar_comando(comando, logar=False)
             if not ok:
-                registrar_log(f"Aviso: '{comando}' -> {msg}", "aviso")
-        for _ in range(3):
-            status = self.ler_status_grbl()
-            if status:
-                break
-        return status
+                registrar_log(f"GRBL recusou {comando}: {msg}", "erro")
+                return ""
+        status = self.ler_status_grbl()
+        return status if avaliar_status_para_mover(status)[0] else ""
 
     def enviar_byte_tempo_real(self, byte_cmd, descricao=""):
         if not self.ser:
@@ -766,6 +778,13 @@ class ControladorGRBL:
         Executa Jog incremental no padrão oficial do UGS / GRBL 1.1 ($J=G91 G21 X... Y... Z... F...),
         respeitando INVERTER_JOG_X / INVERTER_JOG_Y caso o operador queira inverter o sentido das setas.
         """
+        if abs(dz) > 1e-6:
+            return False, "Eixo Z nao e cartesiano: use Z1..Z8 pelo GPIO."
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            return False, "GRBL fisico indisponivel para jog."
+        estado = self.ler_status_grbl()
+        if not estado.startswith("<Idle"):
+            return False, f"Jog bloqueado; estado GRBL: {estado}"
         vel = JOG_FEED_RATE if feed is None else float(feed)
         dx_real = -dx if INVERTER_JOG_X else dx
         dy_real = -dy if INVERTER_JOG_Y else dy
@@ -774,22 +793,11 @@ class ControladorGRBL:
             partes.append(f"X{dx_real:.3f}")
         if abs(dy_real) > 1e-6:
             partes.append(f"Y{dy_real:.3f}")
-        if abs(dz) > 1e-6:
-            partes.append(f"Z{dz:.3f}")
         if len(partes) == 1:
             return True, "Sem deslocamento"
         partes.append(f"F{vel:g}")
-        if self.estado.startswith("ALARM"):
-            registrar_log("GRBL estava em Alarme antes do Jog -> enviando $X automaticamente.", "aviso")
-            self.enviar_comando("$X", logar=False)
         cmd_jog = " ".join(partes)
         ok, resp = self.enviar_comando(cmd_jog, timeout=5.0, logar=True)
-        if not ok and ("error:8" in str(resp) or "error:9" in str(resp) or "ALARM" in str(resp)):
-            registrar_log("Destravando GRBL ($X) e movendo via G91 G1...", "aviso")
-            self.enviar_comando("$X", logar=False)
-            cmd_g1 = "G91 G21 G1 " + " ".join(partes[1:])
-            ok, resp = self.enviar_comando(cmd_g1, timeout=5.0, logar=True)
-            self.enviar_comando("G90", logar=False)
         self.atualizar_status()
         return ok, resp
 
@@ -804,14 +812,16 @@ class ControladorGRBL:
             if status.startswith("<Alarm"):
                 registrar_log(f"GRBL em alarme: {status}{explicar_pinos(status)}", "erro")
                 return False, "GRBL em alarme"
-            if status.startswith(("<Idle", "<Check")):
+            if status.startswith("<Idle"):
                 return True, ""
+            if status.startswith(("<Check", "<Hold", "<Door", "<Sleep")):
+                return False, f"Estado nao executavel: {status}"
             time.sleep(INTERVALO_POLL_IDLE_S)
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
-        if not self.ser:
-            return False, "Desconectado", "Serial GRBL fechada"
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
         if fora_dos_limites(x_mm, y_mm):
             return (
                 False,
@@ -902,6 +912,9 @@ class ControladorGRBL:
 
     def zerar_eixo(self, eixo="XY", valor_x=0.0, valor_y=0.0, valor_z=0.0):
         eixo = eixo.upper()
+        if "Z" in eixo:
+            registrar_log("Z nao e eixo cartesiano; zeramento GRBL limitado a XY.", "aviso")
+            eixo = eixo.replace("Z", "")
         partes = []
         if "X" in eixo:
             partes.append(f"X{float(valor_x):.3f}")
@@ -910,18 +923,19 @@ class ControladorGRBL:
         if "Z" in eixo:
             partes.append(f"Z{float(valor_z):.3f}")
         coords = " ".join(partes) if partes else "X0 Y0"
-        self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
-        self.enviar_comando(f"G92 {coords}", logar=False)
+        ok1, _ = self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
+        ok2, _ = self.enviar_comando(f"G92 {coords}", logar=False)
         self.atualizar_status()
-        registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
-        return True
+        if ok1 and ok2:
+            registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
+        return bool(ok1 and ok2)
 
     def executar_homing(self):
         registrar_log("Executando ciclo de Homing físico ($H)...", "info")
         ok, msg = self.enviar_comando("$H", timeout=45.0, logar=False)
         if ok:
             self.aguardar_grbl_idle(timeout=45.0)
-            self.zerar_eixo("XYZ")
+            self.zerar_eixo("XY")
             registrar_log("Homing ($H) concluido e origem (0,0,0) calibrada!", "ok")
         else:
             registrar_log(f"Falha no Homing ($H): {msg}", "erro")

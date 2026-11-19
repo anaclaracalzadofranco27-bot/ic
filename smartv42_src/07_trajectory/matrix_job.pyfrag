@@ -102,6 +102,22 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
 
 _job_lock = threading.Lock()
 _job_em_execucao = False
+_operacao_manual = False
+
+def reservar_operacao_manual():
+    """Bloqueia jog/reset/calibracao/testes concorrentes com jobs."""
+    global _operacao_manual
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False
+        _operacao_manual = True
+        return True
+
+def liberar_operacao_manual():
+    global _operacao_manual
+    with _job_lock:
+        _operacao_manual = False
+
 _job_pausado = False
 _job_abortar = False
 _job_progresso = {
@@ -123,8 +139,8 @@ _job_progresso = {
 def executar_job_em_background(grbl, reset_ctrl, matriz):
     global _job_em_execucao, _job_pausado, _job_abortar
     with _job_lock:
-        if _job_em_execucao:
-            registrar_log("Job ja esta em execucao.")
+        if _job_em_execucao or _operacao_manual:
+            registrar_log("Outro job ou operacao manual em andamento.")
             return False
         _job_em_execucao = True
         _job_pausado = False
@@ -210,9 +226,15 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
                     falhou = True
                     break
 
+                if not aguardar_liberacao_z():
+                    registrar_log("Z interrompido por pausa/abortamento.", "aviso")
+                    falhou = True
+                    break
                 if PAUSA_ANTES_Z_S > 0:
                     time.sleep(PAUSA_ANTES_Z_S)
-
+                if not aguardar_liberacao_z():
+                    falhou = True
+                    break
                 ok_z, info_z = acionar_eixo_z(nivel)
                 if not ok_z:
                     registrar_log(f"FALHA no Z do ponto {idx}/{total}: {info_z.get('erro')}", "erro")

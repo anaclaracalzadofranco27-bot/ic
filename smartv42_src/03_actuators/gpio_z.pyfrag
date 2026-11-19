@@ -99,7 +99,24 @@ def inicializar_gpio_z():
             "ok",
         )
     except Exception as e:
+        for rele in reles_z:
+            try:
+                rele.off()
+                rele.close()
+            except Exception:
+                pass
+        reles_z.clear()
         registrar_log(f"Falha critica ao inicializar GPIO: {e}", "erro")
+
+
+trava_gpio_z = threading.RLock()
+
+
+def aguardar_liberacao_z():
+    """Intertravamento de Z: pausa nao permite iniciar o proximo pulso."""
+    while _job_pausado and not _job_abortar and not abortar_job_evento.is_set() and sistema_ativo.is_set():
+        time.sleep(0.025)
+    return sistema_ativo.is_set() and not _job_abortar and not abortar_job_evento.is_set()
 
 
 def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_override=None):
@@ -123,6 +140,15 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
     t_on = (float(on_ms_override) / 1000.0) if on_ms_override is not None else TEMPO_ON_Z_S
     t_off = (float(off_ms_override) / 1000.0) if off_ms_override is not None else TEMPO_OFF_Z_S
 
+    if not SIMULADO:
+        grbl = globals().get("_grbl_global")
+        if grbl is None or not getattr(grbl, "conexao_real", False):
+            info["erro"] = "Bloqueado: X/Y nao estao conectados ao GRBL fisico."
+            return False, info
+        status_fisico = grbl.ler_status_grbl(timeout=0.7)
+        if not status_fisico.startswith("<Idle"):
+            info["erro"] = f"Bloqueado: GRBL nao confirmou Idle ({status_fisico})."
+            return False, info
     if not SIMULADO and (not GPIO_DISPONIVEL or len(reles_z) != len(PINOS_GPIO_Z)):
         info["erro"] = "GPIO Z indisponivel: confira reles ou use --simulado"
         return False, info
@@ -133,11 +159,17 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
         info["erro"] = "Duracao Z invalida (ON 1..2000ms; OFF 0..2000ms)"
         return False, info
     pulsos_realizados = 0
+    with trava_gpio_z:
+        return _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio)
+
+
+def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio):
+    pulsos_realizados = 0
     if not SIMULADO and reles_z and len(reles_z) >= sensor:
         pino_rele = reles_z[sensor - 1]
         try:
             for i in range(num_batidas):
-                if abortar_job_evento.is_set():
+                if not aguardar_liberacao_z():
                     break
                 pino_rele.on()
                 time.sleep(t_on)
@@ -149,7 +181,7 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
             pino_rele.off()
     else:
         for i in range(num_batidas):
-            if abortar_job_evento.is_set():
+            if not aguardar_liberacao_z():
                 break
             time.sleep(t_on)
             pulsos_realizados += 1
@@ -159,7 +191,7 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
     info["pulsos"] = pulsos_realizados
     info["tempo_ms"] = int((time.perf_counter() - t_inicio) * 1000)
     if pulsos_realizados != num_batidas:
-        info["erro"] = "Z interrompido antes do fim da sequencia de pulsos"
+        info["erro"] = "Z interrompido ou pausado antes do fim da sequencia de pulsos"
         return False, info
     return True, info
 

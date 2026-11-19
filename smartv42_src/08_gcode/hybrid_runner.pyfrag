@@ -144,8 +144,12 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
             raise RuntimeError(f"GRBL nao esta Idle; Z bloqueado ({motivo}).")
         if _job_abortar or abortar_job_evento.is_set():
             raise RuntimeError("Z interrompido pelo operador.")
+        if not aguardar_liberacao_z():
+            raise RuntimeError("Z bloqueado por pausa/abortamento.")
         if PAUSA_ANTES_Z_S > 0:
             time.sleep(PAUSA_ANTES_Z_S)
+        if not aguardar_liberacao_z():
+            raise RuntimeError("Z bloqueado por pausa/abortamento.")
         ok, info = acionar_eixo_z(
             bloco["nivel"], pulsos_override=bloco.get("pulsos"),
             on_ms_override=bloco.get("on_ms"), off_ms_override=bloco.get("off_ms"),
@@ -165,8 +169,8 @@ def executar_job_gcode_em_background(grbl, programa):
     if not programa:
         return False
     with _job_lock:
-        if _job_em_execucao:
-            registrar_log("Ja existe um job em execucao.", "erro")
+        if _job_em_execucao or _operacao_manual:
+            registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
             return False
         _job_em_execucao = True
         _job_pausado = False
