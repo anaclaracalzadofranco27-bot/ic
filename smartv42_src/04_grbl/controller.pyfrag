@@ -806,6 +806,10 @@ class ControladorGRBL:
         timeout = TIMEOUT_IDLE_GRBL if timeout is None else timeout
         limite = time.perf_counter() + timeout
         while sistema_ativo.is_set() and not abortar_job_evento.is_set():
+            if _job_pausado and _job_em_execucao:
+                time.sleep(0.05)
+                limite += 0.05
+                continue
             if time.perf_counter() > limite:
                 registrar_log(f"TIMEOUT ({timeout:.0f}s) esperando GRBL ficar Idle.", "erro")
                 return False, "GRBL nao ficou Idle"
@@ -845,6 +849,10 @@ class ControladorGRBL:
                 while respostas < 2:
                     if abortar_job_evento.is_set() or not sistema_ativo.is_set():
                         return False, "interrompido", f"Interrompido durante: {comando}"
+                    if _job_pausado and _job_em_execucao:
+                        time.sleep(0.05)
+                        limite += 0.05
+                        continue
                     if time.perf_counter() > limite:
                         if respostas == 0:
                             return (
@@ -1219,16 +1227,16 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         if _job_em_execucao:
             return {"ok": False, "resposta": "Teste Z bloqueado durante job."}
         abortar_job_evento.clear()
-        threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
-        return {"ok": True, "resposta": "Teste sequencial dos 8 reles iniciado."}
+        ok_teste = testar_reles_um_a_um()
+        return {"ok": bool(ok_teste), "resposta": "Teste dos 8 reles concluido." if ok_teste else "Teste Z bloqueado/interrompido."}
 
     if up == "SEQ_Z":
         registrar_terminal("TX", ">>> SEQ_Z", "cmd")
         if _job_em_execucao:
             return {"ok": False, "resposta": "Sequencia Z bloqueada durante job."}
         abortar_job_evento.clear()
-        threading.Thread(target=acionar_sequencia_cabecote, args=(NIVEIS_MAX,), daemon=True).start()
-        return {"ok": True, "resposta": f"Sequencia {PINOS_GPIO_Z} iniciada."}
+        ok_seq = acionar_sequencia_cabecote(ate_nivel=NIVEIS_MAX)
+        return {"ok": bool(ok_seq), "resposta": f"Sequencia {PINOS_GPIO_Z} concluida." if ok_seq else "Sequencia Z interrompida."}
 
     if up.startswith(("MS=", "ON_MS=")):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
