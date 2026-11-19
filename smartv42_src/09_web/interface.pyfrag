@@ -674,7 +674,8 @@ async function inverterMotorXGrbl() {
 async function conectarPortas() {
   const pGrbl = document.getElementById('sel-porta-grbl').value;
   const pReset = document.getElementById('sel-porta-reset').value;
-  await apiPost('conectar_portas', { porta_grbl: pGrbl, porta_reset: pReset });
+  const resp = await apiPost('conectar_portas', { porta_grbl: pGrbl, porta_reset: pReset });
+  if (!resp.ok) alert('Falha ao conectar: GRBL=' + resp.grbl + ', reset=' + resp.reset);
   atualizarStatus();
 }
 
@@ -686,12 +687,14 @@ function obterPassoJog() {
 async function jog(dxSign, dySign) {
   const passo = obterPassoJog();
   const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
-  await apiPost('jog', { dx: dxSign * passo, dy: dySign * passo, feed });
+  const resp = await apiPost('jog', { dx: dxSign * passo, dy: dySign * passo, feed });
+  if (!resp.ok) alert(resp.erro || 'Jog bloqueado; confira estado GRBL e logs.');
   atualizarStatus();
 }
 
 async function acaoUGS(tipo) {
-  await apiPost('ugs_cmd', { cmd: tipo });
+  const resp = await apiPost('ugs_cmd', { cmd: tipo });
+  if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
   atualizarStatus();
 }
 
@@ -735,12 +738,14 @@ async function iniciarJob() {
 }
 
 async function executarResetCompleto() {
-  await apiPost('reset_mecanico', { subcmd: 'completo' });
+  const resp = await apiPost('reset_mecanico', { subcmd: 'completo' });
+  if (!resp.ok) { alert(resp.erro || 'Reset nao confirmado pelo Arduino.'); return; }
   await carregarEstadoInicial();
 }
 
 async function acaoReset(subcmd) {
-  await apiPost('reset_mecanico', { subcmd });
+  const resp = await apiPost('reset_mecanico', { subcmd });
+  if (!resp.ok) alert(resp.erro || 'Comando de reset nao confirmado.');
 }
 
 async function carregarPadrao(padrao) {
@@ -793,6 +798,7 @@ async function enviarCmdTerminal() {
   if (!cmd) return;
   inp.value = '';
   const r = await apiPost('terminal_cmd', { cmd });
+  if (!r.ok) alert(r.erro || r.resp || 'Erro no terminal integrado.');
   if (r.historico) {
     const box = document.getElementById('term-historico');
     box.textContent = r.historico.slice().reverse().map(h => `[${h.hora}] (${h.dir}) ${h.msg}`).join('\n');

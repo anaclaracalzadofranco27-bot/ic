@@ -414,7 +414,6 @@ class ControladorGRBL:
         self.porta_atual = PORTA_GRBL
         self.conexao_real = False
         self.modo_simulacao = False
-        self.em_execucao_job = False
         self.config_eeprom = {}
         self.offsets_wcs = {}
         self.estado_parser = "G0 G54 G17 G21 G90 G94"
@@ -503,29 +502,6 @@ class ControladorGRBL:
             if "fim de curso" in motivo:
                 registrar_log(DICA_FIM_DE_CURSO, "aviso")
         return bool(pronto and status_grbl.startswith("<Idle"))
-
-    def recuperar_usb_grbl(self, pos_atual=None):
-        registrar_log("[AUTO-RECUPERACAO USB] Reconectando porta serial do GRBL apos interferencia...", "aviso")
-        with self.lock:
-            try:
-                if self.ser:
-                    self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
-        time.sleep(1.0)
-        self.conectar(PORTA_GRBL, BAUD)
-        if self.porta_atual != "SIMULADO":
-            self.enviar_comando("$X", logar=False)
-            self.enviar_comando("G21 G90", logar=False)
-            if pos_atual is not None:
-                px, py = pos_atual
-                self.enviar_comando(f"G10 P0 L20 X{px:.3f} Y{py:.3f}", logar=False)
-                self.enviar_comando(f"G92 X{px:.3f} Y{py:.3f}", logar=False)
-                self.wpos[0], self.wpos[1] = px, py
-                registrar_log(f"[AUTO-RECUPERACAO USB] Reconectado em {self.porta_atual} e posicao ({px:.2f}, {py:.2f}) restaurada!", "ok")
-            return True
-        return False
 
     def _ler_linha_nolock(self, limite):
         pedaco = b""
@@ -705,6 +681,9 @@ class ControladorGRBL:
         cmd_limpo = comando.strip()
         if not cmd_limpo:
             return True, ""
+        # Todas as entradas GRBL (inclusive terminal e jog) obedecem a separacao do Z GPIO.
+        if re.search(r"Z\s*[+-]?(?:\d|\.)", cmd_limpo.upper()):
+            return False, "GRBL bloqueou coordenada cartesiana Z; use comandos discretos Z1..Z8."
 
         timeout = TIMEOUT_OK_GRBL if timeout is None else timeout
         if registrar_no_terminal:
@@ -829,10 +808,13 @@ class ControladorGRBL:
             return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
         if fora_dos_limites(x_mm, y_mm):
             return (
-                False,
-                "alvo fora dos limites",
-                f"Alvo X={x_mm:.3f} Y={y_mm:.3f} fora da caixa calibrada (A,B,C,D +-30 mm). Movimento NAO enviado.",
+                False, "alvo fora dos limites",
+                f"Alvo X={x_mm:.3f} Y={y_mm:.3f} fora dos quatro cantos calibrados. Movimento nao enviado.",
             )
+        status_antes = self.ler_status_grbl(timeout=0.7)
+        pronto, motivo = avaliar_status_para_mover(status_antes)
+        if not pronto:
+            return False, "GRBL nao pronto", motivo
         vel = FEED_RATE if feed is None else feed
         if timeout is None:
             dist = math.hypot(x_mm - self.wpos[0], y_mm - self.wpos[1])
