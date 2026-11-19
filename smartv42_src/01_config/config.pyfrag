@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# GERADO AUTOMATICAMENTE: edite apenas smartv42_src/ e rode tools/build_smartv42.py.
+# NAO EDITE smartv42.py DIRETAMENTE: GitHub Actions reconstruira o arquivo.
+"""
+SMART MATRIX STUDIO v1.8 — EDIÇÃO COMPLETA UGS + SMARTV13 (EESC-USP)
+Plataforma CNC Tátil, IA Embarcada, Calibração de Home, Console UGS & Reset Mecânico
+  1. Eixos X/Y: Placa CNC GRBL 1.1 em /dev/ttyACM0 (G1 + G4 P0 + confirmação Idle + proteção Pn:XY + JOG $J=)
+  2. Eixo Z (Atuador de Pinos): 8 Relés via GPIO da Raspberry Pi 5 na sequência oficial da bancada:
+     PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
+     Com duração de pulso (ms) e quantidade de pulsos por nível (Z1..Z8 / NUM_PULSOS_Z) 100% configuráveis pelo usuário.
+  3. Sincronização de Origem Física (0,0 na Extremidade Direita ou Esquerda) + Inversão de Eixos ($3) e Coordenadas:
+     - Suporta ORIGEM_X_NA_DIREITA (quando o ponto 0,0 físico fica na extremidade direita e a mesa avança para a esquerda)
+     - Suporta inverter o sentido físico do Jog X/Y na interface e espelhar a matriz para não desenhar invertido.
+  4. Comandos Completos do UGS (Universal Gcode Sender) + Calibração de Home ($H, Home Manual G10/G92,
+     G28/G28.1, G30/G30.1, WCS G54-G59, Check Mode $C, Sleep $SLP, Overrides em Tempo Real e EEPROM $$)
+  5. Terminal Serial Interativo Embutido (Web + CLI) para envio de comandos G-Code, GRBL e calibração de pinos/pulsos.
+"""
+
+import argparse
+import base64
+import csv
+import http.server
+import io
+import json
+import math
+import os
+import queue
+import re
+import socket
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from collections import deque
+from datetime import datetime
+
+import numpy as np
+try:
+    import psutil
+except ImportError:
+    psutil = None
+from PIL import Image
+
+try:
+    import serial
+    import serial.tools.list_ports
+except ImportError:
+    serial = None
+
+try:
+    from gpiozero import OutputDevice
+    GPIO_DISPONIVEL = True
+except ImportError:
+    GPIO_DISPONIVEL = False
+
+# =============================================================================
+# CONFIGURAÇÕES E CONSTANTES GLOBAIS (SINCRONIZADAS COM A FOTO / SMARTV13)
+# =============================================================================
+PORTA_GRBL = os.environ.get("SMART_MATRIX_PORTA_GRBL", "/dev/ttyACM0")
+PORTA_ARDUINO_RESET = os.environ.get("SMART_MATRIX_PORTA_RESET", "SIMULADO")
+BAUD = 115200
+FEED_RATE = 900.0
+JOG_FEED_RATE = 900.0
+NOME_MODELO = "deeplabv3plus_int8.onnx"
+LIMIAR_IA_PADRAO = 0.42
+
+ESPACAMENTO_PINO_MM = 3.0
+TAMANHO_MATRIZ = (100, 100)
+LIMITE_X_MM = 297.0
+LIMITE_Y_MM = 297.0
+
+# -----------------------------------------------------------------------------
+# SINCRONIZAÇÃO DO SISTEMA DE COORDENADAS COM A BANCADA FÍSICA:
+# Se na sua matriz física o ponto (0,0) inicial fica na EXTREMIDADE DIREITA:
+#   - MODO_COORD_X = "zero_direita_negativo": O cabeçote começa na extrema direita como X=0.0
+#     e se desloca para a esquerda usando coordenadas X negativas (ou positivas se $3 inverter o motor).
+#   - ESPELHAR_MATRIZ_X = True: Espelha horizontalmente os índices X da matriz (99 - x) para que a imagem
+#     não saia espelhada quando o cabeçote começa pela extremidade direita.
+#   - SINAL_EIXO_X = 1 (ou -1): Multiplica as coordenadas X enviadas ao GRBL (use -1 se para ir da direita
+#     para a esquerda no seu GRBL for necessário enviar X negativo, ou +1 se X+ já move para a esquerda).
+#   - INVERTER_JOG_X = False: Se True, inverte os botões "← X-" e "→ X+" na interface para bater com a visão frontal.
+# -----------------------------------------------------------------------------
+ORIGEM_X_NA_DIREITA = False
+SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
+SINAL_EIXO_Y = -1.0         # -1.0 = eixo Y invertido com valores negativos (0 a -297)
+INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
+INVERTER_JOG_Y = True       # True = inverte os botões ↑ Y+ / ↓ Y- para acompanhar Y negativo
+
+# =============================================================================
+# CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (Y INVERTIDO NEGATIVO)
+# Plano com eixo X positivo (0..297) e eixo Y invertido negativo (0..-297):
+#   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
+#   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
+#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = -297.000
+#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = -297.000
+# =============================================================================
+ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
+USAR_CALIBRACAO_4_PONTOS = True
+
+PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
+PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
+PONTO_C = [297.000, -297.000]   # Topo-Direita da matriz  (col 99, lin 0)
+PONTO_D = [0.000, -297.000]     # Topo-Esquerda da matriz (col 0,  lin 0)
+
+X_INICIO_FISICO = 0.000
+Y_INICIO_FISICO = 0.000
+X_FIM_FISICO = 297.000
+Y_FIM_FISICO = -297.000
+
+# =============================================================================
+# JANELA DE DELIMITAÇÃO DE PLOTAGEM DA IMAGEM (mm — COM EIXO Y NEGATIVO)
+# A imagem inteira é delimitada e plotada EXCLUSIVAMENTE nesta região:
+#   - Eixo X: 246.0 <= X <= 270.0 (largura = 24.0 mm)
+#   - Eixo Y: -50.0 <= Y <= -29.0 (29 <= |Y| <= 50, altura = 21.0 mm)
+# =============================================================================
+USAR_JANELA_PLOTAGEM = True
+PLOT_X_MIN = 246.0
+PLOT_X_MAX = 270.0
+PLOT_Y_MIN = -50.0   # Topo da imagem (|Y| = 50 mm)
+PLOT_Y_MAX = -29.0   # Base da imagem (|Y| = 29 mm)
+
+TIMEOUT_OK_GRBL = 5.0
+TIMEOUT_IDLE_GRBL = 10.0
+FATOR_TIMEOUT_MOV = 1.5
+MARGEM_TIMEOUT_MOV_S = 5.0
+MAX_FALHAS_CONSECUTIVAS = 5
+PAUSA_APOS_Z_S = 0.015  # 15 ms de filtragem anti-ruído EMI após desligar relé Z
+
+# Tempos de pulso em segundos (padrão 10 ms = 0.01 s, configuráveis pelo usuário em ms)
+PAUSA_ANTES_Z_S = 0.01
+TEMPO_ON_Z_S = 0.01
+TEMPO_OFF_Z_S = 0.01
+
+# Quantidade padrão de pulsos (configurável via terminal e interface, conforme foto)
+NUM_PULSOS_Z = 7
+PULSOS_POR_NIVEL = [1, 2, 3, 4, 5, 6, 7, 8]
+USAR_PULSOS_FIXOS = False
+
+CONFIRMAR_IDLE = True
+INTERVALO_POLL_IDLE_S = 0.02
+
+TIMEOUT_LEITURA_SERIAL_S = 0.05
+TIMEOUT_BOOT_GRBL_S = 3.0
+TIMEOUT_CICLO_RESET_S = 60.0
+
+VOLTAR_ORIGEM = True
+IGNORAR_FIM_DE_CURSO = True
+AUTO_RESET_APOS_PLOT = False
+TEMPO_EXPOSICAO_ANTES_RESET_S = 10.0
+
+RELE_ATIVO_ALTO = False
+NIVEIS_MAX = 8
+MODO_PROFUNDIDADE = "distancia"
+SIMULADO = False
+MOSTRAR_GRAFICO = True
+MODO_ENTRADA = "teste"
+
+# Sequência EXATA dos pinos GPIO do cabeçote conforme a foto enviada:
+PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
+reles_z = []
+
+fila_de_movimentos = queue.Queue()
+sistema_ativo = threading.Event()
+sistema_ativo.set()
+pausado_evento = threading.Event()
+abortar_job_evento = threading.Event()
+
+_sessao_onnx = None
+_input_name_onnx = None
+_input_hw_onnx = (513, 513)
+_processo_atual = psutil.Process(os.getpid()) if psutil else None
+
+RE_POSICAO_GRBL = re.compile(r"[WM]Pos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*)")
+RE_MPOS = re.compile(r"MPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
+RE_WPOS = re.compile(r"WPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
+RE_WCO = re.compile(r"WCO:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
+RE_PINOS_GRBL = re.compile(r"Pn:([A-Za-z]+)")
+RE_FS_GRBL = re.compile(r"FS:\s*(\d+\.?\d*),(\d+\.?\d*)")
+RE_OV_GRBL = re.compile(r"Ov:\s*(\d+),(\d+),(\d+)")
+
+ALARMES_GRBL = {
+    "1": "fim de curso (hard limit) acionado",
+    "2": "alvo fora do curso da maquina (soft limit)",
+    "3": "reset com a maquina andando (posicao pode ter se perdido)",
+    "4": "falha de probe (estado inicial)",
+    "5": "falha de probe (nao encostou)",
+    "6": "homing falhou: reset durante o homing",
+    "7": "homing falhou: porta de seguranca aberta",
+    "8": "homing falhou: nao conseguiu soltar o fim de curso",
+    "9": "homing falhou: nao achou o fim de curso",
+}
+
+ERROS_GRBL = {
+    "1": "G-code esperado tem letra invalida",
+    "2": "Formato numerico invalido",
+    "3": "Comando de sistema '$' nao reconhecido",
+    "4": "Valor negativo nao permitido",
+    "5": "Ciclo de Homing ($H) nao esta habilitado no GRBL ($22=0)",
+    "6": "Pulso de passo minimo deve ser > 3us",
+    "7": "Falha ao ler EEPROM — usando padroes",
+    "8": "Comando '$' so pode ser usado quando GRBL esta IDLE",
+    "9": "G-code bloqueado durante alarme ou jog",
+    "10": "Soft limits ($20) exigem Homing ($22=1) habilitado",
+    "11": "Maximo de caracteres por linha excedido",
+    "12": "Taxa de passo maxima excedida",
+    "13": "Porta de seguranca aberta",
+    "14": "Comprimento da linha de inicializacao excedido",
+    "15": "Alvo do Jog excede o curso da maquina",
+    "16": "Comando de Jog invalido (sem '=' ou G-code proibido)",
+    "20": "Comando G-code nao suportado",
+    "21": "Mais de um comando do mesmo grupo modal na linha",
+    "22": "Feed rate ainda nao definido",
+}
+
+DICA_FIM_DE_CURSO = (
+    "Dica: com a fonte dos motores desligada, empurre o carro pra longe do fim de curso, "
+    "ate o canto da origem (0,0), e reinicie a placa do GRBL pra ela zerar ali. Se o Pn: "
+    "continuar aparecendo com o carro longe da chave, confira a fiacao e o $5 "
+    "(inversao dos fins de curso)."
+)
+
+ESTADO_ESTUDIO = {
+    "matriz": [],
+    "pontos": [],
+    "linhas_gcode": [],
+    "resumo": {
+        "modo_operacao": "Domo Gaussiano 3D",
+        "pontos_ativos": 2453,
+        "total_grade": 10000,
+        "reducao_pinos_pct": 75.5,
+        "linhas_gcode_total": 7366,
+        "tempo_inferencia_ms": 9.0,
+        "tempo_geracao_gcode_ms": 14.2,
+        "tempo_total_estimado_s": 540.0,
+        "distancia_total_mm": 12450.0,
+        "arquivo_gcode": "trajetoria_smart_matrix.gcode",
+    },
+    "progresso_idx": 0,
+    "z_atual": 0,
+    "em_reset": False,
+    "etapa_reset": 0,
+    "logs": deque(maxlen=100),
+    "terminal": deque(maxlen=250),
+}
+
+
+def salvar_calibracao_matriz():
+    dados = {
+        "usar_calibracao_4_pontos": USAR_CALIBRACAO_4_PONTOS,
+        "ponto_a": PONTO_A,
+        "ponto_b": PONTO_B,
+        "ponto_c": PONTO_C,
+        "ponto_d": PONTO_D,
+        "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
+        "inverter_jog_x": INVERTER_JOG_X,
+        "inverter_jog_y": INVERTER_JOG_Y,
+    }
+    try:
+        with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
+            json.dump(dados, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def carregar_calibracao_matriz():
+    global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y
+    if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
+        return False
+    try:
+        with open(ARQUIVO_CALIBRACAO_MATRIZ, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if "ponto_a" in d and len(d["ponto_a"]) == 2:
+            PONTO_A = [float(d["ponto_a"][0]), float(d["ponto_a"][1])]
+        if "ponto_b" in d and len(d["ponto_b"]) == 2:
+            PONTO_B = [float(d["ponto_b"][0]), float(d["ponto_b"][1])]
+        if "ponto_c" in d and len(d["ponto_c"]) == 2:
+            PONTO_C = [float(d["ponto_c"][0]), float(d["ponto_c"][1])]
+        if "ponto_d" in d and len(d["ponto_d"]) == 2:
+            PONTO_D = [float(d["ponto_d"][0]), float(d["ponto_d"][1])]
+        USAR_CALIBRACAO_4_PONTOS = bool(d.get("usar_calibracao_4_pontos", True))
+        ORIGEM_X_NA_DIREITA = bool(d.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
+        INVERTER_JOG_X = bool(d.get("inverter_jog_x", INVERTER_JOG_X))
+        INVERTER_JOG_Y = bool(d.get("inverter_jog_y", INVERTER_JOG_Y))
+        return True
+    except Exception:
+        return False
+
+
+def indice_para_mm_fisico(x_idx, y_idx):
+    """
+    Converte o pino (x_idx=coluna [0..99], y_idx=linha [0..99]) do grafico para a coordenada
+    (X_GRBL, Y_GRBL) com eixo Y invertido negativo.
+    Se USAR_JANELA_PLOTAGEM=True, delimita a imagem EXCLUSIVAMENTE em:
+      -  246.0 <= X <= 270.0
+      -  -50.0 <= Y <= -29.0  (lin=0 topo -> Y=-50.0, lin=99 base -> Y=-29.0)
+    Caso contrario, usa a interpolacao bilinear completa dos 4 cantos (PONTO_A..D).
+    """
+    cols = TAMANHO_MATRIZ[1]
+    rows = TAMANHO_MATRIZ[0]
+    u = max(0.0, min(1.0, float(x_idx) / float(max(1, cols - 1))))  # 0.0 (Esquerda) -> 1.0 (Direita)
+    v = max(0.0, min(1.0, float(y_idx) / float(max(1, rows - 1))))  # 0.0 (Topo)     -> 1.0 (Base)
+
+    if USAR_JANELA_PLOTAGEM:
+        x_min, x_max = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
+        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
+        # Com Y negativo (SINAL_EIXO_Y < 0): topo (lin=0) fica em y_lo (-50.0) e base (lin=99) em y_hi (-29.0)
+        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
+        x_grbl = x_min + u * (x_max - x_min)
+        y_grbl = y_topo + v * (y_base - y_topo)
+        x_grbl = max(x_min, min(x_max, x_grbl))
+        y_grbl = max(y_lo, min(y_hi, y_grbl))
+        return float(x_grbl), float(y_grbl)
+
+    xa, ya = float(PONTO_A[0]), float(PONTO_A[1])
+    xb, yb = float(PONTO_B[0]), float(PONTO_B[1])
+    xc, yc = float(PONTO_C[0]), float(PONTO_C[1])
+    xd, yd = float(PONTO_D[0]), float(PONTO_D[1])
+
+    x_grbl = (1.0 - u) * (1.0 - v) * xd + u * (1.0 - v) * xc + (1.0 - u) * v * xa + u * v * xb
+    y_grbl = (1.0 - u) * (1.0 - v) * yd + u * (1.0 - v) * yc + (1.0 - u) * v * ya + u * v * yb
+    return float(x_grbl), float(y_grbl)
+
+
+def mm_fisico_para_indice(x_grbl, y_grbl):
+    """Converte a posicao atual (X_GRBL, Y_GRBL) para (x_idx, y_idx) [0..99] na tela."""
+    cols = TAMANHO_MATRIZ[1]
+    rows = TAMANHO_MATRIZ[0]
+    if USAR_JANELA_PLOTAGEM:
+        x_esq, x_dir = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
+        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
+        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
+    else:
+        x_esq = 0.5 * (PONTO_A[0] + PONTO_D[0])
+        x_dir = 0.5 * (PONTO_B[0] + PONTO_C[0])
+        y_topo = 0.5 * (PONTO_D[1] + PONTO_C[1])
+        y_base = 0.5 * (PONTO_A[1] + PONTO_B[1])
+
+    u = ((float(x_grbl) - x_esq) / (x_dir - x_esq)) if abs(x_dir - x_esq) > 1e-6 else 0.0
+    v = ((float(y_grbl) - y_topo) / (y_base - y_topo)) if abs(y_base - y_topo) > 1e-6 else 0.0
+    u = max(0.0, min(1.0, u))
+    v = max(0.0, min(1.0, v))
+    return int(round(u * (cols - 1))), int(round(v * (rows - 1)))
+
+
+def obter_estado_coordenadas():
+    x_meio, y_meio = indice_para_mm_fisico(49.5, 49.5)
+    curso_x = abs(0.5 * (PONTO_B[0] + PONTO_C[0]) - 0.5 * (PONTO_A[0] + PONTO_D[0]))
+    curso_y = abs(0.5 * (PONTO_D[1] + PONTO_C[1]) - 0.5 * (PONTO_A[1] + PONTO_B[1]))
+    return {
+        "usar_calibracao_4_pontos": USAR_CALIBRACAO_4_PONTOS,
+        "ponto_a": [round(float(PONTO_A[0]), 3), round(float(PONTO_A[1]), 3)],
+        "ponto_b": [round(float(PONTO_B[0]), 3), round(float(PONTO_B[1]), 3)],
+        "ponto_c": [round(float(PONTO_C[0]), 3), round(float(PONTO_C[1]), 3)],
+        "ponto_d": [round(float(PONTO_D[0]), 3), round(float(PONTO_D[1]), 3)],
+        "x_meio_fisico": round(float(x_meio), 3),
+        "y_meio_fisico": round(float(y_meio), 3),
+        "curso_x_grbl": round(float(curso_x), 3),
+        "curso_y_grbl": round(float(curso_y), 3),
+        "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
+        "sinal_eixo_x": SINAL_EIXO_X,
+        "sinal_eixo_y": SINAL_EIXO_Y,
+        "inverter_jog_x": INVERTER_JOG_X,
+        "inverter_jog_y": INVERTER_JOG_Y,
+        "x_inicio_fisico": round(float(PONTO_A[0]), 3),
+        "y_inicio_fisico": round(float(PONTO_A[1]), 3),
+        "x_fim_fisico": round(float(PONTO_C[0]), 3),
+        "y_fim_fisico": round(float(PONTO_C[1]), 3),
+        "limite_x_mm": LIMITE_X_MM,
+        "limite_y_mm": LIMITE_Y_MM,
+        "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
+        "plot_x_min": PLOT_X_MIN,
+        "plot_x_max": PLOT_X_MAX,
+        "plot_y_min": PLOT_Y_MIN,
+        "plot_y_max": PLOT_Y_MAX,
+        "avisos": validar_cantos(),
+    }
+
+

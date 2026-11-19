@@ -1,0 +1,303 @@
+# =============================================================================
+# 1. CONTROLE DO EIXO Z (SEQUÊNCIA EXATA DA FOTO + PULSOS/MS CONFIGURÁVEIS)
+# =============================================================================
+def obter_pulsos_para_nivel(nivel_z):
+    """Retorna a quantidade de pulsos configurada pelo usuário para o nível (1 a 8)."""
+    idx = max(0, min(NIVEIS_MAX - 1, int(nivel_z) - 1))
+    if USAR_PULSOS_FIXOS:
+        return max(1, int(NUM_PULSOS_Z))
+    if idx < len(PULSOS_POR_NIVEL):
+        return max(1, int(PULSOS_POR_NIVEL[idx]))
+    return max(1, int(NUM_PULSOS_Z))
+
+
+def configurar_parametros_pulsos_z(
+    on_ms=None,
+    off_ms=None,
+    pausa_ms=None,
+    num_pulsos_fixo=None,
+    pulsos_por_nivel=None,
+    usar_fixo=None,
+    pinos_gpio=None,
+):
+    global TEMPO_ON_Z_S, TEMPO_OFF_Z_S, PAUSA_ANTES_Z_S, NUM_PULSOS_Z, PULSOS_POR_NIVEL, USAR_PULSOS_FIXOS, PINOS_GPIO_Z
+
+    if on_ms is not None and float(on_ms) > 0:
+        TEMPO_ON_Z_S = float(on_ms) / 1000.0
+    if off_ms is not None and float(off_ms) >= 0:
+        TEMPO_OFF_Z_S = float(off_ms) / 1000.0
+    if pausa_ms is not None and float(pausa_ms) >= 0:
+        PAUSA_ANTES_Z_S = float(pausa_ms) / 1000.0
+    if num_pulsos_fixo is not None and int(num_pulsos_fixo) >= 1:
+        NUM_PULSOS_Z = int(num_pulsos_fixo)
+    if usar_fixo is not None:
+        USAR_PULSOS_FIXOS = bool(usar_fixo)
+
+    if pulsos_por_nivel is not None:
+        if isinstance(pulsos_por_nivel, str):
+            partes = [int(x.strip()) for x in pulsos_por_nivel.split(",") if x.strip()]
+        else:
+            partes = [int(x) for x in pulsos_por_nivel]
+        if len(partes) == 1:
+            NUM_PULSOS_Z = max(1, partes[0])
+            PULSOS_POR_NIVEL = [NUM_PULSOS_Z] * NIVEIS_MAX
+        elif len(partes) >= NIVEIS_MAX:
+            PULSOS_POR_NIVEL = [max(1, p) for p in partes[:NIVEIS_MAX]]
+
+    if pinos_gpio is not None:
+        if isinstance(pinos_gpio, str):
+            novos_pinos = [int(x.strip()) for x in pinos_gpio.split(",") if x.strip()]
+        else:
+            novos_pinos = [int(x) for x in pinos_gpio]
+        if len(novos_pinos) == NIVEIS_MAX and novos_pinos != PINOS_GPIO_Z:
+            PINOS_GPIO_Z = novos_pinos
+            inicializar_gpio_z()
+
+    resumo_niveis = ", ".join(f"Z{i+1}={obter_pulsos_para_nivel(i+1)}p(GPIO{PINOS_GPIO_Z[i]})" for i in range(NIVEIS_MAX))
+    msg = (
+        f"Pulsos Z configurados: ON={TEMPO_ON_Z_S*1000:.1f}ms | OFF={TEMPO_OFF_Z_S*1000:.1f}ms | "
+        f"Pausa={PAUSA_ANTES_Z_S*1000:.1f}ms | [{resumo_niveis}]"
+    )
+    registrar_log(msg, "ok")
+    registrar_terminal("SYS", msg, "ok")
+    return obter_estado_config_z()
+
+
+def obter_estado_config_z():
+    return {
+        "pinos_gpio_z": list(PINOS_GPIO_Z),
+        "z_on_ms": round(TEMPO_ON_Z_S * 1000.0, 2),
+        "z_off_ms": round(TEMPO_OFF_Z_S * 1000.0, 2),
+        "pausa_z_ms": round(PAUSA_ANTES_Z_S * 1000.0, 2),
+        "num_pulsos_z": NUM_PULSOS_Z,
+        "usar_pulsos_fixos": USAR_PULSOS_FIXOS,
+        "pulsos_por_nivel": [obter_pulsos_para_nivel(i + 1) for i in range(NIVEIS_MAX)],
+        "pulsos_tabela_custom": list(PULSOS_POR_NIVEL),
+    }
+
+
+def inicializar_gpio_z():
+    global reles_z
+    if SIMULADO or not GPIO_DISPONIVEL:
+        registrar_log(
+            f"Aviso: GPIO em modo simulado ou biblioteca ausente. Sequencia ativa: {PINOS_GPIO_Z}",
+            "info",
+        )
+        return
+    try:
+        for r in reles_z:
+            try:
+                r.close()
+            except Exception:
+                pass
+        reles_z.clear()
+        for pino in PINOS_GPIO_Z:
+            reles_z.append(OutputDevice(pino, active_high=RELE_ATIVO_ALTO, initial_value=False))
+        repouso = "0 V (modulo ativo em nivel ALTO)" if RELE_ATIVO_ALTO else "3,3 V (modulo ativo em nivel BAIXO)"
+        registrar_log(
+            f"GPIOs do Eixo Z inicializados na sequencia {PINOS_GPIO_Z}: reles DESLIGADOS, pinos em {repouso}.",
+            "ok",
+        )
+    except Exception as e:
+        registrar_log(f"Falha critica ao inicializar GPIO: {e}", "erro")
+
+
+def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_override=None):
+    info = {"pulsos": 0, "tempo_ms": 0, "pino_gpio": None, "erro": ""}
+    try:
+        sensor = int(nivel_z)
+    except (TypeError, ValueError):
+        info["erro"] = f"nivel invalido: {nivel_z}"
+        return False, info
+
+    if not (1 <= sensor <= NIVEIS_MAX):
+        info["erro"] = f"nivel fora de 1-{NIVEIS_MAX}: {sensor}"
+        return False, info
+
+    t_inicio = time.perf_counter()
+    ESTADO_ESTUDIO["z_atual"] = sensor
+    pino_gpio_alvo = PINOS_GPIO_Z[sensor - 1]
+    info["pino_gpio"] = pino_gpio_alvo
+
+    num_batidas = int(pulsos_override) if pulsos_override is not None else obter_pulsos_para_nivel(sensor)
+    t_on = (float(on_ms_override) / 1000.0) if on_ms_override is not None else TEMPO_ON_Z_S
+    t_off = (float(off_ms_override) / 1000.0) if off_ms_override is not None else TEMPO_OFF_Z_S
+
+    if not SIMULADO and (not GPIO_DISPONIVEL or len(reles_z) != len(PINOS_GPIO_Z)):
+        info["erro"] = "GPIO Z indisponivel: confira reles ou use --simulado"
+        return False, info
+    if not (1 <= num_batidas <= 500):
+        info["erro"] = "Pulsos Z fora do intervalo 1..500"
+        return False, info
+    if not (0.001 <= t_on <= 2.0 and 0 <= t_off <= 2.0):
+        info["erro"] = "Duracao Z invalida (ON 1..2000ms; OFF 0..2000ms)"
+        return False, info
+    pulsos_realizados = 0
+    if not SIMULADO and reles_z and len(reles_z) >= sensor:
+        pino_rele = reles_z[sensor - 1]
+        try:
+            for i in range(num_batidas):
+                if abortar_job_evento.is_set():
+                    break
+                pino_rele.on()
+                time.sleep(t_on)
+                pino_rele.off()
+                pulsos_realizados += 1
+                if i < num_batidas - 1:
+                    time.sleep(t_off)
+        finally:
+            pino_rele.off()
+    else:
+        for i in range(num_batidas):
+            if abortar_job_evento.is_set():
+                break
+            time.sleep(t_on)
+            pulsos_realizados += 1
+            if i < num_batidas - 1:
+                time.sleep(t_off)
+
+    info["pulsos"] = pulsos_realizados
+    info["tempo_ms"] = int((time.perf_counter() - t_inicio) * 1000)
+    if pulsos_realizados != num_batidas:
+        info["erro"] = "Z interrompido antes do fim da sequencia de pulsos"
+        return False, info
+    return True, info
+
+
+def acionar_sequencia_cabecote(ate_nivel=8, pulsos_por_pino=None, on_ms=None, off_ms=None):
+    ate_nivel = max(1, min(NIVEIS_MAX, int(ate_nivel)))
+    registrar_log(
+        f"[SEQUENCIA CABECOTE] Acionando pinos na ordem {PINOS_GPIO_Z[:ate_nivel]} "
+        f"(ON={(on_ms if on_ms is not None else TEMPO_ON_Z_S*1000):.1f}ms)...",
+        "info",
+    )
+    total_pulsos = 0
+    t0 = time.perf_counter()
+    for nv in range(1, ate_nivel + 1):
+        if abortar_job_evento.is_set():
+            break
+        ok, info = acionar_eixo_z(nv, pulsos_override=pulsos_por_pino, on_ms_override=on_ms, off_ms_override=off_ms)
+        total_pulsos += info.get("pulsos", 0)
+        registrar_terminal(
+            "Z-SEQ",
+            f"Ordem #{nv} -> GPIO {PINOS_GPIO_Z[nv-1]} acionado ({info.get('pulsos', 0)} pulsos, {info.get('tempo_ms', 0)} ms)",
+            "ok" if ok else "erro",
+        )
+    ESTADO_ESTUDIO["z_atual"] = 0
+    dt_ms = int((time.perf_counter() - t0) * 1000)
+    registrar_log(f"[SEQUENCIA CABECOTE] Concluida ({ate_nivel} pinos, {total_pulsos} pulsos totais em {dt_ms} ms).", "ok")
+    return True
+
+
+def testar_reles_um_a_um(tempo_ligado_s=0.5):
+    if not reles_z:
+        registrar_log(
+            f"[TESTE] Sem GPIO fisico (modo simulado). Testando na ordem exata {PINOS_GPIO_Z}...",
+            "aviso",
+        )
+        for i, pino in enumerate(PINOS_GPIO_Z, start=1):
+            if abortar_job_evento.is_set():
+                break
+            ESTADO_ESTUDIO["z_atual"] = i
+            msg = f"[TESTE SIMULADO] Ordem #{i} -> GPIO {pino} (Nivel Z{i}, {obter_pulsos_para_nivel(i)} pulsos) LIGADO por {tempo_ligado_s:.1f}s"
+            registrar_log(msg, "info")
+            registrar_terminal("TESTE-Z", msg, "info")
+            time.sleep(tempo_ligado_s)
+        ESTADO_ESTUDIO["z_atual"] = 0
+        return
+    try:
+        for i, (pino, rele) in enumerate(zip(PINOS_GPIO_Z, reles_z), start=1):
+            if abortar_job_evento.is_set():
+                break
+            ESTADO_ESTUDIO["z_atual"] = i
+            msg = f"[TESTE] Ordem #{i} -> Rele {i} (GPIO {pino}) LIGADO por {tempo_ligado_s:.1f}s"
+            registrar_log(msg, "info")
+            registrar_terminal("TESTE-Z", msg, "info")
+            rele.on()
+            time.sleep(tempo_ligado_s)
+            rele.off()
+            time.sleep(0.3)
+    finally:
+        for rele in reles_z:
+            rele.off()
+        ESTADO_ESTUDIO["z_atual"] = 0
+    registrar_log("[TESTE] Fim. Sequencia verificada: [5, 6, 16, 27, 23, 17, 24, 25].", "ok")
+
+
+def perguntar_config_pulsos_interativo():
+    print("\n" + "=" * 72)
+    print("  CONFIGURAÇÃO DO CABEÇOTE Z — SEQUÊNCIA OFICIAL DOS PINOS (DA IMAGEM)")
+    print(f"  Ordem exata de ativação GPIO: {PINOS_GPIO_Z}")
+    print("=" * 72)
+    try:
+        in_on = input(f"  1) Duração do pulso LIGADO em ms [Enter = {TEMPO_ON_Z_S*1000:.1f} ms]: ").strip()
+        on_ms = float(in_on.replace(",", ".")) if in_on else TEMPO_ON_Z_S * 1000.0
+
+        in_off = input(f"  2) Intervalo DESLIGADO entre pulsos em ms [Enter = {TEMPO_OFF_Z_S*1000:.1f} ms]: ").strip()
+        off_ms = float(in_off.replace(",", ".")) if in_off else TEMPO_OFF_Z_S * 1000.0
+
+        in_pausa = input(f"  3) Pausa antes de acionar Z em ms [Enter = {PAUSA_ANTES_Z_S*1000:.1f} ms]: ").strip()
+        pausa_ms = float(in_pausa.replace(",", ".")) if in_pausa else PAUSA_ANTES_Z_S * 1000.0
+
+        atual_str = ",".join(str(obter_pulsos_para_nivel(i + 1)) for i in range(NIVEIS_MAX))
+        print("  4) Quantidade de pulsos por nível (Z1 a Z8):")
+        print("     - Digite 8 valores separados por vírgula (ex: 1,2,3,4,5,6,7,8 ou 2,4,6,8,10,12,14,16)")
+        print(f"     - Ou digite 1 único número (ex: {NUM_PULSOS_Z}) para usar esse nº de pulsos em todos os níveis")
+        in_pulsos = input(f"     Pulsos [Enter = manter {atual_str}]: ").strip()
+
+        if in_pulsos:
+            partes = [int(x.strip()) for x in in_pulsos.split(",") if x.strip()]
+            if len(partes) == 1:
+                configurar_parametros_pulsos_z(
+                    on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms,
+                    num_pulsos_fixo=partes[0], pulsos_por_nivel=[partes[0]] * NIVEIS_MAX, usar_fixo=True
+                )
+            else:
+                while len(partes) < NIVEIS_MAX:
+                    partes.append(partes[-1])
+                configurar_parametros_pulsos_z(
+                    on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms,
+                    pulsos_por_nivel=partes[:NIVEIS_MAX], usar_fixo=False
+                )
+        else:
+            configurar_parametros_pulsos_z(on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms)
+    except (EOFError, KeyboardInterrupt):
+        print("\nMantendo configuração padrão de pulsos.")
+    except Exception as e:
+        registrar_log(f"Aviso ao ler configuração interativa: {e}. Mantendo valores atuais.", "aviso")
+
+
+def modo_calibracao_eixo_z():
+    registrar_log(f"Mapeamento do Cabeçote Ativo — Ordem GPIO: {PINOS_GPIO_Z}", "info")
+    perguntar_config_pulsos_interativo()
+    while sistema_ativo.is_set():
+        try:
+            entrada = input(
+                f"\n[CALIBRACAO Z DIRETA RPI] Nivel (1-{NIVEIS_MAX}), "
+                f"'t' = testar relé por relé na ordem {PINOS_GPIO_Z}, "
+                f"'s' = acionar sequência completa 1..8, 'c' = reconfigurar ms/pulsos, ou 'sair': "
+            ).strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if entrada.lower() == "sair":
+            break
+        if entrada.lower() == "t":
+            testar_reles_um_a_um()
+            continue
+        if entrada.lower() == "s":
+            acionar_sequencia_cabecote(NIVEIS_MAX)
+            continue
+        if entrada.lower() == "c":
+            perguntar_config_pulsos_interativo()
+            continue
+        if not entrada.isdigit() or not (1 <= int(entrada) <= NIVEIS_MAX):
+            print(f"Digite um numero entre 1 e {NIVEIS_MAX}, 't', 's', 'c' ou 'sair'.")
+            continue
+
+        nv = int(entrada)
+        ok, info = acionar_eixo_z(nv)
+        detalhe = f"GPIO={info['pino_gpio']} pulsos={info['pulsos']} tempo_rpi={info['tempo_ms']}ms"
+        registrar_log(
+            f"[CALIBRACAO] Nivel {nv} -> {'OK' if ok else 'FALHOU: ' + info['erro']} | {detalhe}",
+            "ok" if ok else "erro",
+        )

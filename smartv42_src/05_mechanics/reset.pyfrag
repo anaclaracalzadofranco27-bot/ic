@@ -1,0 +1,131 @@
+# ==============================================================================
+# SECAO 3: CONTROLADOR ARDUINO DE RESET SUPERIOR (4 ATUADORES + EIXO X')
+# ==============================================================================
+
+class ControladorResetArduino:
+    """
+    Controlador Serial para o Arduino Mega 2560 responsavel pelos 4 atuadores
+    lineares do mecanismo de reset superior e pelo motor de passo do eixo X'.
+    Compativel com os comandos de firmware do portal EESC-USP:
+      - D / D1 / D2 (ciclo completo ou individual dos modulos 1 e 2)
+      - M1_01 (descer Mod 1), M1_00 (subir Mod 1), M2_01 (descer Mod 2), M2_00 (subir Mod 2)
+      - FC=NO / FC=NC (logica do fim de curso do portal)
+      - Comandos legados RESET_FULL, ACT_DOWN, ACT_UP, X_SWEEP, X_HOME
+    """
+    def __init__(self):
+        self.ser = None
+        self.porta = PORTA_ARDUINO_RESET
+        self.simulado = True
+        self.estado_atuadores = "RECUADOS (TOPO)"
+        self.posicao_x_linha = 0.0
+        self.em_ciclo = False
+        self.lock = threading.Lock()
+
+    def conectar(self, porta=None):
+        with self.lock:
+            if porta is not None:
+                self.porta = str(porta).strip()
+            if self.ser is not None:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+
+            if not self.porta or self.porta.upper() == "SIMULADO" or serial is None:
+                self.simulado = True
+                registrar_log("Arduino de Reset (4 Atuadores + Eixo X') em MODO SIMULADO.")
+                return True
+
+            try:
+                self.ser = serial.Serial(self.porta, BAUD, timeout=2.0)
+                time.sleep(1.5)
+                self.ser.reset_input_buffer()
+                self.simulado = False
+                registrar_log(f"Arduino de Reset conectado em {self.porta} ({BAUD} bps).")
+                return True
+            except Exception as e:
+                self.simulado = True
+                self.ser = None
+                registrar_log(f"Aviso Reset ({self.porta}): {e}. Operando Reset em modo simulado.")
+                return False
+
+    def _enviar_cmd(self, cmd, tempo_simulado=0.5):
+        with self.lock:
+            if self.simulado or self.ser is None:
+                time.sleep(tempo_simulado)
+                registrar_log(f"[RESET SIMULADO] Comando '{cmd}' concluido.")
+                return True, f"SIM_OK:{cmd}"
+            try:
+                self.ser.write(f"{cmd}\n".encode("utf-8"))
+                self.ser.flush()
+                t0 = time.monotonic()
+                respostas = []
+                while (time.monotonic() - t0) < 12.0:
+                    linha = self.ser.readline().decode("utf-8", errors="ignore").strip()
+                    if linha:
+                        respostas.append(linha)
+                        if any(k in linha.upper() for k in ("OK", "DONE", "CONCLUIDO", "PAROU")):
+                            break
+                resp_str = " | ".join(respostas) if respostas else "OK"
+                registrar_log(f"[RESET ARDUINO] {cmd} -> {resp_str}")
+                return True, resp_str
+            except Exception as e:
+                registrar_log(f"Erro na serial do Arduino de Reset: {e}")
+                return False, str(e)
+
+    def descer_atuadores(self):
+        self.estado_atuadores = "DESCENDO (PRESSIONANDO)"
+        ok, msg = self._enviar_cmd("M1_01", 0.3)
+        self._enviar_cmd("M2_01", 0.3)
+        self.estado_atuadores = "AVANCADOS (BASE)"
+        return ok, msg
+
+    def subir_atuadores(self):
+        self.estado_atuadores = "SUBINDO (RECUANDO)"
+        ok, msg = self._enviar_cmd("M1_00", 0.3)
+        self._enviar_cmd("M2_00", 0.3)
+        self.estado_atuadores = "RECUADOS (TOPO)"
+        return ok, msg
+
+    def varrer_eixo_x_linha(self, destino_mm=250.0):
+        self.estado_atuadores = f"VARRENDO EIXO X' -> {destino_mm:.0f}mm"
+        ok, msg = self._enviar_cmd(f"X_SWEEP:{destino_mm:.1f}", 0.5)
+        self.posicao_x_linha = float(destino_mm)
+        return ok, msg
+
+    def home_eixo_x_linha(self):
+        self.estado_atuadores = "RETORNANDO X' (HOME)"
+        ok, msg = self._enviar_cmd("X_HOME", 0.4)
+        self.posicao_x_linha = 0.0
+        self.estado_atuadores = "RECUADOS (TOPO)"
+        return ok, msg
+
+    def ciclo_completo_reset(self, matriz_ref=None):
+        if self.em_ciclo:
+            return False, "Ciclo de reset ja em andamento."
+        self.em_ciclo = True
+        try:
+            registrar_log("Iniciando Ciclo Completo de Reset Mecanico (Comando 'D' / 4 Atuadores + Eixo X')...")
+            self._enviar_cmd("D", 0.4)
+            self.descer_atuadores()
+            self.varrer_eixo_x_linha(250.0)
+            self.subir_atuadores()
+            self.home_eixo_x_linha()
+            if matriz_ref is not None:
+                matriz_ref.fill(0)
+            registrar_log("Ciclo Completo de Reset Mecanico finalizado. Todos os pinos zerados.")
+            return True, "Reset completo executado."
+        finally:
+            self.em_ciclo = False
+
+    def fechar(self):
+        with self.lock:
+            if self.ser is not None:
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+
+

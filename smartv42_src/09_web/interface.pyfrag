@@ -1,0 +1,977 @@
+# ==============================================================================
+# SECAO 6: INTERFACE WEB STUDIO v1.9 (UGS + CALIBRACAO DE HOME & ORIGEM DIREITA)
+# ==============================================================================
+
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+HTML_CONCEITUAL = r"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Matrix Studio v1.9 — UGS + Origem Direita (0,0) + GPIO [5,6,16,27,23,17,24,25]</title>
+<style>
+  :root {
+    --bg-main: #0b1020;
+    --bg-panel: #131b31;
+    --bg-card: #19233f;
+    --border: #2a3964;
+    --text: #e8eefc;
+    --muted: #95a6d1;
+    --accent: #38bdf8;
+    --emerald: #10b981;
+    --amber: #f59e0b;
+    --rose: #f43f5e;
+    --purple: #a855f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "DejaVu Sans", "Liberation Sans", system-ui, -apple-system, sans-serif;
+    background: var(--bg-main);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    background: linear-gradient(90deg, #0f172a 0%, #172554 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-badge {
+    width: 34px; height: 34px; border-radius: 8px;
+    background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+    display: flex; align-items: center; justify-content: center;
+    font-weight: bold; font-size: 18px; color: #fff;
+  }
+  .brand h1 { font-size: 15px; font-weight: 700; }
+  .brand p { font-size: 11px; color: var(--muted); }
+  .header-right { display: flex; gap: 8px; align-items: center; font-size: 11px; }
+  .pill {
+    padding: 4px 10px; border-radius: 999px; font-weight: 600;
+    background: var(--bg-card); border: 1px solid var(--border);
+  }
+  .workspace {
+    display: grid;
+    grid-template-columns: 165px 410px 1fr;
+    flex: 1;
+    min-height: 0;
+  }
+  .sidebar {
+    background: #0d1428;
+    border-right: 1px solid var(--border);
+    padding: 10px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .nav-btn {
+    width: 100%; text-align: left; padding: 8px 10px;
+    background: transparent; border: 1px solid transparent;
+    color: var(--text); border-radius: 7px; cursor: pointer;
+    font-size: 12px; font-weight: 600; display: flex; align-items: center; gap: 8px;
+  }
+  .nav-btn:hover, .nav-btn.active {
+    background: var(--bg-card); border-color: var(--border); color: var(--accent);
+  }
+  .sidebar-footer {
+    margin-top: auto; padding: 8px; border-radius: 7px;
+    background: rgba(56, 189, 248, 0.08); border: 1px solid var(--border);
+    font-size: 10.5px; color: var(--muted); line-height: 1.35;
+  }
+  .left-panel {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    padding: 10px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px;
+  }
+  .card-title {
+    font-size: 11.5px; font-weight: 700; color: #cbd5e1;
+    margin-bottom: 7px; display: flex; justify-content: space-between; align-items: center;
+  }
+  .row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+  .row:last-child { margin-bottom: 0; }
+  select, input[type="text"], input[type="number"] {
+    background: #0d1428; color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: 5px 7px; font-size: 11.5px; width: 100%;
+  }
+  .btn {
+    border: 1px solid var(--border); background: #223159; color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 11.5px; font-weight: 600;
+    cursor: pointer; text-align: center; transition: 0.15s;
+  }
+  .btn:hover { filter: brightness(1.12); }
+  .btn-emerald { background: #059669; border-color: #10b981; color: #fff; }
+  .btn-amber { background: #d97706; border-color: #f59e0b; color: #fff; }
+  .btn-rose { background: #e11d48; border-color: #f43f5e; color: #fff; }
+  .btn-sky { background: #0284c7; border-color: #38bdf8; color: #fff; }
+  .btn-purple { background: #7e22ce; border-color: #a855f7; color: #fff; }
+  .dro-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+    background: #090e1c; padding: 8px; border-radius: 6px; border: 1px solid #1e293b;
+  }
+  .dro-axis { font-family: "DejaVu Sans Mono", monospace; font-size: 13px; line-height: 1.5; }
+  .dro-axis span { color: var(--accent); font-weight: 700; }
+  .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; margin-bottom: 5px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+  .jog-container { display: grid; grid-template-columns: 128px 1fr; gap: 8px; align-items: center; }
+  .jog-pad { display: grid; grid-template-columns: repeat(3, 38px); gap: 4px; }
+  .jog-btn {
+    height: 32px; border-radius: 5px; border: 1px solid var(--border);
+    background: #1e2b4d; color: #fff; font-weight: 700; font-size: 11px; cursor: pointer;
+  }
+  .jog-btn:hover { background: #2d4073; }
+  .gpio-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 6px; }
+  .gpio-btn {
+    padding: 5px 3px; font-size: 10.5px; border-radius: 5px;
+    background: #0f3a36; border: 1px solid #14b8a6; color: #ccfbf1; cursor: pointer; font-weight: 700;
+  }
+  .pulsos-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; margin: 5px 0; }
+  .pulsos-cell { text-align: center; font-size: 9.5px; color: var(--muted); }
+  .pulsos-cell input { text-align: center; padding: 3px 2px; font-size: 11px; font-weight: 700; margin-top: 2px; }
+  .right-panel {
+    display: flex; flex-direction: column; padding: 10px; gap: 8px; min-height: 0; overflow: hidden;
+  }
+  .top-bar { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .viz-split {
+    display: grid; grid-template-columns: 1fr 330px; gap: 10px; flex: 1; min-height: 0;
+  }
+  .canvas-card {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px; display: flex; flex-direction: column; min-height: 0; position: relative;
+  }
+  .canvas-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    background: #070b16; border-radius: 6px; overflow: hidden; position: relative;
+  }
+  canvas { max-width: 100%; max-height: 100%; }
+  .side-stack { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+  .code-box, .log-box {
+    background: #070b16; border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px; font-family: "DejaVu Sans Mono", monospace; font-size: 10.5px;
+    color: #a5f3fc; overflow-y: auto; flex: 1; white-space: pre-wrap; line-height: 1.35;
+  }
+  .log-box { color: #d1fae5; }
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(4, 8, 20, 0.78);
+    z-index: 100; align-items: center; justify-content: center; padding: 16px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
+    width: 100%; max-width: 720px; max-height: 90vh; display: flex; flex-direction: column;
+    overflow: hidden; box-shadow: 0 20px 50px rgba(0,0,0,0.65);
+  }
+  .modal-header {
+    padding: 12px 16px; background: #0f172a; border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center; font-weight: 700;
+  }
+  .modal-body { padding: 14px 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .coord-banner {
+    background: rgba(16, 185, 129, 0.12); border: 1px solid #10b981;
+    border-radius: 6px; padding: 7px; font-size: 11px; color: #d1fae5; line-height: 1.35;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <div class="brand-badge">❖</div>
+    <div>
+      <h1>Smart Matrix Studio v1.9 (UGS + Origem X Direita 0,0 + GPIO [5,6,16,27,23,17,24,25])</h1>
+      <p>Plataforma CNC Tatil, Simetria/Origem Configuravel, Console Serial UGS & IA Embarcada (EESC-USP)</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="pill" id="badge-origem">⌖ Origem (0,0): DIREITA</span>
+    <span class="pill" id="badge-status-porta">Porta: /dev/ttyACM0</span>
+    <span class="pill">Projeto IC • Prof. Mario Tronco</span>
+  </div>
+</header>
+
+<div class="workspace">
+  <!-- BARRA LATERAL ESQUERDA -->
+  <aside class="sidebar">
+    <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
+    <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⌖ Calibrar Home / (0,0)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
+    <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
+    <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
+    <button class="nav-btn" onclick="alternarVista()">❖ Alternar 2D / 3D</button>
+    <button class="nav-btn" onclick="exportarGCode()">⬇ Exportar G-Code</button>
+
+    <div class="sidebar-footer">
+      <strong>Origem (0,0) na Direita:</strong><br>
+      Coluna 99 (direita da imagem) mapeada em X=0.0mm e Coluna 0 (esquerda) em X=247.5mm.<br>
+      Smart Matrix • EESC-USP
+    </div>
+  </aside>
+
+  <!-- PAINEL DE CONTROLE UGS + CABECOTE + ORIENTACAO -->
+  <section class="left-panel">
+    <!-- PORTAS USB -->
+    <div class="card">
+      <div class="card-title">
+        <span>Portas USB (GRBL X/Y & Arduino Reset)</span>
+        <span id="status-porta-pill" style="color:#34d399;font-size:11px;">● Conectado</span>
+      </div>
+      <div class="row">
+        <select id="sel-porta-grbl">
+          <option value="/dev/ttyACM0">GRBL: /dev/ttyACM0</option>
+          <option value="/dev/ttyACM1">GRBL: /dev/ttyACM1</option>
+          <option value="/dev/ttyUSB0">GRBL: /dev/ttyUSB0</option>
+          <option value="SIMULADO">GRBL: SIMULADO</option>
+        </select>
+        <select id="sel-porta-reset">
+          <option value="SIMULADO">RESET: SIMULADO</option>
+          <option value="/dev/ttyACM1">RESET: /dev/ttyACM1</option>
+          <option value="/dev/ttyUSB0">RESET: /dev/ttyUSB0</option>
+          <option value="/dev/ttyACM0">RESET: /dev/ttyACM0</option>
+        </select>
+        <button class="btn btn-sky" onclick="conectarPortas()" style="white-space:nowrap;">↻ Conectar</button>
+      </div>
+    </div>
+
+    <!-- VISOR DIGITAL UGS (WPos / MPos) -->
+    <div class="card">
+      <div class="card-title">
+        <span>Visor Digital UGS (WPos / MPos)</span>
+        <span id="grbl-state-badge" style="color:#34d399;">● IDLE (G54)</span>
+      </div>
+      <div class="dro-grid">
+        <div class="dro-axis">
+          <div>X <span id="dro-wx">0.00 mm</span></div>
+          <div>Y <span id="dro-wy">0.00 mm</span></div>
+          <div>Z <span id="dro-wz" style="color:#fbbf24;">Nivel 0</span></div>
+        </div>
+        <div class="dro-axis" style="font-size:11px;color:var(--muted);">
+          <div>MPos X: <span id="dro-mx" style="color:#cbd5e1;">0.00 mm</span></div>
+          <div>MPos Y: <span id="dro-my" style="color:#cbd5e1;">0.00 mm</span></div>
+          <div id="dro-pn" style="color:#fbbf24;">Pn: Nenhum | Col:99,Lin:0</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CALIBRACAO BILINEAR DOS 4 CANTOS FISICOS (A, B, C, D MEDIDOS NA BANCADA) -->
+    <div class="card" style="border-color:#10b981;">
+      <div class="card-title">
+        <span style="color:#34d399;">⌖ 4 Cantos Medidos na Chapa (A, B, C, D)</span>
+        <button class="btn btn-sky" style="padding:2px 7px;font-size:10.5px;" onclick="calibrarCantoMatriz('ir_meio')">🎯 Ir ao Centro (50,50)</button>
+      </div>
+      <div class="row" style="font-size:10px;gap:4px;">
+        <span style="width:28px;color:#34d399;font-weight:bold;">A(↙)</span>
+        <input type="number" id="inp-xa" value="0.000" step="0.5" title="Ponto A (0,0) - X">
+        <input type="number" id="inp-ya" value="0.000" step="0.5" title="Ponto A (0,0) - Y">
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_a')">Ir A</button>
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_a')">📍A</button>
+      </div>
+      <div class="row" style="font-size:10px;gap:4px;">
+        <span style="width:28px;color:#38bdf8;font-weight:bold;">B(↘)</span>
+        <input type="number" id="inp-xb" value="297.000" step="0.5" title="Ponto B (297,0) - X">
+        <input type="number" id="inp-yb" value="0.000" step="0.5" title="Ponto B (297,0) - Y">
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_b')">Ir B</button>
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_b')">📍B</button>
+      </div>
+      <div class="row" style="font-size:10px;gap:4px;">
+        <span style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
+        <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,-297) - X">
+        <input type="number" id="inp-yc" value="-297.000" step="0.5" title="Ponto C (297,-297) - Y">
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
+      </div>
+      <div class="row" style="font-size:10px;gap:4px;">
+        <span style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
+        <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,-297) - X">
+        <input type="number" id="inp-yd" value="-297.000" step="0.5" title="Ponto D (0,-297) - Y">
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
+        <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_d')">📍D</button>
+      </div>
+      <div style="font-size:10px;color:#34d399;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:5px;padding:4px 6px;margin-top:4px;font-family:monospace;">
+        Janela Plotagem (Y negativo): X=[246.0 .. 270.0] | Y=[-50.0 .. -29.0]
+      </div>
+      <div id="lbl-avisos" style="display:none;white-space:pre-wrap;font-size:10px;color:#fbbf24;background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:5px;padding:5px;margin-top:4px;"></div>
+      <div class="row" style="justify-content:space-between;font-size:10.5px;margin-top:4px;">
+        <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=258.00, Y=-39.50</span>
+        <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
+      </div>
+      <div class="row" style="justify-content:space-between;font-size:9.5px;margin-top:3px;">
+        <span style="color:var(--muted);">Carro esta agora em:</span>
+        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_a')" title="Define a posicao atual do GRBL como Ponto A (G92)">Aqui=A</button>
+        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_b')" title="Define a posicao atual do GRBL como Ponto B (G92)">Aqui=B</button>
+        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_c')" title="Define a posicao atual do GRBL como Ponto C (G92)">Aqui=C</button>
+        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_d')" title="Define a posicao atual do GRBL como Ponto D (G92)">Aqui=D</button>
+        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_meio')" title="Define a posicao atual do GRBL como Centro (50,50)">Aqui=Meio</button>
+      </div>
+      <div class="row" style="justify-content:space-between;font-size:10px;">
+        <button class="btn btn-sky" style="padding:2px 6px;font-size:9.5px;" onclick="resetarQuadrado297()">↺ Padrao 297x297 (A..D)</button>
+        <button class="btn" style="padding:2px 6px;font-size:9.5px;" onclick="calibrarCantoMatriz('testar_perimetro')">▢ Perimetro A→B→C→D→A</button>
+        <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
+          <input type="checkbox" id="cfg-inv-jog-x" onchange="aplicarConfigCoordenadas()"> Inv. Jog X
+        </label>
+      </div>
+    </div>
+
+    <!-- EXECUCAO & COMANDOS USUAIS DO UGS -->
+    <div class="card">
+      <div class="card-title">
+        <span>Execucao & Comandos Usuais do UGS</span>
+        <select id="sel-wcs" style="width:95px;padding:2px 4px;font-size:10.5px;" onchange="mudarWCS(this.value)">
+          <option value="G54">WCS: G54</option>
+          <option value="G55">WCS: G55</option>
+          <option value="G56">WCS: G56</option>
+        </select>
+      </div>
+      <div class="grid-4">
+        <button class="btn btn-emerald" onclick="iniciarJob()">▶ Iniciar</button>
+        <button class="btn btn-amber" onclick="acaoUGS('hold')">❚❚ Hold (!)</button>
+        <button class="btn btn-sky" onclick="acaoUGS('resume')">▶‖ Resume (~)</button>
+        <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
+      </div>
+      <div class="grid-4">
+        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ Home ($H)</button>
+        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌖ Calibrar (0,0)</button>
+        <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
+        <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
+      </div>
+      <div class="grid-4" style="margin-bottom:0;">
+        <button class="btn" onclick="acaoUGS('ir_g28')">⏎ Ir G28</button>
+        <button class="btn" onclick="acaoUGS('salvar_g28')">⌖ Set G28.1</button>
+        <button class="btn" onclick="acaoUGS('check_mode')">✓ Check ($C)</button>
+        <button class="btn" onclick="acaoUGS('ir_zero_trabalho')">◎ Ir Origem A</button>
+      </div>
+    </div>
+
+    <!-- JOG MANUAL UGS & CALIBRACAO ZERO -->
+    <div class="card">
+      <div class="card-title">
+        <span>Jog Manual UGS ($J=G91) & Definir (0,0) Aqui</span>
+        <button class="btn btn-rose" style="padding:2px 7px;font-size:10px;" onclick="acaoUGS('jog_cancel')">■ Parar Jog</button>
+      </div>
+      <div class="row" style="font-size:11px;margin-bottom:7px;">
+        <span>Passo(mm):</span>
+        <label><input type="radio" name="jog-step" value="0.5">0.5</label>
+        <label><input type="radio" name="jog-step" value="1.0">1.0</label>
+        <label><input type="radio" name="jog-step" value="2.5" checked>2.5</label>
+        <label><input type="radio" name="jog-step" value="10">10</label>
+        <label><input type="radio" name="jog-step" value="25">25</label>
+      </div>
+      <div class="jog-container">
+        <div class="jog-pad">
+          <button class="jog-btn" onclick="jog(-1, 1)">↖</button>
+          <button class="jog-btn" onclick="jog(0, 1)">↑ Y+</button>
+          <button class="jog-btn" onclick="jog(1, 1)">↗</button>
+          <button class="jog-btn" onclick="jog(-1, 0)">← X-</button>
+          <button class="jog-btn" style="background:#0284c7;" onclick="acaoUGS('ir_zero_trabalho')">A(0,0)</button>
+          <button class="jog-btn" onclick="jog(1, 0)">→ X+</button>
+          <button class="jog-btn" onclick="jog(-1, -1)">↙</button>
+          <button class="jog-btn" onclick="jog(0, -1)">↓ Y-</button>
+          <button class="jog-btn" onclick="jog(1, -1)">↘</button>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:5px;">
+          <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ Definir Ponto Atual = (0,0)</button>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+            <button class="btn" onclick="acaoUGS('zerar_x')">Zerar X0</button>
+            <button class="btn" onclick="acaoUGS('zerar_y')">Zerar Y0</button>
+            <button class="btn" onclick="acaoUGS('ir_g30')">Ir G30</button>
+            <button class="btn" onclick="acaoUGS('salvar_g30')">Set G30.1</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CABECOTE Z: ORDEM EXATA [5, 6, 16, 27, 23, 17, 24, 25] -->
+    <div class="card">
+      <div class="card-title">
+        <span>Cabecote Z: Ordem [5, 6, 16, 27, 23, 17, 24, 25]</span>
+        <span style="font-size:10px;color:var(--accent);">Clique para testar</span>
+      </div>
+      <div class="gpio-grid">
+        <button class="gpio-btn" onclick="testarNivelZ(1)">1:GPIO5</button>
+        <button class="gpio-btn" onclick="testarNivelZ(2)">2:GPIO6</button>
+        <button class="gpio-btn" onclick="testarNivelZ(3)">3:GPIO16</button>
+        <button class="gpio-btn" onclick="testarNivelZ(4)">4:GPIO27</button>
+        <button class="gpio-btn" onclick="testarNivelZ(5)">5:GPIO23</button>
+        <button class="gpio-btn" onclick="testarNivelZ(6)">6:GPIO17</button>
+        <button class="gpio-btn" onclick="testarNivelZ(7)">7:GPIO24</button>
+        <button class="gpio-btn" onclick="testarNivelZ(8)">8:GPIO25</button>
+        <button class="gpio-btn" style="background:#1e3a8a;border-color:#3b82f6;" onclick="acaoUGS('teste_t')">Teste 't'</button>
+        <button class="gpio-btn" style="background:#581c87;border-color:#a855f7;" onclick="acaoUGS('seq_cabecote')">Seq 1..8</button>
+      </div>
+      <div class="row" style="font-size:11px;">
+        <span>ON(ms):</span><input type="number" id="inp-on-ms" value="10" step="1" min="1" max="2000">
+        <span>OFF(ms):</span><input type="number" id="inp-off-ms" value="10" step="1" min="1" max="2000">
+        <span>PausaZ:</span><input type="number" id="inp-pausa-ms" value="10" step="1" min="0" max="2000">
+        <span>Feed:</span><input type="number" id="inp-feed" value="900" step="50" min="50" max="5000">
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:10.5px;margin-top:4px;">
+        <span>Quantidade de Pulsos em Cada Nivel (Z1 a Z8):</span>
+        <div style="display:flex;gap:3px;align-items:center;">
+          <span>Fixo:</span>
+          <input type="number" id="inp-pulsos-fixo" value="7" style="width:42px;padding:2px 4px;">
+          <button class="btn" style="padding:2px 5px;font-size:10px;" onclick="preencherPulsosFixo()">Todos=N</button>
+          <button class="btn" style="padding:2px 5px;font-size:10px;" onclick="preencherPulsosEscada()">1..8</button>
+        </div>
+      </div>
+      <div class="pulsos-grid">
+        <div class="pulsos-cell">Z1(P5)<input type="number" id="p-nv-1" value="1" min="1" max="50"></div>
+        <div class="pulsos-cell">Z2(P6)<input type="number" id="p-nv-2" value="2" min="1" max="50"></div>
+        <div class="pulsos-cell">Z3(P16)<input type="number" id="p-nv-3" value="3" min="1" max="50"></div>
+        <div class="pulsos-cell">Z4(P27)<input type="number" id="p-nv-4" value="4" min="1" max="50"></div>
+        <div class="pulsos-cell">Z5(P23)<input type="number" id="p-nv-5" value="5" min="1" max="50"></div>
+        <div class="pulsos-cell">Z6(P17)<input type="number" id="p-nv-6" value="6" min="1" max="50"></div>
+        <div class="pulsos-cell">Z7(P24)<input type="number" id="p-nv-7" value="7" min="1" max="50"></div>
+        <div class="pulsos-cell">Z8(P25)<input type="number" id="p-nv-8" value="8" min="1" max="50"></div>
+      </div>
+      <button class="btn btn-emerald" style="width:100%;margin-top:4px;" onclick="salvarConfigCabecote()">✓ Aplicar Milissegundos do Pulso & Pulsos por Nivel</button>
+    </div>
+
+    <!-- RESET SUPERIOR -->
+    <div class="card">
+      <div class="card-title">
+        <span>↻ Reset Superior (4 Atuadores + Eixo X')</span>
+        <label style="font-size:10.5px;display:flex;align-items:center;gap:4px;">
+          <input type="checkbox" id="chk-auto-reset"> Auto pos-plot
+        </label>
+      </div>
+      <button class="btn btn-purple" style="width:100%;margin-bottom:5px;" onclick="executarResetCompleto()">↻ Executar Ciclo Completo de Reset ('D')</button>
+      <div class="grid-4" style="margin-bottom:0;">
+        <button class="btn" onclick="acaoReset('descer')">↓ Descer</button>
+        <button class="btn" onclick="acaoReset('subir')">↑ Subir</button>
+        <button class="btn" onclick="acaoReset('varrer')">→ Varrer X'</button>
+        <button class="btn" onclick="acaoReset('home')">← Home X'</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- PAINEL DIREITO: VISUALIZACAO 2D/3D, UPLOAD IA, G-CODE E LOGS -->
+  <section class="right-panel">
+    <div class="top-bar">
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="btn btn-sky" onclick="alternarVista()" id="btn-modo-vista">❖ Mapa Tatil 2D & 3D</button>
+        <button class="btn btn-emerald" onclick="carregarPadrao('flor')">✿ Flor no Meio (50,50)</button>
+        <button class="btn" onclick="carregarPadrao('domo')">◎ Domo</button>
+        <button class="btn" onclick="carregarPadrao('rampa_x')">⇄ Rampa Calibracao X</button>
+        <button class="btn" onclick="carregarPadrao('usp')">⊞ Logo USP</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <label class="btn btn-emerald" style="cursor:pointer;">
+          ⬆ Carregar Imagem IA (ONNX)
+          <input type="file" id="inp-file-img" accept="image/*" style="display:none;" onchange="enviarImagemIA(this)">
+        </label>
+        <label class="btn btn-sky" style="cursor:pointer;" title="XY vai ao GRBL; Z aos GPIOs">
+          ⬆ Importar G-code X/Y + Z
+          <input type="file" id="inp-file-gcode" accept=".gcode,.nc,.tap,.txt" style="display:none;" onchange="importarGcodeHibrido(this)">
+        </label>
+        <select id="sel-profundidade" style="width:125px;" onchange="reprocessarProfundidade()">
+          <option value="distancia">Prof: Distancia EDT</option>
+          <option value="luminancia">Prof: Luminancia</option>
+          <option value="binario">Prof: Binario (Z8)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="viz-split">
+      <div class="canvas-card">
+        <div class="card-title">
+          <span id="titulo-mapa">Mapa Tatil 2D/3D — Origem Fisica (0,0) na Extremidade DIREITA</span>
+          <span id="info-progresso" style="color:var(--accent);">Pronto</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="canvas-matriz" width="620" height="620"></canvas>
+        </div>
+      </div>
+
+      <div class="side-stack">
+        <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+          <div class="card-title">
+            <span>⬇ Instrucoes G-CODE (X0 = Direita)</span>
+            <span id="badge-qtd-pinos">0 pinos</span>
+          </div>
+          <div class="code-box" id="box-gcode">Carregando G-Code...</div>
+        </div>
+
+        <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:0;">
+          <div class="card-title">
+            <span>⌨ Telemetria & Log de Eventos</span>
+            <button class="btn" style="padding:1px 6px;font-size:10px;" onclick="abrirModal('modal-terminal')">Abrir Terminal</button>
+          </div>
+          <div class="log-box" id="box-logs">Inicializando...</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- MODAL 1: CALIBRACAO DE HOME & PONTO (0,0) NA EXTREMIDADE DIREITA -->
+<div class="modal-backdrop" id="modal-home">
+  <div class="modal">
+    <div class="modal-header">
+      <span>⌖ Calibracao de Home e Ponto (0,0) na Extremidade Direita da Matriz</span>
+      <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
+    </div>
+    <div class="modal-body">
+      <div class="coord-banner">
+        <strong>Como funciona a correcao do (0,0) na extremidade direita:</strong><br>
+        • Na matriz fisica, o cabecote inicia na <strong>extremidade direita (X = 0.0 mm, Y = 0.0 mm)</strong>.<br>
+        • Com <strong>Origem X na Direita</strong> ativada, a borda direita da imagem (coluna 99) e plotada em <strong>X = 0.0 mm</strong> e o cabecote varre da direita para a esquerda ate <strong>X = 247.5 mm</strong> (coluna 0), mantendo a imagem na orientacao correta (sem espelhar!).
+      </div>
+      <div class="grid-3">
+        <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ 1. Definir Posicao Atual como (0,0)</button>
+        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ 2. Executar Homing Hardware ($H)</button>
+        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ 3. Mover Cabecote ao Ponto A (0,0)</button>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>Ajuste Fino de Direcao e Limites Fisicos (250 mm x 250 mm)</span></div>
+        <div class="row">
+          <span>Se ao mandar ir para a esquerda o motor andar para a direita:</span>
+          <button class="btn btn-amber" onclick="inverterMotorXGrbl()">⇄ Inverter Direcao do Motor X no GRBL ($3)</button>
+        </div>
+        <div class="row" style="font-size:11px;color:var(--muted);">
+          As coordenadas enviadas ao GRBL vem somente dos 4 cantos A, B, C, D (painel de calibracao).
+          Para mudar o sentido, corrija os cantos ou use $3.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL 2: TERMINAL SERIAL UGS INTEGRADO -->
+<div class="modal-backdrop" id="modal-terminal">
+  <div class="modal">
+    <div class="modal-header">
+      <span>⌨ Terminal Serial Integrado (Universal Gcode Sender + Comandos do Cabecote)</span>
+      <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:11px;color:var(--muted);">
+        Comandos: <code>$$</code>, <code>$X</code>, <code>$H</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
+      </div>
+      <div class="log-box" id="term-historico" style="height:280px;font-size:11.5px;"></div>
+      <div class="row">
+        <input type="text" id="inp-cmd-term" placeholder="Digite qualquer comando G-Code, GRBL ($3=1, $100=80) ou comando interno..." onkeydown="if(event.key==='Enter') enviarCmdTerminal()">
+        <button class="btn btn-emerald" style="white-space:nowrap;" onclick="enviarCmdTerminal()">Enviar ⏎</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL 3: CONFIGURACAO EEPROM GRBL ($$) -->
+<div class="modal-backdrop" id="modal-grbl">
+  <div class="modal">
+    <div class="modal-header">
+      <span>⚙ Configuracao de Parametros do GRBL ($$ — Passos/mm, Direcao $3 e Limites)</span>
+      <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
+    </div>
+    <div class="modal-body">
+      <div class="row">
+        <button class="btn btn-sky" onclick="consultarSettingsGrbl()">↻ Ler Parametros Atuais ($$)</button>
+        <button class="btn btn-amber" onclick="enviarRawGrbl('$21=0')">Desativar Hard Limits ($21=0)</button>
+        <button class="btn btn-emerald" onclick="inverterMotorXGrbl()">⇄ Inverter Eixo X ($3)</button>
+      </div>
+      <div class="code-box" id="box-grbl-settings" style="height:260px;">Clique em "Ler Parametros Atuais ($$)" para listar a EEPROM do GRBL.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let estadoMatriz = [];
+let modoVista3D = false;
+let posCabecote = { x_mm: 0, y_mm: 0, x_idx: 99, y_idx: 0, nivel_z: 0 };
+let configCoord = { origem_x_na_direita: true, sinal_eixo_x: 1.0, inverter_jog_x: false };
+
+function abrirModal(id) {
+  document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
+  document.getElementById(id).classList.add('open');
+}
+function fecharModais() {
+  document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
+}
+
+async function apiPost(acao, payload = {}) {
+  const res = await fetch('/api/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: acao, ...payload })
+  });
+  return await res.json();
+}
+
+function lerNumeroInput(id, padrao) {
+  const v = parseFloat(document.getElementById(id).value);
+  return Number.isFinite(v) ? v : padrao;
+}
+
+async function aplicarConfigCoordenadas() {
+  const invJogX = document.getElementById('cfg-inv-jog-x').checked;
+  const pa = [lerNumeroInput('inp-xa', 0.0), lerNumeroInput('inp-ya', 0.0)];
+  const pb = [lerNumeroInput('inp-xb', 297.0), lerNumeroInput('inp-yb', 0.0)];
+  const pc = [lerNumeroInput('inp-xc', 297.0), lerNumeroInput('inp-yc', -297.0)];
+  const pd = [lerNumeroInput('inp-xd', 0.0), lerNumeroInput('inp-yd', -297.0)];
+  const r = await apiPost('config_coordenadas', {
+    inverter_jog_x: invJogX,
+    ponto_a: pa,
+    ponto_b: pb,
+    ponto_c: pc,
+    ponto_d: pd
+  });
+  if (r.coord) configCoord = r.coord;
+  await carregarEstadoInicial();
+}
+
+async function resetarQuadrado297() {
+  document.getElementById('inp-xa').value = '0.000';
+  document.getElementById('inp-ya').value = '0.000';
+  document.getElementById('inp-xb').value = '297.000';
+  document.getElementById('inp-yb').value = '0.000';
+  document.getElementById('inp-xc').value = '297.000';
+  document.getElementById('inp-yc').value = '-297.000';
+  document.getElementById('inp-xd').value = '0.000';
+  document.getElementById('inp-yd').value = '-297.000';
+  await aplicarConfigCoordenadas();
+}
+
+async function calibrarCantoMatriz(etapa) {
+  const r = await apiPost('calibrar_caixa_fisica', { etapa });
+  if (r.coord) configCoord = r.coord;
+  await carregarEstadoInicial();
+  await atualizarStatus();
+}
+
+async function inverterMotorXGrbl() {
+  await apiPost('inverter_motor_x_grbl');
+  atualizarStatus();
+}
+
+async function conectarPortas() {
+  const pGrbl = document.getElementById('sel-porta-grbl').value;
+  const pReset = document.getElementById('sel-porta-reset').value;
+  await apiPost('conectar_portas', { porta_grbl: pGrbl, porta_reset: pReset });
+  atualizarStatus();
+}
+
+function obterPassoJog() {
+  const sel = document.querySelector('input[name="jog-step"]:checked');
+  return sel ? parseFloat(sel.value) : 2.5;
+}
+
+async function jog(dxSign, dySign) {
+  const passo = obterPassoJog();
+  const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
+  await apiPost('jog', { dx: dxSign * passo, dy: dySign * passo, feed });
+  atualizarStatus();
+}
+
+async function acaoUGS(tipo) {
+  await apiPost('ugs_cmd', { cmd: tipo });
+  atualizarStatus();
+}
+
+async function mudarWCS(wcs) {
+  await apiPost('ugs_cmd', { cmd: 'wcs', wcs });
+  atualizarStatus();
+}
+
+async function testarNivelZ(nv) {
+  const resultado = await apiPost('testar_z', { nivel: nv });
+  if (!resultado.ok) alert('Falha no acionamento Z: ' + ((resultado.info && resultado.info.erro) || resultado.erro || 'consulte os logs'));
+}
+
+function preencherPulsosFixo() {
+  const v = parseInt(document.getElementById('inp-pulsos-fixo').value) || 7;
+  for (let i = 1; i <= 8; i++) document.getElementById('p-nv-' + i).value = v;
+}
+
+function preencherPulsosEscada() {
+  for (let i = 1; i <= 8; i++) document.getElementById('p-nv-' + i).value = i;
+}
+
+async function salvarConfigCabecote() {
+  const pulsos = [];
+  for (let i = 1; i <= 8; i++) {
+    pulsos.push(parseInt(document.getElementById('p-nv-' + i).value) || i);
+  }
+  const on_ms = parseFloat(document.getElementById('inp-on-ms').value) || 10;
+  const off_ms = parseFloat(document.getElementById('inp-off-ms').value) || 10;
+  const pausa_ms = parseFloat(document.getElementById('inp-pausa-ms').value) || 10;
+  const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
+  await apiPost('config_cabecote', { on_ms, off_ms, pausa_ms, feed, pulsos_por_nivel: pulsos });
+  await carregarEstadoInicial();
+}
+
+async function iniciarJob() {
+  const resposta = await apiPost('iniciar_job');
+  if (!resposta.ok) alert(resposta.erro || 'Job nao iniciado; consulte os logs.');
+  atualizarStatus();
+}
+
+async function executarResetCompleto() {
+  await apiPost('reset_mecanico', { subcmd: 'completo' });
+  await carregarEstadoInicial();
+}
+
+async function acaoReset(subcmd) {
+  await apiPost('reset_mecanico', { subcmd });
+}
+
+async function carregarPadrao(padrao) {
+  await apiPost('gerar_padrao', { padrao });
+  await carregarEstadoInicial();
+}
+
+async function reprocessarProfundidade() {
+  const modo = document.getElementById('sel-profundidade').value;
+  await apiPost('mudar_profundidade', { modo });
+  await carregarEstadoInicial();
+}
+
+async function importarGcodeHibrido(input) {
+  if (!input.files || !input.files[0]) return;
+  const arquivo = input.files[0];
+  input.value = '';
+  if (arquivo.size > 3000000) {
+    alert('Arquivo maior que 3 MB. Divida a trajetoria.');
+    return;
+  }
+  const texto = await arquivo.text();
+  const resp = await apiPost('carregar_gcode', { nome: arquivo.name, conteudo: texto });
+  if (!resp.ok) {
+    alert('Erro ao importar G-code: ' + (resp.erro || 'formato nao suportado'));
+    return;
+  }
+  await carregarEstadoInicial();
+  alert('G-code validado: ' + resp.blocos + ' blocos. O Z sera enviado aos GPIOs, nao ao GRBL.');
+}
+
+async function enviarImagemIA(input) {
+  if (!input.files || !input.files[0]) return;
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    const modo = document.getElementById('sel-profundidade').value;
+    await apiPost('upload_imagem', { imagem_b64: e.target.result, modo_profundidade: modo });
+    await carregarEstadoInicial();
+  };
+  reader.readAsDataURL(input.files[0]);
+}
+
+async function enviarCmdTerminal() {
+  const inp = document.getElementById('inp-cmd-term');
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+  inp.value = '';
+  const r = await apiPost('terminal_cmd', { cmd });
+  if (r.historico) {
+    const box = document.getElementById('term-historico');
+    box.textContent = r.historico.slice().reverse().map(h => `[${h.hora}] (${h.dir}) ${h.msg}`).join('\n');
+    box.scrollTop = box.scrollHeight;
+  }
+  await carregarEstadoInicial();
+}
+
+async function consultarSettingsGrbl() {
+  const r = await apiPost('ler_settings_grbl');
+  document.getElementById('box-grbl-settings').textContent = (r.linhas || []).join('\n') || 'Sem resposta.';
+}
+
+async function enviarRawGrbl(cmd) {
+  await apiPost('terminal_cmd', { cmd });
+  await consultarSettingsGrbl();
+}
+
+function alternarVista() {
+  modoVista3D = !modoVista3D;
+  desenharMatriz();
+}
+
+async function exportarGCode() {
+  // Recupera TODAS as linhas; a caixa na interface exibe somente uma previa.
+  const resposta = await fetch('/api/matrix');
+  const dados = await resposta.json();
+  const texto = (dados.gcode || []).join('\n') + '\n';
+  const url = URL.createObjectURL(new Blob([texto], {type:'text/plain;charset=utf-8'}));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = dados.gcode_importado ? 'smart_matrix_importado.gcode' : 'smart_matrix_v42.gcode';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function desenharMatriz() {
+  const canvas = document.getElementById('canvas-matriz');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.fillStyle = '#070b16';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!estadoMatriz || !estadoMatriz.length) return;
+  const rows = estadoMatriz.length;
+  const cols = estadoMatriz[0].length;
+  const cores = ['#0f172a', '#1e3a8a', '#1d4ed8', '#0284c7', '#0891b2', '#0d9488', '#10b981', '#f59e0b', '#f43f5e'];
+
+  if (!modoVista3D) {
+    const pad = 28;
+    const cellW = (W - pad * 2) / cols;
+    const cellH = (H - pad * 2) / rows;
+
+    for (let y = 0; y < rows; y++) {
+      for (let x = 0; x < cols; x++) {
+        const nv = estadoMatriz[y][x] || 0;
+        if (nv === 0) continue;
+        ctx.fillStyle = cores[Math.min(8, nv)];
+        ctx.fillRect(pad + x * cellW, pad + y * cellH, Math.max(1.5, cellW - 0.4), Math.max(1.5, cellH - 0.4));
+      }
+    }
+
+    ctx.strokeStyle = '#334155';
+    ctx.strokeRect(pad, pad, W - pad * 2, H - pad * 2);
+
+    ctx.font = 'bold 11px monospace';
+    if (configCoord.usar_janela_plotagem) {
+      const xMin = configCoord.plot_x_min ?? 246;
+      const xMax = configCoord.plot_x_max ?? 270;
+      const yTopo = configCoord.plot_y_min ?? -50;
+      const yBase = configCoord.plot_y_max ?? -29;
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillText(`(${xMin}, ${yTopo})`, pad + 2, 18);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillText(`(${xMax}, ${yTopo})`, W - pad - 88, 18);
+      ctx.fillStyle = '#10b981';
+      ctx.fillText(`(${xMin}, ${yBase})`, pad + 2, H - 8);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillText(`(${xMax}, ${yBase})`, W - pad - 88, H - 8);
+    } else {
+      const pa = configCoord.ponto_a || [0, 0];
+      const pb = configCoord.ponto_b || [297, 0];
+      const pc = configCoord.ponto_c || [297, -297];
+      const pd = configCoord.ponto_d || [0, -297];
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillText(`D(${pd[0]}, ${pd[1]})`, pad + 2, 18);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fillText(`C(${pc[0]}, ${pc[1]})`, W - pad - 108, 18);
+      ctx.fillStyle = '#10b981';
+      ctx.fillText(`A(${pa[0]}, ${pa[1]})`, pad + 2, H - 8);
+      ctx.fillStyle = '#38bdf8';
+      ctx.fillText(`B(${pb[0]}, ${pb[1]})`, W - pad - 92, H - 8);
+    }
+
+    const cx = pad + (posCabecote.x_idx + 0.5) * cellW;
+    const cy = pad + (posCabecote.y_idx + 0.5) * cellH;
+    ctx.strokeStyle = '#f43f5e';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+    ctx.stroke();
+  } else {
+    const cx0 = W * 0.5, cy0 = H * 0.16;
+    const scale = 2.65;
+    for (let y = 0; y < rows; y += 2) {
+      for (let x = 0; x < cols; x += 2) {
+        const nv = estadoMatriz[y][x] || 0;
+        const isoX = cx0 + (x - y) * scale;
+        const isoY = cy0 + (x + y) * (scale * 0.52) - nv * 3.2;
+        ctx.fillStyle = nv > 0 ? cores[Math.min(8, nv)] : '#162038';
+        ctx.fillRect(isoX, isoY, 3.2, 3.2 + nv * 2.2);
+      }
+    }
+  }
+}
+
+async function carregarEstadoInicial() {
+  const res = await fetch('/api/matrix');
+  const d = await res.json();
+  estadoMatriz = d.matriz || [];
+  if (d.coord) {
+    configCoord = d.coord;
+    document.getElementById('cfg-inv-jog-x').checked = !!d.coord.inverter_jog_x;
+    if (d.coord.ponto_a) {
+      document.getElementById('inp-xa').value = d.coord.ponto_a[0];
+      document.getElementById('inp-ya').value = d.coord.ponto_a[1];
+      document.getElementById('inp-xb').value = d.coord.ponto_b[0];
+      document.getElementById('inp-yb').value = d.coord.ponto_b[1];
+      document.getElementById('inp-xc').value = d.coord.ponto_c[0];
+      document.getElementById('inp-yc').value = d.coord.ponto_c[1];
+      document.getElementById('inp-xd').value = d.coord.ponto_d[0];
+      document.getElementById('inp-yd').value = d.coord.ponto_d[1];
+    }
+    document.getElementById('lbl-meio-fisico').textContent = `Centro(50,50): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+    const av = document.getElementById('lbl-avisos');
+    av.style.display = (d.coord.avisos && d.coord.avisos.length) ? 'block' : 'none';
+    av.textContent = (d.coord.avisos || []).map(a => '⚠ ' + a).join('\n');
+    document.getElementById('badge-origem').textContent = `⌖ Centro(50,50): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+  }
+  document.getElementById('box-gcode').textContent = (d.gcode || []).slice(0, 180).join('\n');
+  document.getElementById('badge-qtd-pinos').textContent = d.gcode_importado ? String(d.linhas_importadas || 0) + ' linhas importadas' : String(d.pinos_ativos || 0) + ' pinos';
+  desenharMatriz();
+}
+
+async function atualizarStatus() {
+  try {
+    const res = await fetch('/api/status');
+    const st = await res.json();
+    document.getElementById('dro-wx').textContent = `${st.wpos[0].toFixed(2)} mm`;
+    document.getElementById('dro-wy').textContent = `${st.wpos[1].toFixed(2)} mm`;
+    document.getElementById('dro-wz').textContent = `Nivel ${st.job.nivel_z || 0}`;
+    document.getElementById('dro-mx').textContent = `${st.mpos[0].toFixed(2)} mm`;
+    document.getElementById('dro-my').textContent = `${st.mpos[1].toFixed(2)} mm`;
+    document.getElementById('grbl-state-badge').textContent = `● ${st.estado_grbl} (${st.wcs})`;
+    document.getElementById('status-porta-pill').textContent = `● ${st.porta_grbl}`;
+    document.getElementById('badge-status-porta').textContent = `Porta: ${st.porta_grbl}`;
+
+    const x_idx_calc = st.idx ? st.idx[0] : 0;   // coluna, calculada no servidor pelos 4 cantos
+    const y_idx_calc = st.idx ? st.idx[1] : 0;   // linha
+
+    posCabecote = {
+      x_mm: st.wpos[0],
+      y_mm: st.wpos[1],
+      x_idx: st.job.ativo ? st.job.x_idx : x_idx_calc,
+      y_idx: st.job.ativo ? st.job.y_idx : y_idx_calc,
+      nivel_z: st.job.nivel_z || 0
+    };
+    document.getElementById('dro-pn').textContent = `Pn:${st.pinos_ativos || 'Nenhum'} | Col:${posCabecote.x_idx},Lin:${posCabecote.y_idx}`;
+
+    if (st.job && st.job.ativo) {
+      document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
+    } else {
+      document.getElementById('info-progresso').textContent = 'Pronto';
+    }
+    if (st.logs) {
+      const lb = document.getElementById('box-logs');
+      lb.textContent = st.logs.slice().reverse().map(l => `[${l.hora}] ${l.msg}`).join('\n');
+      lb.scrollTop = lb.scrollHeight;
+    }
+    desenharMatriz();
+  } catch (e) {}
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  await carregarEstadoInicial();
+  await atualizarStatus();
+  setInterval(atualizarStatus, 650);
+});
+</script>
+</body>
+</html>
+"""
+
+

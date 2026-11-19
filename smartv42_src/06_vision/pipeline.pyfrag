@@ -1,0 +1,268 @@
+# ==============================================================================
+# SECAO 4: PIPELINE DE VISAO COMPUTACIONAL E REDE NEURAL DEEPLABV3+ (INT8 ONNX)
+# ==============================================================================
+
+try:
+    import onnxruntime as ort
+except ImportError:
+    ort = None
+
+try:
+    from scipy.ndimage import distance_transform_edt
+except ImportError:
+    distance_transform_edt = None
+
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+
+def calcular_niveis_por_distancia(mascara_binaria, niveis_max=NIVEIS_MAX):
+    if not np.any(mascara_binaria):
+        return np.zeros_like(mascara_binaria, dtype=np.uint8)
+
+    if distance_transform_edt is not None:
+        dist = distance_transform_edt(mascara_binaria)
+    else:
+        dist = mascara_binaria.astype(np.float32)
+        for _ in range(8):
+            padded = np.pad(dist, 1, mode="constant", constant_values=0)
+            vizinhos = np.minimum(
+                np.minimum(padded[:-2, 1:-1], padded[2:, 1:-1]),
+                np.minimum(padded[1:-1, :-2], padded[1:-1, 2:])
+            )
+            dist = np.where(mascara_binaria > 0, vizinhos + 1.0, 0.0)
+
+    d_max = float(dist.max())
+    if d_max <= 0:
+        return np.zeros_like(mascara_binaria, dtype=np.uint8)
+    normalizado = dist / d_max
+    niveis = np.ceil(normalizado * niveis_max).astype(np.uint8)
+    niveis[mascara_binaria == 0] = 0
+    return np.clip(niveis, 0, niveis_max)
+
+
+def calcular_niveis_por_luminancia(img_gray_100x100, mascara_binaria, niveis_max=NIVEIS_MAX):
+    if not np.any(mascara_binaria):
+        return np.zeros_like(mascara_binaria, dtype=np.uint8)
+    pixels_ativos = img_gray_100x100[mascara_binaria > 0].astype(np.float32)
+    v_min, v_max = float(pixels_ativos.min()), float(pixels_ativos.max())
+    if v_max - v_min < 1e-5:
+        out = np.zeros_like(mascara_binaria, dtype=np.uint8)
+        out[mascara_binaria > 0] = niveis_max
+        return out
+    norm = (img_gray_100x100.astype(np.float32) - v_min) / (v_max - v_min)
+    niveis = np.ceil(norm * niveis_max).astype(np.uint8)
+    niveis[mascara_binaria == 0] = 0
+    return np.clip(niveis, 1, niveis_max) * (mascara_binaria > 0).astype(np.uint8)
+
+
+def carregar_sessao_onnx():
+    global _sessao_onnx, _input_name_onnx, _input_hw_onnx
+    if _sessao_onnx is not None:
+        return _sessao_onnx, _input_name_onnx
+    if ort is None or not os.path.isfile(NOME_MODELO):
+        return None, None
+    try:
+        t0 = time.perf_counter()
+        opcoes = ort.SessionOptions()
+        opcoes.intra_op_num_threads = 4
+        opcoes.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _sessao_onnx = ort.InferenceSession(
+            NOME_MODELO,
+            sess_options=opcoes,
+            providers=["CPUExecutionProvider"],
+        )
+        inp = _sessao_onnx.get_inputs()[0]
+        _input_name_onnx = inp.name
+        shape = inp.shape
+        if (
+            isinstance(shape, (list, tuple))
+            and len(shape) == 4
+            and isinstance(shape[2], int)
+            and isinstance(shape[3], int)
+            and shape[2] > 0
+            and shape[3] > 0
+        ):
+            _input_hw_onnx = (int(shape[2]), int(shape[3]))
+        dt = (time.perf_counter() - t0) * 1000.0
+        registrar_log(f"Modelo ONNX ({_input_hw_onnx[0]}x{_input_hw_onnx[1]}) carregado em {dt:.1f} ms.")
+        return _sessao_onnx, _input_name_onnx
+    except Exception as e:
+        registrar_log(f"Aviso ONNX: {e}. Usando segmentacao geometrica Otsu/Gradiente.")
+        _sessao_onnx = None
+        _input_name_onnx = None
+        return None, None
+
+
+def _segmentar_fallback_otsu(img_pil, limiar_ia=LIMIAR_IA_PADRAO):
+    img_gray = img_pil.convert("L").resize(TAMANHO_MATRIZ, Image.Resampling.BILINEAR)
+    arr = np.asarray(img_gray, dtype=np.float32) / 255.0
+    borda = np.concatenate([arr[0, :], arr[-1, :], arr[:, 0], arr[:, -1]])
+    fundo_claro = float(np.median(borda)) > 0.5
+    saliencia = (1.0 - arr) if fundo_claro else arr
+    limiar = float(np.clip(limiar_ia, 0.10, 0.90))
+    mascara = (saliencia >= limiar).astype(np.uint8)
+    if np.mean(mascara) < 0.01:
+        med = float(np.mean(saliencia))
+        mascara = (saliencia > med).astype(np.uint8)
+    return mascara, (arr * 255.0).astype(np.uint8)
+
+
+def processar_imagem_para_matriz(
+    caminho_ou_pil,
+    modo_profundidade=None,
+    niveis_max=NIVEIS_MAX,
+    limiar_ia=LIMIAR_IA_PADRAO,
+    inverter_mascara=False,
+):
+    if modo_profundidade is None:
+        modo_profundidade = MODO_PROFUNDIDADE
+    t0 = time.perf_counter()
+
+    if Image is None:
+        return gerar_padrao_teste("domo", niveis_max), 1.0
+
+    if isinstance(caminho_ou_pil, str):
+        img_pil = Image.open(caminho_ou_pil).convert("RGB")
+    else:
+        img_pil = caminho_ou_pil.convert("RGB")
+
+    sessao, input_name = carregar_sessao_onnx()
+    if sessao is not None and input_name is not None:
+        try:
+            hw_h, hw_w = _input_hw_onnx
+            img_in = img_pil.resize((hw_w, hw_h), Image.Resampling.BILINEAR)
+            arr_in = np.asarray(img_in, dtype=np.float32) / 255.0
+            arr_in = (arr_in - IMAGENET_MEAN) / IMAGENET_STD
+            tensor = np.transpose(arr_in, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+            saida = sessao.run(None, {input_name: tensor})[0]
+            if saida.ndim == 4:
+                logits = saida[0]
+                if logits.shape[0] > 1:
+                    exp_l = np.exp(logits - np.max(logits, axis=0, keepdims=True))
+                    probs = exp_l / np.sum(exp_l, axis=0, keepdims=True)
+                    fg_prob = 1.0 - probs[0]
+                    pred = (fg_prob >= float(limiar_ia)).astype(np.uint8)
+                else:
+                    pred = (logits[0] >= float(limiar_ia)).astype(np.uint8)
+            else:
+                pred = (saida[0] > 0).astype(np.uint8)
+
+            mask_pil = Image.fromarray((pred * 255).astype(np.uint8)).resize(
+                TAMANHO_MATRIZ, Image.Resampling.NEAREST
+            )
+            mascara = (np.asarray(mask_pil) > 127).astype(np.uint8)
+            img_gray_100 = np.asarray(
+                img_pil.convert("L").resize(TAMANHO_MATRIZ, Image.Resampling.BILINEAR),
+                dtype=np.uint8,
+            )
+        except Exception as e:
+            registrar_log(f"Fallback segmentacao: {e}")
+            mascara, img_gray_100 = _segmentar_fallback_otsu(img_pil, limiar_ia)
+    else:
+        mascara, img_gray_100 = _segmentar_fallback_otsu(img_pil, limiar_ia)
+
+    if inverter_mascara:
+        mascara = 1 - mascara
+
+    if modo_profundidade == "luminancia":
+        matriz = calcular_niveis_por_luminancia(img_gray_100, mascara, niveis_max)
+    elif modo_profundidade == "binario":
+        matriz = (mascara > 0).astype(np.uint8) * int(niveis_max)
+    else:
+        matriz = calcular_niveis_por_distancia(mascara, niveis_max)
+
+    tempo_ms = (time.perf_counter() - t0) * 1000.0
+    registrar_log(f"Inferencia IA concluida ({tempo_ms:.1f} ms)")
+    return matriz.astype(np.uint8), tempo_ms
+
+
+def gerar_padrao_teste(nome="domo", niveis_max=NIVEIS_MAX):
+    h, w = TAMANHO_MATRIZ
+    yy, xx = np.mgrid[0:h, 0:w]
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    nome = (nome or "domo").lower().strip()
+
+    if nome == "flor":
+        # Padrao Flor 3D centralizada exatamente no meio (cx=49.5, cy=49.5)
+        dx = xx - cx
+        dy = yy - cy
+        r = np.sqrt(dx ** 2 + dy ** 2)
+        theta = np.arctan2(dy, dx)
+        # 6 petalas + miolo elevado no centro (50,50)
+        raio_petala = 18.0 + 11.0 * np.cos(6.0 * theta)
+        out = np.zeros((h, w), dtype=np.uint8)
+        mask_petala = (r <= raio_petala) & (r >= 7.5)
+        if np.any(mask_petala):
+            out = calcular_niveis_por_distancia(mask_petala.astype(np.uint8), max(1, niveis_max - 2))
+        # Miolo central exatamente em (50,50) com altura maxima (Nivel 8)
+        mask_miolo = r <= 8.5
+        out[mask_miolo] = int(niveis_max)
+        return out
+
+    if nome == "piramide":
+        dx = np.abs(xx - cx) / (w * 0.38)
+        dy = np.abs(yy - cy) / (h * 0.38)
+        d = np.maximum(dx, dy)
+        val = np.clip(1.0 - d, 0.0, 1.0)
+        return np.round(val * niveis_max).astype(np.uint8)
+
+    if nome == "ondas":
+        r = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        mask = r <= 42.0
+        val = (np.cos(r * 0.28) + 1.0) * 0.5
+        out = np.round(val * (niveis_max - 1) + 1).astype(np.uint8)
+        out[~mask] = 0
+        return out
+
+    if nome == "anel":
+        r = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        anel = np.exp(-((r - 26.0) ** 2) / (2.0 * (5.5 ** 2)))
+        centro = np.exp(-(r ** 2) / (2.0 * (7.0 ** 2)))
+        val = np.maximum(anel, centro)
+        out = np.round(val * niveis_max).astype(np.uint8)
+        out[val < 0.15] = 0
+        return out
+
+    if nome == "rampa_x":
+        # Padrao de calibracao do Eixo X:
+        # Barra alta (Nivel 8) na extremidade DIREITA da imagem (x_idx = 88..95 -> perto de X=0mm!)
+        # Barra baixa (Nivel 3) na extremidade ESQUERDA da imagem (x_idx = 5..10 -> perto de X=235mm!)
+        out = np.zeros((h, w), dtype=np.uint8)
+        out[20:80, 88:95] = int(niveis_max)
+        out[35:65, 5:10] = max(1, int(niveis_max // 3))
+        for x_col in range(15, 85):
+            prop = (x_col - 15) / 70.0
+            nv = max(1, min(int(niveis_max), int(round(1 + prop * (niveis_max - 1)))))
+            out[47:53, x_col] = nv
+        return out
+
+    if nome == "usp":
+        out = np.zeros((h, w), dtype=np.uint8)
+        out[12:16, 12:88] = 4
+        out[84:88, 12:88] = 4
+        out[12:88, 12:16] = 4
+        out[12:88, 84:88] = 4
+        # U
+        out[28:68, 20:25] = 8
+        out[28:68, 33:38] = 8
+        out[63:68, 20:38] = 8
+        # S
+        out[28:33, 43:61] = 8
+        out[28:50, 43:48] = 8
+        out[46:51, 43:61] = 8
+        out[46:68, 56:61] = 8
+        out[63:68, 43:61] = 8
+        # P
+        out[28:68, 66:71] = 8
+        out[28:33, 66:80] = 8
+        out[46:51, 66:80] = 8
+        out[28:51, 75:80] = 8
+        return out
+
+    r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+    raio_max = 28.0
+    mascara = r2 <= (raio_max ** 2)
+    return calcular_niveis_por_distancia(mascara.astype(np.uint8), niveis_max)
+
+

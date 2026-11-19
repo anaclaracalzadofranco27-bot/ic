@@ -1,0 +1,1278 @@
+# =============================================================================
+# 2. DIAGNÓSTICO DE ALARMES, LIMITES E CONTROLADOR GRBL 1.1 + FUNÇÕES UGS
+# =============================================================================
+def explicar_alarme(linha):
+    codigo = linha.split(":", 1)[1].strip() if ":" in linha else ""
+    return f"{linha} = {ALARMES_GRBL.get(codigo, 'codigo fora da tabela, veja a doc do firmware')}"
+
+
+def explicar_erro_grbl(linha):
+    codigo = linha.split(":", 1)[1].strip() if ":" in linha else ""
+    desc = ERROS_GRBL.get(codigo, "erro GRBL desconhecido")
+    return f"{linha} ({desc})"
+
+
+def pinos_ativos(status):
+    m = RE_PINOS_GRBL.search(status or "")
+    return m.group(1) if m else ""
+
+
+def explicar_pinos(status):
+    pinos = pinos_ativos(status)
+    fins = "/".join(p for p in pinos if p in "XYZABC")
+    outros = "".join(p for p in pinos if p not in "XYZABC")
+    texto = ""
+    if fins:
+        texto += f" | fim de curso acionado: {fins}"
+    if outros:
+        texto += f" | outras entradas ativas: {outros}"
+    return texto
+
+
+def avaliar_status_para_mover(status):
+    if not status:
+        return False, "GRBL nao respondeu ao '?'"
+    if status.startswith("<Alarm"):
+        return False, "GRBL em alarme com a maquina parada"
+    fins_xy = "/".join(p for p in pinos_ativos(status) if p in "XY")
+    if fins_xy and not IGNORAR_FIM_DE_CURSO:
+        return False, f"fim de curso {fins_xy} acionado com a maquina parada"
+    return True, ""
+
+
+def fora_dos_limites(x_mm, y_mm):
+    """
+    Verifica limites respeitando os 4 cantos físicos calibrados (PONTO_A, PONTO_B, PONTO_C, PONTO_D),
+    permitindo toda a faixa real medida na bancada (ex: X de 0 a 450, Y de -500 a +500).
+    """
+    margem = 30.0
+    xs = [p[0] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    ys = [p[1] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    if x_mm < min(xs) - margem or x_mm > max(xs) + margem:
+        return True
+    if y_mm < min(ys) - margem or y_mm > max(ys) + margem:
+        return True
+    return False
+
+
+def validar_cantos(tol_mm=3.0):
+    """
+    Confere se os 4 cantos medidos formam um retangulo coerente.
+    Bordas opostas devem ter coordenadas parecidas: A/C (mesma coluna) com Y igual,
+    B/D com Y igual, A/B (mesma linha) com X igual, C/D com X igual.
+    Retorna lista de avisos (vazia = coerente).
+    """
+    avisos = []
+    checks = [
+        ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
+        ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
+        ("X de A e D (borda esquerda)", PONTO_A[0], PONTO_D[0]),
+        ("X de B e C (borda direita)", PONTO_B[0], PONTO_C[0]),
+    ]
+    for nome, v1, v2 in checks:
+        dif = abs(v1 - v2)
+        if dif > tol_mm:
+            avisos.append(f"{nome} diferem {dif:.1f} mm (>{tol_mm:.0f} mm): confira a medicao ou se a maquina esta fora de esquadro.")
+    return avisos
+
+
+class PortaSimulada:
+    """Simulador fiel ao GRBL 1.1h + todos os comandos e registradores do UGS."""
+    TEMPO_MOVIMENTO_S = 0.05
+
+    def __init__(self, papel="grbl"):
+        self.papel = papel
+        self.fila = deque([("Grbl 1.1h ['$' for help]", 0.0)])
+        self.is_open = True
+        self.ocupado_ate = 0.0
+        self.estado = "Idle"
+        self.mpos = [0.0, 0.0, 0.0]
+        self.wco = [0.0, 0.0, 0.0]
+        self.g28_pos = [0.0, 0.0, 0.0]
+        self.g30_pos = [0.0, 0.0, 0.0]
+        self.wcs_ativo = "G54"
+        self.wcs_offsets = {
+            "G54": [0.0, 0.0, 0.0],
+            "G55": [0.0, 0.0, 0.0],
+            "G56": [0.0, 0.0, 0.0],
+            "G57": [0.0, 0.0, 0.0],
+            "G58": [0.0, 0.0, 0.0],
+            "G59": [0.0, 0.0, 0.0],
+        }
+        self.modo_distancia = "G90"
+        self.unidades = "G21"
+        self.feed_atual = FEED_RATE
+        self.override_pct = 100
+        self.rapid_override_pct = 100
+        self.spindle_override_pct = 100
+        self.check_mode = False
+        self.settings = {
+            0: ("10", "Step pulse time, microseconds"),
+            1: ("25", "Step idle delay, milliseconds"),
+            2: ("0", "Step pulse invert, mask"),
+            3: ("0", "Step direction invert, mask"),
+            4: ("0", "Invert step enable pin, boolean"),
+            5: ("0", "Invert limit pins, boolean"),
+            6: ("0", "Invert probe pin, boolean"),
+            10: ("1", "Status report options, mask"),
+            11: ("0.010", "Junction deviation, millimeters"),
+            12: ("0.002", "Arc tolerance, millimeters"),
+            13: ("0", "Report in inches, boolean"),
+            20: ("0", "Soft limits enable, boolean"),
+            21: ("0", "Hard limits enable, boolean"),
+            22: ("1", "Homing cycle enable, boolean"),
+            23: ("3", "Homing direction invert, mask"),
+            24: ("25.000", "Homing locate feed rate, mm/min"),
+            25: ("500.000", "Homing search seek rate, mm/min"),
+            26: ("250", "Homing switch debounce delay, ms"),
+            27: ("2.000", "Homing switch pull-off distance, mm"),
+            30: ("1000", "Maximum spindle speed, RPM"),
+            31: ("0", "Minimum spindle speed, RPM"),
+            32: ("0", "Laser-mode enable, boolean"),
+            100: ("80.000", "X-axis travel resolution, step/mm"),
+            101: ("80.000", "Y-axis travel resolution, step/mm"),
+            102: ("80.000", "Z-axis travel resolution, step/mm"),
+            110: ("2000.000", "X-axis maximum rate, mm/min"),
+            111: ("2000.000", "Y-axis maximum rate, mm/min"),
+            112: ("1000.000", "Z-axis maximum rate, mm/min"),
+            120: ("100.000", "X-axis acceleration, mm/sec^2"),
+            121: ("100.000", "Y-axis acceleration, mm/sec^2"),
+            122: ("50.000", "Z-axis acceleration, mm/sec^2"),
+            130: ("297.000", "X-axis maximum travel, millimeters"),
+            131: ("297.000", "Y-axis maximum travel, millimeters"),
+            132: ("50.000", "Z-axis maximum travel, millimeters"),
+        }
+
+    def write(self, dados):
+        agora = time.perf_counter()
+        if dados == b"?":
+            if self.check_mode:
+                self.estado = "Check"
+            elif self.estado not in ("Hold", "Alarm", "Sleep"):
+                self.estado = "Run" if agora < self.ocupado_ate else "Idle"
+            wx = self.mpos[0] - self.wco[0]
+            wy = self.mpos[1] - self.wco[1]
+            wz = self.mpos[2] - self.wco[2]
+            fs = int(self.feed_atual * self.override_pct / 100.0) if self.estado in ("Run", "Jog") else 0
+            status = (
+                f"<{self.estado}|MPos:{self.mpos[0]:.3f},{self.mpos[1]:.3f},{self.mpos[2]:.3f}|"
+                f"WPos:{wx:.3f},{wy:.3f},{wz:.3f}|WCO:{self.wco[0]:.3f},{self.wco[1]:.3f},{self.wco[2]:.3f}|"
+                f"FS:{fs},0|Ov:{self.override_pct},{self.rapid_override_pct},{self.spindle_override_pct}>"
+            )
+            self.fila.append((status, 0.0))
+            return
+        if dados == b"!":
+            self.estado = "Hold"
+            self.ocupado_ate = 0.0
+            return
+        if dados == b"~":
+            self.estado = "Check" if self.check_mode else "Idle"
+            return
+        if dados == b"\x85":
+            self.ocupado_ate = 0.0
+            if self.estado == "Jog":
+                self.estado = "Idle"
+            return
+        if dados == b"\x90":
+            self.override_pct = 100
+            return
+        if dados == b"\x91":
+            self.override_pct = min(200, self.override_pct + 10)
+            return
+        if dados == b"\x92":
+            self.override_pct = max(10, self.override_pct - 10)
+            return
+        if dados == b"\x93":
+            self.override_pct = min(200, self.override_pct + 1)
+            return
+        if dados == b"\x94":
+            self.override_pct = max(10, self.override_pct - 1)
+            return
+        if dados == b"\x95":
+            self.rapid_override_pct = 100
+            return
+        if dados == b"\x96":
+            self.rapid_override_pct = 50
+            return
+        if dados == b"\x97":
+            self.rapid_override_pct = 25
+            return
+        if dados == b"\x18":
+            self.fila.clear()
+            self.check_mode = False
+            self.estado = "Idle"
+            self.ocupado_ate = 0.0
+            self.fila.append(("Grbl 1.1h ['$' for help]", 0.0))
+            return
+
+        for linha in dados.decode(errors="ignore").splitlines():
+            texto = linha.strip()
+            if not texto:
+                continue
+            up = texto.upper()
+
+            if up == "$":
+                self.fila.append(("[HLP:$$ $# $G $I $N $x=val $Nx=line $J=line $SLP $C $X $H ~ ! ? ctrl-x]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$$":
+                for k in sorted(self.settings.keys()):
+                    val, desc = self.settings[k]
+                    self.fila.append((f"${k}={val} ({desc})", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$#":
+                for wcs_k in ("G54", "G55", "G56", "G57", "G58", "G59"):
+                    v = self.wcs_offsets[wcs_k]
+                    self.fila.append((f"[{wcs_k}:{v[0]:.3f},{v[1]:.3f},{v[2]:.3f}]", 0.0))
+                self.fila.append((f"[G28:{self.g28_pos[0]:.3f},{self.g28_pos[1]:.3f},{self.g28_pos[2]:.3f}]", 0.0))
+                self.fila.append((f"[G30:{self.g30_pos[0]:.3f},{self.g30_pos[1]:.3f},{self.g30_pos[2]:.3f}]", 0.0))
+                self.fila.append((f"[G92:{self.wco[0]:.3f},{self.wco[1]:.3f},{self.wco[2]:.3f}]", 0.0))
+                self.fila.append(("[TLO:0.000]", 0.0))
+                self.fila.append(("[PRB:0.000,0.000,0.000:0]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$G":
+                self.fila.append((f"[GC:G0 {self.wcs_ativo} G17 {self.unidades} {self.modo_distancia} G94 M5 M9 T0 F{self.feed_atual:g} S0]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$I":
+                self.fila.append(("[VER:1.1h.20190825:SMART_MATRIX_EESC_USP]", 0.0))
+                self.fila.append(("[OPT:V,15,128]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$N":
+                self.fila.append(("$N0=G21 G90", 0.0))
+                self.fila.append(("$N1=", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$X":
+                self.estado = "Idle"
+                self.fila.append(("[MSG:Caution: Unlocked]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$C":
+                self.check_mode = not self.check_mode
+                self.estado = "Check" if self.check_mode else "Idle"
+                self.fila.append((f"[MSG:Check Mode {'Enabled' if self.check_mode else 'Disabled'}]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$SLP":
+                self.estado = "Sleep"
+                self.fila.append(("[MSG:Sleeping]", 0.0))
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "$H":
+                self.mpos = [0.0, 0.0, 0.0]
+                self.wco = [0.0, 0.0, 0.0]
+                self.estado = "Idle"
+                self.ocupado_ate = agora + 0.1
+                self.fila.append(("ok", self.ocupado_ate))
+                continue
+
+            m_set = re.match(r"^\$(\d+)\s*=\s*(-?[\d.]+)$", up)
+            if m_set:
+                cod = int(m_set.group(1))
+                val = m_set.group(2)
+                desc = self.settings.get(cod, ("", "Custom GRBL setting"))[1]
+                self.settings[cod] = (val, desc)
+                self.fila.append(("ok", 0.0))
+                continue
+
+            if up in ("G54", "G55", "G56", "G57", "G58", "G59"):
+                self.wcs_ativo = up
+                self.wco = list(self.wcs_offsets[up])
+                self.fila.append(("ok", 0.0))
+                continue
+
+            if "G90" in up and not up.startswith("$J="):
+                self.modo_distancia = "G90"
+            if "G91" in up and not up.startswith("$J="):
+                self.modo_distancia = "G91"
+            if "G20" in up:
+                self.unidades = "G20"
+            if "G21" in up:
+                self.unidades = "G21"
+
+            if up == "G28.1":
+                self.g28_pos = list(self.mpos)
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "G28":
+                self.mpos = list(self.g28_pos)
+                self.ocupado_ate = agora + self.TEMPO_MOVIMENTO_S
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "G30.1":
+                self.g30_pos = list(self.mpos)
+                self.fila.append(("ok", 0.0))
+                continue
+            if up == "G30":
+                self.mpos = list(self.g30_pos)
+                self.ocupado_ate = agora + self.TEMPO_MOVIMENTO_S
+                self.fila.append(("ok", 0.0))
+                continue
+
+            if up.startswith(("G10 P0 L20", "G10 L20 P0", "G10 L20 P1", "G92")):
+                mx = re.search(r"X(-?[\d.]+)", up)
+                my = re.search(r"Y(-?[\d.]+)", up)
+                mz = re.search(r"Z(-?[\d.]+)", up)
+                if mx:
+                    self.wco[0] = self.mpos[0] - float(mx.group(1))
+                if my:
+                    self.wco[1] = self.mpos[1] - float(my.group(1))
+                if mz:
+                    self.wco[2] = self.mpos[2] - float(mz.group(1))
+                self.wcs_offsets[self.wcs_ativo] = list(self.wco)
+                self.fila.append(("ok", 0.0))
+                continue
+
+            if up.startswith("$J="):
+                corpo_jog = up[3:]
+                inc = "G91" in corpo_jog or (self.modo_distancia == "G91" and "G90" not in corpo_jog)
+                mx = re.search(r"X(-?[\d.]+)", corpo_jog)
+                my = re.search(r"Y(-?[\d.]+)", corpo_jog)
+                mz = re.search(r"Z(-?[\d.]+)", corpo_jog)
+                mf = re.search(r"F([\d.]+)", corpo_jog)
+                if mf:
+                    self.feed_atual = float(mf.group(1))
+                if mx:
+                    v = float(mx.group(1))
+                    self.mpos[0] = (self.mpos[0] + v) if inc else (v + self.wco[0])
+                if my:
+                    v = float(my.group(1))
+                    self.mpos[1] = (self.mpos[1] + v) if inc else (v + self.wco[1])
+                if mz:
+                    v = float(mz.group(1))
+                    self.mpos[2] = (self.mpos[2] + v) if inc else (v + self.wco[2])
+                self.ocupado_ate = max(agora, self.ocupado_ate) + self.TEMPO_MOVIMENTO_S
+                self.fila.append(("ok", 0.0))
+                continue
+
+            if re.search(r"\bG0?[01]\b", up):
+                mx = re.search(r"X(-?[\d.]+)", up)
+                my = re.search(r"Y(-?[\d.]+)", up)
+                mz = re.search(r"Z(-?[\d.]+)", up)
+                mf = re.search(r"F([\d.]+)", up)
+                if mx or my or mz:
+                    inc = "G91" in up or (self.modo_distancia == "G91" and "G90" not in up)
+                    if mx:
+                        v = float(mx.group(1))
+                        self.mpos[0] = (self.mpos[0] + v) if inc else (v + self.wco[0])
+                    if my:
+                        v = float(my.group(1))
+                        self.mpos[1] = (self.mpos[1] + v) if inc else (v + self.wco[1])
+                    if mz:
+                        v = float(mz.group(1))
+                        self.mpos[2] = (self.mpos[2] + v) if inc else (v + self.wco[2])
+                    if mf:
+                        self.feed_atual = float(mf.group(1))
+                    self.ocupado_ate = max(agora, self.ocupado_ate) + self.TEMPO_MOVIMENTO_S
+
+            liberar_em = self.ocupado_ate if up.startswith("G4") else 0.0
+            self.fila.append(("ok", liberar_em))
+
+    def readline(self):
+        if self.fila:
+            texto, liberar_em = self.fila[0]
+            espera = liberar_em - time.perf_counter()
+            if espera > TIMEOUT_LEITURA_SERIAL_S:
+                time.sleep(TIMEOUT_LEITURA_SERIAL_S)
+                return b""
+            if espera > 0:
+                time.sleep(espera)
+            self.fila.popleft()
+            return (texto + "\r\n").encode()
+        time.sleep(TIMEOUT_LEITURA_SERIAL_S)
+        return b""
+
+    def reset_input_buffer(self):
+        self.fila.clear()
+
+    def close(self):
+        self.is_open = False
+
+
+class ControladorGRBL:
+    """Controlador GRBL 1.1 completo com todas as funções do UGS + Calibração de Home + Console Serial."""
+
+    def __init__(self):
+        self.ser = None
+        self.lock = threading.Lock()
+        self.estado = "IDLE"
+        self.mpos = [0.0, 0.0, 0.0]
+        self.wpos = [0.0, 0.0, 0.0]
+        self.wco = [0.0, 0.0, 0.0]
+        self.wcs_ativo = "G54"
+        self.feed_override = 100
+        self.rapid_override = 100
+        self.spindle_override = 100
+        self.fs_atual = [0.0, 0.0]
+        self.pinos_pn = ""
+        self.ultimo_status_raw = ""
+        self.porta_atual = PORTA_GRBL
+        self.em_execucao_job = False
+        self.config_eeprom = {}
+        self.offsets_wcs = {}
+        self.estado_parser = "G0 G54 G17 G21 G90 G94"
+
+    def listar_portas_disponiveis(self):
+        portas = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0", "SIMULADO"]
+        if serial is not None and hasattr(serial, "tools"):
+            try:
+                for p in serial.tools.list_ports.comports():
+                    if p.device not in portas:
+                        portas.insert(0, p.device)
+            except Exception:
+                pass
+        return portas
+
+    def conectar(self, porta=None, baud=None):
+        global SIMULADO
+        porta = (porta or PORTA_GRBL).strip()
+        baud = baud or BAUD
+        with self.lock:
+            if self.ser and getattr(self.ser, "is_open", False):
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+
+            if porta.upper() == "SIMULADO" or serial is None:
+                self.porta_atual = "SIMULADO"
+                self.ser = PortaSimulada("grbl")
+                registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
+                registrar_terminal("SYS", "Conectado ao Simulador GRBL 1.1h (UGS Completo)", "ok")
+            else:
+                candidatas = [porta]
+                for p_alt in ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0", "/dev/ttyUSB1"):
+                    if p_alt not in candidatas and os.path.exists(p_alt):
+                        candidatas.append(p_alt)
+                conectou_real = False
+                ultimo_erro = ""
+                for p_tentativa in candidatas:
+                    try:
+                        try:
+                            self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S, exclusive=True)
+                        except TypeError:
+                            self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S)
+                        SIMULADO = False
+                        self.porta_atual = p_tentativa
+                        conectou_real = True
+                        if p_tentativa != porta:
+                            registrar_log(f"Porta {porta} mudou para {p_tentativa}! Conectado automaticamente em {p_tentativa}.", "ok")
+                        else:
+                            registrar_log(f"Porta serial {p_tentativa} aberta ({baud} bps).", "ok")
+                        registrar_terminal("SYS", f"Conectado em {p_tentativa} @ {baud} bps", "ok")
+                        break
+                    except Exception as e:
+                        ultimo_erro = str(e)
+                if not conectou_real:
+                    self.porta_atual = "SIMULADO"
+                    self.ser = PortaSimulada("grbl")
+                    registrar_log(f"Porta {porta} indisponivel ({ultimo_erro}). Verifique o cabo USB! Usando Modo Simulado temporario.", "aviso")
+                    registrar_terminal("SYS", f"Sem USB ({ultimo_erro}) -> Modo Simulado temporario", "aviso")
+
+            t0 = time.perf_counter()
+            if self._aguardar_grbl_pronto_nolock(TIMEOUT_BOOT_GRBL_S):
+                registrar_log(f"GRBL respondeu em {time.perf_counter() - t0:.2f}s.", "ok")
+            else:
+                registrar_log("Aviso: GRBL nao mandou banner nem respondeu '?'. Tentando acordar...", "aviso")
+                self.ser.write(b"\r\n\r\n")
+                time.sleep(0.5)
+            self.ser.reset_input_buffer()
+
+        status_grbl = self.preparar_grbl()
+        registrar_log(f"Status do GRBL: {status_grbl or 'sem resposta'}{explicar_pinos(status_grbl)}", "info")
+        pronto, motivo = avaliar_status_para_mover(status_grbl)
+        if not pronto:
+            registrar_log(f"ATENCAO: {motivo}. Do jeito que esta, a trajetoria nao vai comecar.", "aviso")
+            if "fim de curso" in motivo:
+                registrar_log(DICA_FIM_DE_CURSO, "aviso")
+        return True
+
+    def recuperar_usb_grbl(self, pos_atual=None):
+        registrar_log("[AUTO-RECUPERACAO USB] Reconectando porta serial do GRBL apos interferencia...", "aviso")
+        with self.lock:
+            try:
+                if self.ser:
+                    self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+        time.sleep(1.0)
+        self.conectar(PORTA_GRBL, BAUD)
+        if self.porta_atual != "SIMULADO":
+            self.enviar_comando("$X", logar=False)
+            self.enviar_comando("G21 G90", logar=False)
+            if pos_atual is not None:
+                px, py = pos_atual
+                self.enviar_comando(f"G10 P0 L20 X{px:.3f} Y{py:.3f}", logar=False)
+                self.enviar_comando(f"G92 X{px:.3f} Y{py:.3f}", logar=False)
+                self.wpos[0], self.wpos[1] = px, py
+                registrar_log(f"[AUTO-RECUPERACAO USB] Reconectado em {self.porta_atual} e posicao ({px:.2f}, {py:.2f}) restaurada!", "ok")
+            return True
+        return False
+
+    def _ler_linha_nolock(self, limite):
+        pedaco = b""
+        while sistema_ativo.is_set():
+            dados = self.ser.readline()
+            if dados:
+                pedaco += dados
+                if pedaco.endswith(b"\n"):
+                    return pedaco.decode(errors="ignore").strip()
+            elif time.perf_counter() >= limite:
+                break
+        return ""
+
+    def _aguardar_grbl_pronto_nolock(self, timeout=TIMEOUT_BOOT_GRBL_S):
+        inicio = time.perf_counter()
+        limite = inicio + timeout
+        prox_sonda = inicio + 0.2
+        while sistema_ativo.is_set() and time.perf_counter() < limite:
+            linha = self._ler_linha_nolock(min(limite, prox_sonda))
+            if "Grbl" in linha or linha.startswith("<"):
+                if "Grbl" in linha:
+                    registrar_terminal("RX", linha, "ok")
+                if linha.startswith("<"):
+                    self._parse_status(linha)
+                return True
+            if time.perf_counter() >= prox_sonda:
+                self.ser.write(b"?")
+                prox_sonda = time.perf_counter() + 0.25
+        return False
+
+    def ler_status_grbl(self, timeout=1.2):
+        if not self.ser:
+            return ""
+        with self.lock:
+            return self._ler_status_nolock(timeout)
+
+    def _ler_status_nolock(self, timeout=0.5):
+        try:
+            self.ser.write(b"?")
+            limite = time.perf_counter() + timeout
+            while sistema_ativo.is_set() and time.perf_counter() < limite:
+                linha = self._ler_linha_nolock(limite)
+                if linha.startswith("<"):
+                    self._parse_status(linha)
+                    return linha
+                if linha.startswith("ALARM"):
+                    msg = explicar_alarme(linha)
+                    registrar_log(f"GRBL avisou: {msg}", "erro")
+                    registrar_terminal("RX", msg, "erro")
+        except Exception as e:
+            if "readiness to read" in str(e) or "Input/output error" in str(e) or "Errno 5" in str(e):
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+        return ""
+
+    def atualizar_status(self):
+        self.ler_status_grbl(timeout=0.25)
+
+    def _parse_status(self, linha):
+        self.ultimo_status_raw = linha
+        partes = linha.strip("<>").split("|")
+        if partes:
+            self.estado = partes[0].split(":")[0].upper()
+        self.pinos_pn = pinos_ativos(linha)
+        m_wco = RE_WCO.search(linha)
+        if m_wco:
+            self.wco = [float(m_wco.group(1)), float(m_wco.group(2)), float(m_wco.group(3))]
+        m_mpos = RE_MPOS.search(linha)
+        m_wpos = RE_WPOS.search(linha)
+        if m_mpos:
+            self.mpos = [float(m_mpos.group(1)), float(m_mpos.group(2)), float(m_mpos.group(3))]
+            if not m_wpos:
+                self.wpos = [self.mpos[i] - self.wco[i] for i in range(3)]
+        if m_wpos:
+            self.wpos = [float(m_wpos.group(1)), float(m_wpos.group(2)), float(m_wpos.group(3))]
+            if not m_mpos:
+                self.mpos = [self.wpos[i] + self.wco[i] for i in range(3)]
+        m_fs = RE_FS_GRBL.search(linha)
+        if m_fs:
+            self.fs_atual = [float(m_fs.group(1)), float(m_fs.group(2))]
+        m_ov = RE_OV_GRBL.search(linha)
+        if m_ov:
+            self.feed_override = int(m_ov.group(1))
+            self.rapid_override = int(m_ov.group(2))
+            self.spindle_override = int(m_ov.group(3))
+
+    def preparar_grbl(self):
+        status = self.ler_status_grbl()
+        if not status or status.startswith("<Alarm"):
+            registrar_log(
+                f"GRBL em alarme/sem resposta ao conectar ({status or 'sem status'}). Enviando soft-reset.",
+                "aviso",
+            )
+            self.soft_reset()
+        for comando in ("$X", "G21 G90"):
+            ok, msg = self.enviar_comando(comando, logar=False)
+            if not ok:
+                registrar_log(f"Aviso: '{comando}' -> {msg}", "aviso")
+        for _ in range(3):
+            status = self.ler_status_grbl()
+            if status:
+                break
+        return status
+
+    def enviar_byte_tempo_real(self, byte_cmd, descricao=""):
+        if not self.ser:
+            return False
+        try:
+            self.ser.write(byte_cmd)
+            if descricao:
+                registrar_log(descricao, "info")
+                registrar_terminal("RT", descricao, "info")
+            return True
+        except Exception:
+            return False
+
+    def enviar_override_tempo_real(self, tipo):
+        mapa = {
+            "feed_100": (b"\x90", "Feed Override: 100% (0x90)"),
+            "feed_+10": (b"\x91", "Feed Override: +10% (0x91)"),
+            "feed_-10": (b"\x92", "Feed Override: -10% (0x92)"),
+            "feed_+1": (b"\x93", "Feed Override: +1% (0x93)"),
+            "feed_-1": (b"\x94", "Feed Override: -1% (0x94)"),
+            "rapid_100": (b"\x95", "Rapid Override: 100% (0x95)"),
+            "rapid_50": (b"\x96", "Rapid Override: 50% (0x96)"),
+            "rapid_25": (b"\x97", "Rapid Override: 25% (0x97)"),
+            "jog_cancel": (b"\x85", "Jog Cancel em Tempo Real (0x85)"),
+        }
+        if tipo in mapa:
+            b_cmd, desc = mapa[tipo]
+            ok = self.enviar_byte_tempo_real(b_cmd, desc)
+            self.atualizar_status()
+            return ok
+        return False
+
+    def cancelar_jog(self):
+        return self.enviar_override_tempo_real("jog_cancel")
+
+    def soft_reset(self):
+        if not self.ser:
+            return False
+        registrar_terminal("TX", "Ctrl+X (0x18 Soft-Reset)", "aviso")
+        with self.lock:
+            try:
+                self.ser.write(b"\x18")
+                limite = time.perf_counter() + 2.5
+                while sistema_ativo.is_set() and time.perf_counter() < limite:
+                    linha = self._ler_linha_nolock(limite)
+                    if linha:
+                        registrar_terminal("RX", linha, "info")
+                    if "Grbl" in linha:
+                        break
+                self.ser.reset_input_buffer()
+            except Exception as e:
+                registrar_log(f"Erro no Soft-Reset: {e}", "erro")
+                return False
+        registrar_log("Soft-Reset (Ctrl+X) enviado ao GRBL.", "aviso")
+        self.atualizar_status()
+        return True
+
+    def parar_grbl(self):
+        if not self.ser:
+            return
+        try:
+            self.ser.write(b"!")
+            time.sleep(0.3)
+            self.ser.write(b"\x18")
+            registrar_terminal("RT", "Parada de Emergência (! + Ctrl+X)", "erro")
+        except Exception:
+            pass
+
+    def enviar_comando(self, comando, timeout=None, logar=True, registrar_no_terminal=True):
+        if not self.ser:
+            return False, "Desconectado"
+        cmd_limpo = comando.strip()
+        if not cmd_limpo:
+            return True, ""
+
+        timeout = TIMEOUT_OK_GRBL if timeout is None else timeout
+        if registrar_no_terminal:
+            registrar_terminal("TX", f">>> {cmd_limpo}", "cmd")
+
+        linhas_resposta = []
+        with self.lock:
+            try:
+                self.ser.write((cmd_limpo + "\n").encode())
+                limite = time.perf_counter() + timeout
+                while sistema_ativo.is_set():
+                    if time.perf_counter() > limite:
+                        msg_to = f"TIMEOUT esperando 'ok' do GRBL para '{cmd_limpo}'"
+                        if registrar_no_terminal:
+                            registrar_terminal("RX", msg_to, "erro")
+                        return False, msg_to
+                    linha = self._ler_linha_nolock(limite)
+                    if not linha:
+                        continue
+                    if linha.startswith("<"):
+                        self._parse_status(linha)
+                        continue
+                    if linha == "ok":
+                        if registrar_no_terminal:
+                            registrar_terminal("RX", "ok", "ok")
+                        if logar:
+                            registrar_log(f"Comando {cmd_limpo} executado (ok).", "ok")
+                        return True, "\n".join(linhas_resposta)
+                    if linha.startswith("ALARM"):
+                        msg = f"GRBL retornou {explicar_alarme(linha)}"
+                        registrar_log(msg, "erro")
+                        if registrar_no_terminal:
+                            registrar_terminal("RX", msg, "erro")
+                        return False, msg
+                    if linha.startswith("error"):
+                        msg = explicar_erro_grbl(linha)
+                        registrar_log(f"GRBL retornou '{msg}' ({cmd_limpo})", "erro")
+                        if registrar_no_terminal:
+                            registrar_terminal("RX", msg, "erro")
+                        return False, msg
+
+                    linhas_resposta.append(linha)
+                    if registrar_no_terminal:
+                        registrar_terminal("RX", linha, "info")
+                    m_cfg = re.match(r"^\$(\d+)=([-\d.]+)", linha)
+                    if m_cfg:
+                        self.config_eeprom[f"${m_cfg.group(1)}"] = m_cfg.group(2)
+                    if linha.startswith("[GC:"):
+                        self.estado_parser = linha.strip("[]")[3:]
+            except Exception as e:
+                if registrar_no_terminal:
+                    registrar_terminal("RX", f"Erro serial: {e}", "erro")
+                return False, str(e)
+        return False, "interrompido"
+
+    def consultar_configuracoes_grbl(self):
+        ok, resp = self.enviar_comando("$$", timeout=5.0, logar=True)
+        return ok, resp, dict(self.config_eeprom)
+
+    def gravar_parametro_grbl(self, codigo, valor):
+        chave = str(codigo).strip()
+        if not chave.startswith("$"):
+            chave = f"${chave}"
+        cmd = f"{chave}={valor}"
+        ok, resp = self.enviar_comando(cmd, timeout=5.0, logar=True)
+        if ok:
+            self.config_eeprom[chave] = str(valor)
+        return ok, resp
+
+    def executar_jog_ugs(self, dx=0.0, dy=0.0, dz=0.0, feed=None):
+        """
+        Executa Jog incremental no padrão oficial do UGS / GRBL 1.1 ($J=G91 G21 X... Y... Z... F...),
+        respeitando INVERTER_JOG_X / INVERTER_JOG_Y caso o operador queira inverter o sentido das setas.
+        """
+        vel = JOG_FEED_RATE if feed is None else float(feed)
+        dx_real = -dx if INVERTER_JOG_X else dx
+        dy_real = -dy if INVERTER_JOG_Y else dy
+        partes = ["$J=G91 G21"]
+        if abs(dx_real) > 1e-6:
+            partes.append(f"X{dx_real:.3f}")
+        if abs(dy_real) > 1e-6:
+            partes.append(f"Y{dy_real:.3f}")
+        if abs(dz) > 1e-6:
+            partes.append(f"Z{dz:.3f}")
+        if len(partes) == 1:
+            return True, "Sem deslocamento"
+        partes.append(f"F{vel:g}")
+        if self.estado.startswith("ALARM"):
+            registrar_log("GRBL estava em Alarme antes do Jog -> enviando $X automaticamente.", "aviso")
+            self.enviar_comando("$X", logar=False)
+        cmd_jog = " ".join(partes)
+        ok, resp = self.enviar_comando(cmd_jog, timeout=5.0, logar=True)
+        if not ok and ("error:8" in str(resp) or "error:9" in str(resp) or "ALARM" in str(resp)):
+            registrar_log("Destravando GRBL ($X) e movendo via G91 G1...", "aviso")
+            self.enviar_comando("$X", logar=False)
+            cmd_g1 = "G91 G21 G1 " + " ".join(partes[1:])
+            ok, resp = self.enviar_comando(cmd_g1, timeout=5.0, logar=True)
+            self.enviar_comando("G90", logar=False)
+        self.atualizar_status()
+        return ok, resp
+
+    def aguardar_grbl_idle(self, timeout=None):
+        timeout = TIMEOUT_IDLE_GRBL if timeout is None else timeout
+        limite = time.perf_counter() + timeout
+        while sistema_ativo.is_set() and not abortar_job_evento.is_set():
+            if time.perf_counter() > limite:
+                registrar_log(f"TIMEOUT ({timeout:.0f}s) esperando GRBL ficar Idle.", "erro")
+                return False, "GRBL nao ficou Idle"
+            status = self.ler_status_grbl()
+            if status.startswith("<Alarm"):
+                registrar_log(f"GRBL em alarme: {status}{explicar_pinos(status)}", "erro")
+                return False, "GRBL em alarme"
+            if status.startswith(("<Idle", "<Check")):
+                return True, ""
+            time.sleep(INTERVALO_POLL_IDLE_S)
+        return False, "interrompido"
+
+    def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
+        if not self.ser:
+            return False, "Desconectado", "Serial GRBL fechada"
+        if fora_dos_limites(x_mm, y_mm):
+            return (
+                False,
+                "alvo fora dos limites",
+                f"Alvo X={x_mm:.3f} Y={y_mm:.3f} fora da caixa calibrada (A,B,C,D +-30 mm). Movimento NAO enviado.",
+            )
+        vel = FEED_RATE if feed is None else feed
+        if timeout is None:
+            dist = math.hypot(x_mm - self.wpos[0], y_mm - self.wpos[1])
+            t_est = (dist / max(1.0, vel)) * 60.0
+            timeout = max(TIMEOUT_IDLE_GRBL, t_est * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
+
+        comando = f"G90 G1 X{x_mm:.3f} Y{y_mm:.3f} F{vel:g}"
+        respostas = 0
+        erro = ""
+        with self.lock:
+            try:
+                self.ser.write(f"{comando}\nG4 P0\n".encode())
+                limite = time.perf_counter() + timeout
+                while respostas < 2:
+                    if abortar_job_evento.is_set() or not sistema_ativo.is_set():
+                        return False, "interrompido", f"Interrompido durante: {comando}"
+                    if time.perf_counter() > limite:
+                        if respostas == 0:
+                            return (
+                                False,
+                                "GRBL nao aceitou o movimento",
+                                f"TIMEOUT esperando 'ok' do GRBL para o comando: {comando}",
+                            )
+                        return (
+                            False,
+                            "GRBL nao ficou Idle",
+                            f"TIMEOUT ({timeout:.0f}s) esperando o fim do movimento: {comando}",
+                        )
+                    linha = self._ler_linha_nolock(limite)
+                    if not linha:
+                        continue
+                    if linha.startswith("<"):
+                        self._parse_status(linha)
+                        continue
+                    if linha == "ok":
+                        respostas += 1
+                    elif linha.startswith("error"):
+                        respostas += 1
+                        erro = erro or f"GRBL retornou '{explicar_erro_grbl(linha)}' para o comando: {comando}"
+                    elif linha.startswith("ALARM"):
+                        status_grbl = self._ler_status_nolock()
+                        return (
+                            False,
+                            f"GRBL em alarme ({linha})",
+                            f"GRBL em alarme: {explicar_alarme(linha)} | comando: {comando} | "
+                            f"status: {status_grbl or 'sem resposta'}{explicar_pinos(status_grbl)}",
+                        )
+            except Exception as e:
+                return False, "GRBL nao aceitou o movimento", f"Erro na comunicacao XY: {e}"
+
+        if erro:
+            return False, "GRBL nao aceitou o movimento", erro
+
+        if CONFIRMAR_IDLE:
+            ok_idle, st_idle = self.aguardar_grbl_idle(timeout)
+            if not ok_idle:
+                return False, st_idle, f"Falha ao confirmar Idle apos {comando}: {st_idle}"
+
+        self.wpos[0], self.wpos[1] = x_mm, y_mm
+        return True, "ok", ""
+
+    def mover_xy_sincrono(self, x_mm, y_mm, feed=None, timeout=None):
+        ok, status, detalhe = self.mover_xy_e_aguardar(x_mm, y_mm, timeout=timeout, feed=feed)
+        if not ok and detalhe:
+            registrar_log(detalhe, "erro")
+        return ok, status
+
+    def voltar_origem(self, pos=None):
+        # Retorna ao Ponto A (origem da matriz: 0.000, 0.000).
+        alvo_x, alvo_y = float(PONTO_A[0]), float(PONTO_A[1])
+        pos_ref = pos or (self.wpos[0], self.wpos[1])
+        dist = math.hypot(alvo_x - pos_ref[0], alvo_y - pos_ref[1])
+        timeout = max(TIMEOUT_IDLE_GRBL, dist / FEED_RATE * 60.0 * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
+        t0 = time.perf_counter()
+        registrar_terminal("TX", f">>> Ir ao Ponto A (G90 G1 X{alvo_x:.3f} Y{alvo_y:.3f})", "cmd")
+        ok, status, detalhe = self.mover_xy_e_aguardar(alvo_x, alvo_y, timeout=timeout)
+        if ok:
+            registrar_log(f"Cabecote no Ponto A ({alvo_x:.2f}, {alvo_y:.2f}) em {time.perf_counter() - t0:.2f}s.", "ok")
+            return True, ""
+        registrar_log(detalhe, "erro")
+        return False, status
+
+    def zerar_eixo(self, eixo="XY", valor_x=0.0, valor_y=0.0, valor_z=0.0):
+        eixo = eixo.upper()
+        partes = []
+        if "X" in eixo:
+            partes.append(f"X{float(valor_x):.3f}")
+        if "Y" in eixo:
+            partes.append(f"Y{float(valor_y):.3f}")
+        if "Z" in eixo:
+            partes.append(f"Z{float(valor_z):.3f}")
+        coords = " ".join(partes) if partes else "X0 Y0"
+        self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
+        self.enviar_comando(f"G92 {coords}", logar=False)
+        self.atualizar_status()
+        registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
+        return True
+
+    def executar_homing(self):
+        registrar_log("Executando ciclo de Homing físico ($H)...", "info")
+        ok, msg = self.enviar_comando("$H", timeout=45.0, logar=False)
+        if ok:
+            self.aguardar_grbl_idle(timeout=45.0)
+            self.zerar_eixo("XYZ")
+            registrar_log("Homing ($H) concluido e origem (0,0,0) calibrada!", "ok")
+        else:
+            registrar_log(f"Falha no Homing ($H): {msg}", "erro")
+        return ok
+
+    def calibrar_home(
+        self,
+        modo="manual_aqui",
+        offset_x=0.0,
+        offset_y=0.0,
+        offset_z=0.0,
+        salvar_g28=True,
+        zerar_mpos_reset=False,
+        homing_dir_mask=None,
+        homing_pulloff_mm=None,
+        homing_feed=None,
+        homing_seek=None,
+    ):
+        registrar_log(f"Iniciando Calibração de Home (modo={modo})...", "info")
+
+        if homing_dir_mask is not None:
+            self.gravar_parametro_grbl("$22", 1)
+            self.gravar_parametro_grbl("$23", int(homing_dir_mask))
+        if homing_feed is not None and float(homing_feed) > 0:
+            self.gravar_parametro_grbl("$24", f"{float(homing_feed):.3f}")
+        if homing_seek is not None and float(homing_seek) > 0:
+            self.gravar_parametro_grbl("$25", f"{float(homing_seek):.3f}")
+        if homing_pulloff_mm is not None and float(homing_pulloff_mm) >= 0:
+            self.gravar_parametro_grbl("$27", f"{float(homing_pulloff_mm):.3f}")
+
+        if modo == "gravar_eeprom_home":
+            registrar_log("Parâmetros de Homing ($22, $23, $24, $25, $27) gravados na EEPROM do GRBL!", "ok")
+            return True
+
+        if modo == "homing_chave":
+            ok_h = self.executar_homing()
+            if not ok_h:
+                return False
+            if abs(offset_x) > 1e-6 or abs(offset_y) > 1e-6 or abs(offset_z) > 1e-6:
+                self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
+            if salvar_g28:
+                self.enviar_comando("G28.1", logar=False)
+            self.atualizar_status()
+            registrar_log("Calibração de Home com Fim de Curso ($H + G28.1) concluída!", "ok")
+            return True
+
+        if zerar_mpos_reset:
+            self.soft_reset()
+            time.sleep(0.2)
+            self.enviar_comando("$X", logar=False)
+            self.enviar_comando("G21 G90", logar=False)
+
+        self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
+        if salvar_g28:
+            self.enviar_comando("G28.1", logar=False)
+        self.atualizar_status()
+        registrar_log(
+            f"Home Manual calibrado na posição atual (Extremidade Direita = 0,0) -> WPos=({offset_x:.2f}, {offset_y:.2f}, {offset_z:.2f}) "
+            f"{'+ G28.1 salvo' if salvar_g28 else ''}!",
+            "ok",
+        )
+        return True
+
+    def ir_para_g28(self):
+        ok, _ = self.enviar_comando("G28")
+        if ok:
+            self.aguardar_grbl_idle()
+            self.atualizar_status()
+        return ok
+
+    def salvar_g28(self):
+        ok, _ = self.enviar_comando("G28.1")
+        if ok:
+            registrar_log("Posição atual salva como Home Secundário G28 (G28.1)!", "ok")
+        return ok
+
+    def ir_para_g30(self):
+        ok, _ = self.enviar_comando("G30")
+        if ok:
+            self.aguardar_grbl_idle()
+            self.atualizar_status()
+        return ok
+
+    def salvar_g30(self):
+        ok, _ = self.enviar_comando("G30.1")
+        if ok:
+            registrar_log("Posição atual salva como Estacionamento G30 (G30.1)!", "ok")
+        return ok
+
+    def selecionar_wcs(self, wcs="G54"):
+        wcs = wcs.strip().upper()
+        if wcs in ("G54", "G55", "G56", "G57", "G58", "G59"):
+            ok, _ = self.enviar_comando(wcs)
+            if ok:
+                self.wcs_ativo = wcs
+                self.atualizar_status()
+            return ok
+        return False
+
+    def alternar_modo_check(self):
+        ok, _ = self.enviar_comando("$C")
+        self.atualizar_status()
+        return ok
+
+    def acionar_sleep(self):
+        ok, _ = self.enviar_comando("$SLP")
+        self.atualizar_status()
+        return ok
+
+
+def configurar_sistema_coordenadas(
+    origem_x_na_direita=None,
+    sinal_eixo_x=None,
+    sinal_eixo_y=None,
+    inverter_jog_x=None,
+    inverter_jog_y=None,
+    limite_x_mm=None,
+    limite_y_mm=None,
+    x_inicio_fisico=None,
+    y_inicio_fisico=None,
+    x_fim_fisico=None,
+    y_fim_fisico=None,
+    ponto_a=None,
+    ponto_b=None,
+    ponto_c=None,
+    ponto_d=None,
+):
+    """
+    Atualiza em tempo real a orientação e a caixa física real da matriz (X_INICIO..X_FIM, Y_INICIO..Y_FIM).
+    Salva automaticamente em calibracao_matriz.json para persistir entre execuções.
+    """
+    global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y, INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
+    global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO, PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    if ponto_a is not None and len(ponto_a) == 2:
+        PONTO_A = [float(ponto_a[0]), float(ponto_a[1])]
+    if ponto_b is not None and len(ponto_b) == 2:
+        PONTO_B = [float(ponto_b[0]), float(ponto_b[1])]
+    if ponto_c is not None and len(ponto_c) == 2:
+        PONTO_C = [float(ponto_c[0]), float(ponto_c[1])]
+    if ponto_d is not None and len(ponto_d) == 2:
+        PONTO_D = [float(ponto_d[0]), float(ponto_d[1])]
+
+    if origem_x_na_direita is not None:
+        ORIGEM_X_NA_DIREITA = bool(origem_x_na_direita)
+    if sinal_eixo_x is not None:
+        SINAL_EIXO_X = -1.0 if float(sinal_eixo_x) < 0 else 1.0
+        if x_fim_fisico is None:
+            larg_atual = abs(X_FIM_FISICO - X_INICIO_FISICO) or 247.5
+            X_FIM_FISICO = X_INICIO_FISICO + larg_atual * SINAL_EIXO_X
+    if sinal_eixo_y is not None:
+        SINAL_EIXO_Y = -1.0 if float(sinal_eixo_y) < 0 else 1.0
+        if y_fim_fisico is None:
+            alt_atual = abs(Y_FIM_FISICO - Y_INICIO_FISICO) or 247.5
+            Y_FIM_FISICO = Y_INICIO_FISICO + alt_atual * SINAL_EIXO_Y
+    if inverter_jog_x is not None:
+        INVERTER_JOG_X = bool(inverter_jog_x)
+    if inverter_jog_y is not None:
+        INVERTER_JOG_Y = bool(inverter_jog_y)
+    if x_inicio_fisico is not None:
+        X_INICIO_FISICO = float(x_inicio_fisico)
+    if y_inicio_fisico is not None:
+        Y_INICIO_FISICO = float(y_inicio_fisico)
+    if x_fim_fisico is not None:
+        X_FIM_FISICO = float(x_fim_fisico)
+        SINAL_EIXO_X = -1.0 if (X_FIM_FISICO - X_INICIO_FISICO) < 0 else 1.0
+    if y_fim_fisico is not None:
+        Y_FIM_FISICO = float(y_fim_fisico)
+        SINAL_EIXO_Y = -1.0 if (Y_FIM_FISICO - Y_INICIO_FISICO) < 0 else 1.0
+    if limite_x_mm is not None and float(limite_x_mm) > 0:
+        LIMITE_X_MM = float(limite_x_mm)
+    if limite_y_mm is not None and float(limite_y_mm) > 0:
+        LIMITE_Y_MM = float(limite_y_mm)
+
+    LIMITE_X_MM = max(abs(LIMITE_X_MM or 250.0), abs(X_INICIO_FISICO), abs(X_FIM_FISICO))
+    LIMITE_Y_MM = max(abs(LIMITE_Y_MM or 250.0), abs(Y_INICIO_FISICO), abs(Y_FIM_FISICO))
+
+    salvar_calibracao_matriz()
+    est = obter_estado_coordenadas()
+    msg = (
+        f"4 Cantos Calibrados: A={est['ponto_a']} | B={est['ponto_b']} | "
+        f"C={est['ponto_c']} | D={est['ponto_d']} | "
+        f"Centro da Flor (50,50)=({est['x_meio_fisico']}, {est['y_meio_fisico']})"
+    )
+    registrar_log(msg, "ok")
+    registrar_terminal("SYS", msg, "ok")
+    for aviso in est.get("avisos", []):
+        registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
+    return est
+
+
+def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
+    cmd = (texto_cmd or "").strip()
+    if not cmd:
+        return {"ok": True, "resposta": ""}
+
+    up = cmd.upper()
+
+    if up in ("HELP", "AJUDA", "?HELP"):
+        ajuda = (
+            "=== COMANDOS DO TERMINAL INTEGRADO (UGS + SMART MATRIX) ===\n"
+            "  [GRBL / UGS]  $$ (Config EEPROM) | $# (Offsets G54/G28/G30) | $G (Modais) | $I (Info) | $N (Startup)\n"
+            "                $H (Homing) | $X (Destravar) | $C (Check Mode) | $SLP (Sleep) | RESET / CTRL+X\n"
+            "                $3=0..7 (Inverter direcao dos motores X/Y na EEPROM do GRBL)\n"
+            "  [ORIGEM 0,0]  ORIGEM_DIREITA (Define ponto 0,0 na extremidade direita da matriz)\n"
+            "                ORIGEM_ESQUERDA (Define ponto 0,0 na extremidade esquerda da matriz)\n"
+            "                SINAL_X=-1 ou SINAL_X=1 (Define se para ir para a esquerda o GRBL usa X- ou X+)\n"
+            "                HOME_CAL (Calibra Home 0,0,0 na posicao atual + salva G28.1)\n"
+            "  [PINOS Z]     PINOS (Mostra sequencia GPIO [5, 6, 16, 27, 23, 17, 24, 25] e pulsos)\n"
+            "                Z1 a Z8 (Dispara nivel Z) | TESTE_Z (Testa reles 1 a 8) | SEQ_Z (Sequencia 1..8)\n"
+            "                MS=10 ou MS=15,10,10 (Configura duracao do pulso ON, OFF e Pausa em ms)\n"
+            "                PULSOS=7 (Define no de pulsos padrao para todos os niveis)\n"
+            "                PULSOS_NIVEL=1,2,3,4,5,6,7,8 (Define quantos pulsos em cada nivel Z1..Z8)"
+        )
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        for l in ajuda.splitlines():
+            registrar_terminal("SYS", l, "info")
+        return {"ok": True, "resposta": ajuda}
+
+    if up in ("ORIGEM_DIREITA", "ORIGEM=DIREITA"):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        cfg_c = configurar_sistema_coordenadas(origem_x_na_direita=True)
+        if ESTADO_ESTUDIO["matriz"]:
+            compilar_matriz_para_estudio(
+                np.array(ESTADO_ESTUDIO["matriz"], dtype=np.uint8),
+                ESTADO_ESTUDIO["resumo"].get("modo_operacao", "Matriz Atual"),
+            )
+        return {"ok": True, "resposta": "Origem (0,0) definida na EXTREMIDADE DIREITA da matriz.", "coordenadas": cfg_c, "atualizar_matriz": True}
+
+    if up in ("ORIGEM_ESQUERDA", "ORIGEM=ESQUERDA"):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        cfg_c = configurar_sistema_coordenadas(origem_x_na_direita=False)
+        if ESTADO_ESTUDIO["matriz"]:
+            compilar_matriz_para_estudio(
+                np.array(ESTADO_ESTUDIO["matriz"], dtype=np.uint8),
+                ESTADO_ESTUDIO["resumo"].get("modo_operacao", "Matriz Atual"),
+            )
+        return {"ok": True, "resposta": "Origem (0,0) definida na EXTREMIDADE ESQUERDA da matriz.", "coordenadas": cfg_c, "atualizar_matriz": True}
+
+    if up.startswith("SINAL_X="):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        val = float(cmd.split("=", 1)[1].strip())
+        cfg_c = configurar_sistema_coordenadas(sinal_eixo_x=val)
+        if ESTADO_ESTUDIO["matriz"]:
+            compilar_matriz_para_estudio(
+                np.array(ESTADO_ESTUDIO["matriz"], dtype=np.uint8),
+                ESTADO_ESTUDIO["resumo"].get("modo_operacao", "Matriz Atual"),
+            )
+        return {"ok": True, "resposta": f"Sinal do Eixo X ajustado para {cfg_c['sinal_eixo_x']}.", "coordenadas": cfg_c, "atualizar_matriz": True}
+
+    if up == "PINOS":
+        registrar_terminal("TX", ">>> PINOS", "cmd")
+        cfg = obter_estado_config_z()
+        mapa_str = " | ".join(
+            f"Z{i+1}->GPIO {cfg['pinos_gpio_z'][i]} ({cfg['pulsos_por_nivel'][i]} pulsos)"
+            for i in range(NIVEIS_MAX)
+        )
+        msg = (
+            f"Ordem Oficial Cabeçote: {cfg['pinos_gpio_z']} | "
+            f"Pulso ON={cfg['z_on_ms']}ms, OFF={cfg['z_off_ms']}ms, Pausa={cfg['pausa_z_ms']}ms | "
+            f"{mapa_str}"
+        )
+        registrar_terminal("SYS", msg, "ok")
+        return {"ok": True, "resposta": msg, "config_z": cfg}
+
+    if up in ("Z1", "Z2", "Z3", "Z4", "Z5", "Z6", "Z7", "Z8"):
+        nv = int(up[1])
+        registrar_terminal("TX", f">>> {up} (GPIO {PINOS_GPIO_Z[nv-1]})", "cmd")
+        if _job_em_execucao:
+            return {"ok": False, "resposta": "Z manual bloqueado durante job."}
+        abortar_job_evento.clear()
+        ok, info = acionar_eixo_z(nv)
+        msg = f"Nivel Z{nv} (GPIO {info['pino_gpio']}) acionado: {info['pulsos']} pulsos em {info['tempo_ms']} ms"
+        registrar_terminal("RX", msg, "ok" if ok else "erro")
+        return {"ok": ok, "resposta": msg}
+
+    if up in ("TESTE_Z", "T"):
+        registrar_terminal("TX", f">>> {up}", "cmd")
+        if _job_em_execucao:
+            return {"ok": False, "resposta": "Teste Z bloqueado durante job."}
+        abortar_job_evento.clear()
+        threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
+        return {"ok": True, "resposta": "Teste sequencial dos 8 reles iniciado."}
+
+    if up == "SEQ_Z":
+        registrar_terminal("TX", ">>> SEQ_Z", "cmd")
+        if _job_em_execucao:
+            return {"ok": False, "resposta": "Sequencia Z bloqueada durante job."}
+        abortar_job_evento.clear()
+        threading.Thread(target=acionar_sequencia_cabecote, args=(NIVEIS_MAX,), daemon=True).start()
+        return {"ok": True, "resposta": f"Sequencia {PINOS_GPIO_Z} iniciada."}
+
+    if up.startswith(("MS=", "ON_MS=")):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        val_str = cmd.split("=", 1)[1].strip()
+        partes = [float(x.strip()) for x in val_str.split(",") if x.strip()]
+        on_ms = partes[0] if len(partes) >= 1 else None
+        off_ms = partes[1] if len(partes) >= 2 else on_ms
+        pausa_ms = partes[2] if len(partes) >= 3 else None
+        cfg = configurar_parametros_pulsos_z(on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms)
+        return {"ok": True, "resposta": "Tempo de pulso (ms) atualizado.", "config_z": cfg}
+
+    if up.startswith("OFF_MS="):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        off_ms = float(cmd.split("=", 1)[1].strip())
+        cfg = configurar_parametros_pulsos_z(off_ms=off_ms)
+        return {"ok": True, "resposta": "Tempo OFF (ms) atualizado.", "config_z": cfg}
+
+    if up.startswith("PAUSA_MS="):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        pausa_ms = float(cmd.split("=", 1)[1].strip())
+        cfg = configurar_parametros_pulsos_z(pausa_ms=pausa_ms)
+        return {"ok": True, "resposta": "Pausa antes de Z (ms) atualizada.", "config_z": cfg}
+
+    if up.startswith("PULSOS="):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        n_p = int(cmd.split("=", 1)[1].strip())
+        cfg = configurar_parametros_pulsos_z(
+            num_pulsos_fixo=n_p, pulsos_por_nivel=[n_p] * NIVEIS_MAX, usar_fixo=True
+        )
+        return {"ok": True, "resposta": f"Pulsos configurados para {n_p} em todos os niveis.", "config_z": cfg}
+
+    if up.startswith("PULSOS_NIVEL="):
+        registrar_terminal("TX", f">>> {cmd}", "cmd")
+        lista_str = cmd.split("=", 1)[1].strip()
+        cfg = configurar_parametros_pulsos_z(pulsos_por_nivel=lista_str, usar_fixo=False)
+        return {"ok": True, "resposta": "Tabela de pulsos por nivel atualizada.", "config_z": cfg}
+
+    if up == "HOME_CAL":
+        registrar_terminal("TX", ">>> HOME_CAL", "cmd")
+        ok = ctrl_grbl.calibrar_home(modo="manual_aqui", salvar_g28=True)
+        return {"ok": ok, "resposta": "Home calibrado na posicao atual."}
+
+    if up in ("RESET", "CTRL+X", "CTRL-X", "0X18"):
+        ok = ctrl_grbl.soft_reset()
+        return {"ok": ok, "resposta": "Soft-Reset enviado."}
+
+    if up == "?":
+        registrar_terminal("TX", ">>> ?", "cmd")
+        st = ctrl_grbl.ler_status_grbl()
+        registrar_terminal("RX", st or "Sem resposta", "info")
+        return {"ok": bool(st), "resposta": st}
+
+    if up == "!":
+        ctrl_grbl.enviar_byte_tempo_real(b"!", "Feed Hold (!) enviado via Terminal")
+        return {"ok": True, "resposta": "Feed Hold (!)"}
+
+    if up == "~":
+        ctrl_grbl.enviar_byte_tempo_real(b"~", "Cycle Start (~) enviado via Terminal")
+        return {"ok": True, "resposta": "Cycle Start (~)"}
+
+    timeout_cmd = 45.0 if up == "$H" else 8.0
+    ok, resp = ctrl_grbl.enviar_comando(cmd, timeout=timeout_cmd, logar=True, registrar_no_terminal=True)
+    ctrl_grbl.atualizar_status()
+    return {"ok": ok, "resposta": resp}

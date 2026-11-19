@@ -1,0 +1,93 @@
+# =============================================================================
+# LOGS, CONSOLE UGS, SNAPSHOT E TELEMETRIA DA RASPBERRY PI 5
+# =============================================================================
+def registrar_terminal(direcao, mensagem, tipo="info"):
+    """Registra linhas enviadas (>>>) e recebidas (<) no Console/Terminal estilo UGS."""
+    hora = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    ESTADO_ESTUDIO["terminal"].appendleft({
+        "hora": hora,
+        "dir": direcao,
+        "msg": str(mensagem),
+        "tipo": tipo,
+    })
+
+
+def registrar_log(mensagem, tipo="info", nome_arquivo="log_operacao.txt"):
+    hora = datetime.now().strftime("%H:%M:%S")
+    timestamp_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    linha = f"[{timestamp_full}] {mensagem}\n"
+    try:
+        with open(nome_arquivo, "a", encoding="utf-8") as f:
+            f.write(linha)
+    except Exception:
+        pass
+    print(linha.strip())
+    if nome_arquivo == "log_operacao.txt":
+        ESTADO_ESTUDIO["logs"].appendleft({"hora": hora, "msg": mensagem, "tipo": tipo})
+
+
+def ler_ultimas_linhas(nome_arquivo, n_linhas, bloco=8192):
+    with open(nome_arquivo, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        pos = f.tell()
+        dados = b""
+        while pos > 0 and dados.count(b"\n") <= n_linhas:
+            passo = min(bloco, pos)
+            pos -= passo
+            f.seek(pos)
+            dados = f.read(passo) + dados
+    return dados.decode("utf-8", errors="replace").splitlines(keepends=True)[-n_linhas:]
+
+
+def extrair_logs_recentes(n_linhas=50, arquivos=("log_operacao.txt", "log_telemetria_rasp.txt")):
+    resultado = {}
+    for nome_arquivo in arquivos:
+        try:
+            resultado[nome_arquivo] = ler_ultimas_linhas(nome_arquivo, n_linhas)
+        except FileNotFoundError:
+            resultado[nome_arquivo] = []
+    return resultado
+
+
+def exportar_snapshot_de_logs(nome_saida="log_snapshot_atual.txt", n_linhas=50):
+    logs = extrair_logs_recentes(n_linhas)
+    try:
+        with open(nome_saida, "w", encoding="utf-8") as f:
+            f.write(f"=== Snapshot de logs em {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n\n")
+            for nome_arquivo, linhas in logs.items():
+                f.write(f"--- {nome_arquivo} (ultimas {len(linhas)} linhas) ---\n")
+                f.writelines(linhas)
+                f.write("\n")
+    except Exception as e:
+        registrar_log(f"Erro ao exportar snapshot de logs: {e}", "erro")
+
+
+def thread_exportador_de_logs(intervalo=15):
+    while sistema_ativo.is_set():
+        exportar_snapshot_de_logs()
+        time.sleep(intervalo)
+
+
+def monitorar_telemetria():
+    while sistema_ativo.is_set():
+        try:
+            cpu = psutil.cpu_percent(interval=1) if psutil else 0.0
+            ram = psutil.virtual_memory().percent if psutil else 0.0
+            mem_processo_mb = (_processo_atual.memory_info().rss / (1024 * 1024)) if _processo_atual else 0.0
+            try:
+                with open("/sys/class/thermal/thermal_zone0/temp", "r") as f:
+                    temp_c = float(f.read()) / 1000.0
+            except Exception:
+                temp_c = 0.0
+
+            msg = (
+                f"TELEMETRIA | CPU: {cpu}% | RAM: {ram}% | "
+                f"Mem proc: {mem_processo_mb:.1f}MB | Temp: {temp_c:.1f}C | "
+                f"Fila: {fila_de_movimentos.qsize()}"
+            )
+            registrar_log(msg, tipo="info", nome_arquivo="log_telemetria_rasp.txt")
+            time.sleep(5)
+        except Exception as e:
+            registrar_log(f"Erro na telemetria: {e}", tipo="erro", nome_arquivo="log_telemetria_rasp.txt")
+
+

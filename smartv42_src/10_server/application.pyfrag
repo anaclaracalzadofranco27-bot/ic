@@ -1,0 +1,413 @@
+# ==============================================================================
+# SECAO 7: SERVIDOR HTTP/JSON E PONTO DE ENTRADA PRINCIPAL
+# ==============================================================================
+
+_grbl_global = None
+_reset_global = None
+_matriz_atual = None
+_gcode_atual = []
+_trajetoria_atual = []
+estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None}
+
+
+def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D"):
+    global _matriz_atual, _gcode_atual, _trajetoria_atual
+    estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None})
+    _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
+    _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
+
+
+class StudioRequestHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        return
+
+    def _enviar_json(self, dados, status=200):
+        corpo = json.dumps(dados, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(corpo)))
+        self.end_headers()
+        self.wfile.write(corpo)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ("/", "/index.html"):
+            corpo = HTML_CONCEITUAL.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(corpo)))
+            self.end_headers()
+            self.wfile.write(corpo)
+            return
+
+        if parsed.path == "/api/matrix":
+            pinos_ativos = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+            self._enviar_json({
+                "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
+                "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
+                "gcode_importado": estado_importacao_gcode["linhas"] is not None,
+                "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
+                "pinos_ativos": pinos_ativos,
+                "coord": obter_estado_coordenadas(),
+            })
+            return
+
+        if parsed.path == "/api/status":
+            _grbl_global.atualizar_status()
+            self._enviar_json({
+                "porta_grbl": _grbl_global.porta_atual,
+                "simulado": _grbl_global.porta_atual == "SIMULADO",
+                "estado_grbl": _grbl_global.estado,
+                "wpos": _grbl_global.wpos,
+                "mpos": _grbl_global.mpos,
+                "pinos_ativos": _grbl_global.pinos_pn,
+                "wcs": _grbl_global.wcs_ativo,
+                "coord": obter_estado_coordenadas(),
+                "idx": list(mm_fisico_para_indice(_grbl_global.wpos[0], _grbl_global.wpos[1])),
+                "job": _job_progresso,
+                "logs": list(ESTADO_ESTUDIO["logs"])[:35],  # mais recentes primeiro
+            })
+            return
+
+        self._enviar_json({"erro": "Rota nao encontrada"}, 404)
+
+    def do_POST(self):
+        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE
+        tamanho = int(self.headers.get("Content-Length", 0))
+        if tamanho > 6_000_000:
+            self._enviar_json({"ok": False, "erro": "Requisicao maior que 6 MB."}, 413)
+            return
+        bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
+        dados = json.loads(bruto) if bruto else {}
+        acao = dados.get("action", "")
+
+        if acao == "carregar_gcode":
+            if _job_em_execucao:
+                self._enviar_json({"ok": False, "erro": "Conclua o job anterior antes de importar."})
+                return
+            try:
+                conteudo = dados.get("conteudo", "")
+                programa = analisar_gcode_hibrido(conteudo)
+            except (ValueError, TypeError) as exc:
+                self._enviar_json({"ok": False, "erro": str(exc)})
+                return
+            estado_importacao_gcode.update({
+                "linhas": conteudo.splitlines(), "programa": programa,
+                "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
+            })
+            registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
+            self._enviar_json({"ok": True, "blocos": len(programa)})
+            return
+
+        if acao == "config_coordenadas":
+            estado = configurar_sistema_coordenadas(
+                origem_x_na_direita=dados.get("origem_x_na_direita"),
+                sinal_eixo_x=dados.get("sinal_eixo_x"),
+                sinal_eixo_y=dados.get("sinal_eixo_y"),
+                inverter_jog_x=dados.get("inverter_jog_x"),
+                inverter_jog_y=dados.get("inverter_jog_y"),
+                ponto_a=dados.get("ponto_a"),
+                ponto_b=dados.get("ponto_b"),
+                ponto_c=dados.get("ponto_c"),
+                ponto_d=dados.get("ponto_d"),
+            )
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({"ok": True, "coord": estado})
+            return
+
+        if acao == "calibrar_caixa_fisica":
+            etapa = dados.get("etapa", "")
+            _grbl_global.atualizar_status()
+            wx, wy = float(_grbl_global.wpos[0]), float(_grbl_global.wpos[1])
+            if etapa.startswith("gravar_"):
+                canto = etapa.split("_")[1]
+                kw = {f"ponto_{canto}": [wx, wy]}
+                estado = configurar_sistema_coordenadas(**kw)
+                if _matriz_atual is not None:
+                    atualizar_matriz_global(_matriz_atual)
+                self._enviar_json({"ok": True, "coord": estado})
+                return
+            if etapa in ("ir_a", "ir_b", "ir_c", "ir_d"):
+                mapa_pt = {"ir_a": PONTO_A, "ir_b": PONTO_B, "ir_c": PONTO_C, "ir_d": PONTO_D}[etapa]
+                registrar_log(f"Movendo cabecote para Canto {etapa[-1].upper()} -> X={mapa_pt[0]:.3f}, Y={mapa_pt[1]:.3f}")
+                ok, _ = _grbl_global.mover_xy_sincrono(mapa_pt[0], mapa_pt[1], feed=FEED_RATE)
+                self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
+                return
+            if etapa in ("sync_a", "sync_b", "sync_c", "sync_d", "sync_meio"):
+                xm, ym = indice_para_mm_fisico(49.5, 49.5)
+                alvo = {
+                    "sync_a": PONTO_A,
+                    "sync_b": PONTO_B,
+                    "sync_c": PONTO_C,
+                    "sync_d": PONTO_D,
+                    "sync_meio": [xm, ym],
+                }[etapa]
+                nome_p = etapa.replace("sync_", "").upper()
+                _grbl_global.enviar_comando(f"G10 P0 L20 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
+                _grbl_global.enviar_comando(f"G92 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
+                _grbl_global.atualizar_status()
+                registrar_log(f"Posicao atual sincronizada como Ponto {nome_p}: X={alvo[0]:.3f}, Y={alvo[1]:.3f}")
+                self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
+                return
+            if etapa == "ir_meio":
+                xm, ym = indice_para_mm_fisico(49.5, 49.5)
+                registrar_log(f"Movendo cabecote para o CENTRO FISICO REAL da matriz (50,50) -> X={xm:.3f}, Y={ym:.3f}")
+                ok, _ = _grbl_global.mover_xy_sincrono(xm, ym, feed=FEED_RATE)
+                self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
+                return
+            if etapa == "testar_perimetro":
+                def _rodar_perimetro():
+                    rota = [("A", PONTO_A), ("B", PONTO_B), ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
+                    registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
+                    for nome_p, pt in rota:
+                        registrar_log(f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})")
+                        ok_p, st_p = _grbl_global.mover_xy_sincrono(pt[0], pt[1], feed=FEED_RATE)
+                        if not ok_p:
+                            registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
+                            return
+                    registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
+                threading.Thread(target=_rodar_perimetro, daemon=True).start()
+                self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
+                return
+
+        if acao == "inverter_motor_x_grbl":
+            _, _, cfg_eep = _grbl_global.consultar_configuracoes_grbl()
+            mascara_atual = 0
+            if "$3" in cfg_eep:
+                try:
+                    mascara_atual = int(float(cfg_eep["$3"]))
+                except Exception:
+                    mascara_atual = 0
+            nova_mascara = mascara_atual ^ 1  # Inverte bit 0 (Eixo X)
+            ok = _grbl_global.gravar_parametro_grbl("$3", nova_mascara)
+            self._enviar_json({"ok": ok, "mascara": nova_mascara})
+            return
+
+        if acao == "conectar_portas":
+            p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
+            p_reset = dados.get("porta_reset", _reset_global.porta)
+            _grbl_global.conectar(p_grbl)
+            _reset_global.conectar(p_reset)
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "jog":
+            dx = float(dados.get("dx", 0.0))
+            dy = float(dados.get("dy", 0.0))
+            feed = float(dados.get("feed", FEED_RATE))
+            ok, _ = _grbl_global.executar_jog_ugs(dx=dx, dy=dy, feed=feed)
+            self._enviar_json({"ok": ok})
+            return
+
+        if acao == "ugs_cmd":
+            cmd = dados.get("cmd", "")
+            if cmd == "hold":
+                _job_pausado = True
+                _grbl_global.enviar_byte_tempo_real(b"!", "Feed Hold (!)")
+            elif cmd == "resume":
+                _job_pausado = False
+                _grbl_global.enviar_byte_tempo_real(b"~", "Cycle Start (~)")
+            elif cmd == "abort":
+                _job_abortar = True
+                _job_pausado = False
+                if _job_em_execucao:
+                    abortar_job_evento.set()
+                _grbl_global.soft_reset()
+            elif cmd == "jog_cancel":
+                _grbl_global.cancelar_jog()
+            elif cmd == "unlock":
+                _grbl_global.enviar_comando("$X")
+            elif cmd == "soft_reset":
+                _grbl_global.soft_reset()
+            elif cmd == "home_grbl":
+                _grbl_global.executar_homing()
+            elif cmd == "definir_home_manual":
+                _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+            elif cmd == "zerar_x":
+                _grbl_global.zerar_eixo("X")
+            elif cmd == "zerar_y":
+                _grbl_global.zerar_eixo("Y")
+            elif cmd == "ir_zero_trabalho":
+                _grbl_global.voltar_origem()
+            elif cmd == "ir_g28":
+                _grbl_global.ir_para_g28()
+            elif cmd == "salvar_g28":
+                _grbl_global.salvar_g28()
+            elif cmd == "ir_g30":
+                _grbl_global.ir_para_g30()
+            elif cmd == "salvar_g30":
+                _grbl_global.salvar_g30()
+            elif cmd == "check_mode":
+                _grbl_global.alternar_modo_check()
+            elif cmd == "wcs":
+                _grbl_global.selecionar_wcs(dados.get("wcs", "G54"))
+            elif cmd == "teste_t":
+                threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
+            elif cmd == "seq_cabecote":
+                threading.Thread(target=acionar_sequencia_cabecote, daemon=True).start()
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "testar_z":
+            if _job_em_execucao:
+                self._enviar_json({"ok": False, "erro": "Z manual bloqueado durante job."})
+                return
+            nv = int(dados.get("nivel", 1))
+            abortar_job_evento.clear()
+            ok, info = acionar_eixo_z(nv)
+            self._enviar_json({"ok": ok, "info": info})
+            return
+
+        if acao == "config_cabecote":
+            if dados.get("feed") is not None:
+                FEED_RATE = max(50.0, float(dados.get("feed")))
+            configurar_parametros_pulsos_z(
+                on_ms=dados.get("on_ms"),
+                off_ms=dados.get("off_ms"),
+                pausa_ms=dados.get("pausa_ms"),
+                pulsos_por_nivel=dados.get("pulsos_por_nivel"),
+                usar_fixo=False,
+            )
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "iniciar_job":
+            if estado_importacao_gcode["programa"] is not None:
+                ok = executar_job_gcode_em_background(_grbl_global, estado_importacao_gcode["programa"])
+            else:
+                ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
+            self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
+            return
+
+        if acao == "reset_mecanico":
+            sub = dados.get("subcmd", "completo")
+            if sub == "completo":
+                _reset_global.ciclo_completo_reset(_matriz_atual)
+                atualizar_matriz_global(_matriz_atual)
+            elif sub == "descer":
+                _reset_global.descer_atuadores()
+            elif sub == "subir":
+                _reset_global.subir_atuadores()
+            elif sub == "varrer":
+                _reset_global.varrer_eixo_x_linha(250.0)
+            elif sub == "home":
+                _reset_global.home_eixo_x_linha()
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "gerar_padrao":
+            padrao = dados.get("padrao", "domo")
+            nova = gerar_padrao_teste(padrao, NIVEIS_MAX)
+            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}")
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "mudar_profundidade":
+            MODO_PROFUNDIDADE = dados.get("modo", "distancia")
+            if _matriz_atual is not None:
+                mascara = (_matriz_atual > 0).astype(np.uint8)
+                if MODO_PROFUNDIDADE == "binario":
+                    nova = mascara * NIVEIS_MAX
+                else:
+                    nova = calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
+                atualizar_matriz_global(nova)
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "upload_imagem":
+            b64_str = dados.get("imagem_b64", "")
+            if "," in b64_str:
+                b64_str = b64_str.split(",", 1)[1]
+            raw = base64.b64decode(b64_str)
+            if Image is not None:
+                pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+                nova, _ = processar_imagem_para_matriz(
+                    pil_img,
+                    modo_profundidade=dados.get("modo_profundidade", MODO_PROFUNDIDADE),
+                )
+                atualizar_matriz_global(nova, "Imagem IA (ONNX)")
+            self._enviar_json({"ok": True})
+            return
+
+        if acao == "terminal_cmd":
+            cmd = dados.get("cmd", "")
+            res = executar_comando_terminal_integrado(cmd, _grbl_global, _reset_global)
+            if _matriz_atual is not None and res.get("atualizar_matriz"):
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({
+                "ok": res.get("ok", True),
+                "resp": res.get("resposta", ""),
+                "historico": list(ESTADO_ESTUDIO["terminal"])[:60],  # mais recentes primeiro
+            })
+            return
+
+        if acao == "ler_settings_grbl":
+            _, _, cfg = _grbl_global.consultar_configuracoes_grbl()
+            linhas = [f"{k}={v}" for k, v in cfg.items()]
+            self._enviar_json({"ok": True, "linhas": linhas})
+            return
+
+        self._enviar_json({"erro": f"Acao desconhecida: {acao}"}, 400)
+
+
+def main():
+    global _grbl_global, _reset_global, SIMULADO, ORIGEM_X_NA_DIREITA, SINAL_EIXO_X
+
+    parser = argparse.ArgumentParser(description="Smart Matrix Studio v2.0 (G-code XY + Z GPIO)")
+    parser.add_argument("--simulado", action="store_true", help="Forca operacao em modo simulado")
+    parser.add_argument("--porta", type=str, default=PORTA_GRBL, help="Porta serial do GRBL")
+    parser.add_argument("--origem-esquerda", action="store_true", help="Define (0,0) na extremidade esquerda em vez da direita")
+    parser.add_argument("--sinal-x", type=float, default=1.0, help="Sinal do eixo X (+1.0 ou -1.0)")
+    parser.add_argument("--http-port", type=int, default=0, help="Porta HTTP fixa (0 = automatica)")
+    args, _ = parser.parse_known_args()
+
+    if args.simulado:
+        SIMULADO = True
+    if args.origem_esquerda:
+        ORIGEM_X_NA_DIREITA = False
+    if args.sinal_x < 0:
+        SINAL_EIXO_X = -1.0
+
+    if carregar_calibracao_matriz():
+        registrar_log(f"Calibracao carregada de {ARQUIVO_CALIBRACAO_MATRIZ} (sobrescreve os PONTO_A..D do codigo): "
+                      f"A={PONTO_A} B={PONTO_B} C={PONTO_C} D={PONTO_D}", "aviso")
+    for aviso in validar_cantos():
+        registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
+    inicializar_gpio_z()
+    _grbl_global = ControladorGRBL()
+    _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
+
+    _reset_global = ControladorResetArduino()
+    _reset_global.conectar(PORTA_ARDUINO_RESET)
+
+    matriz_inicial = gerar_padrao_teste("flor", NIVEIS_MAX)
+    atualizar_matriz_global(matriz_inicial, "Flor Central (50,50)")
+
+    t_tel = threading.Thread(target=monitorar_telemetria, daemon=True)
+    t_tel.start()
+
+    servidor = ThreadingHTTPServer(("127.0.0.1", args.http_port), StudioRequestHandler)
+    porta_http = servidor.server_address[1]
+    url = f"http://127.0.0.1:{porta_http}"
+    registrar_log(f"Smart Matrix Studio v2.0 (G-code XY + Z GPIO) iniciado em {url}")
+
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+
+    try:
+        servidor.serve_forever()
+    except KeyboardInterrupt:
+        registrar_log("Encerrando Smart Matrix Studio...")
+    finally:
+        sistema_ativo.clear()
+        _grbl_global.parar_grbl()
+        _reset_global.fechar()
+
+
+if __name__ == "__main__":
+    main()
