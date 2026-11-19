@@ -62,12 +62,6 @@ def exportar_snapshot_de_logs(nome_saida="log_snapshot_atual.txt", n_linhas=50):
         registrar_log(f"Erro ao exportar snapshot de logs: {e}", "erro")
 
 
-def thread_exportador_de_logs(intervalo=15):
-    while sistema_ativo.is_set():
-        exportar_snapshot_de_logs()
-        time.sleep(intervalo)
-
-
 def monitorar_telemetria():
     while sistema_ativo.is_set():
         try:

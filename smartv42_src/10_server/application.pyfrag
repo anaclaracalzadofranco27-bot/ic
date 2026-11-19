@@ -7,12 +7,14 @@ _reset_global = None
 _matriz_atual = None
 _gcode_atual = []
 _trajetoria_atual = []
-estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None}
+estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
+_imagem_origem = None
 
 
-def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D"):
+def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
     global _matriz_atual, _gcode_atual, _trajetoria_atual
-    estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None})
+    if descartar_importacao:
+        estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False})
     _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
     _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
 
@@ -46,6 +48,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
                 "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
                 "gcode_importado": estado_importacao_gcode["linhas"] is not None,
+                "usar_parametros_arquivo": estado_importacao_gcode["usar_parametros_arquivo"],
                 "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
                 "pinos_ativos": pinos_ativos,
                 "coord": obter_estado_coordenadas(),
@@ -77,9 +80,42 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if tamanho > 6_000_000:
             self._enviar_json({"ok": False, "erro": "Requisicao maior que 6 MB."}, 413)
             return
-        bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
-        dados = json.loads(bruto) if bruto else {}
+        try:
+            bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
+            dados = json.loads(bruto) if bruto else {}
+            if not isinstance(dados, dict):
+                raise ValueError("JSON deve conter um objeto.")
+        except (UnicodeError, ValueError) as exc:
+            self._enviar_json({"ok": False, "erro": f"Requisicao invalida: {exc}"}, 400)
+            return
         acao = dados.get("action", "")
+        # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
+        # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
+        simultanea = acao == "iniciar_job" or (
+            acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
+        )
+        if simultanea:
+            return self._executar_acao_com_erros(acao, dados)
+        if not reservar_operacao_manual():
+            self._enviar_json({"ok": False, "erro": "Maquina ocupada: finalize ou aborte o trabalho atual."}, 409)
+            return
+        try:
+            return self._executar_acao_com_erros(acao, dados)
+        finally:
+            liberar_operacao_manual()
+
+    def _executar_acao_com_erros(self, acao, dados):
+        try:
+            return self._executar_acao_POST(acao, dados)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            registrar_log(f"Acao {acao} rejeitada: {exc}", "erro")
+            self._enviar_json({"ok": False, "erro": str(exc)}, 400)
+        except Exception as exc:
+            registrar_log(f"Acao {acao} falhou: {exc}", "erro")
+            self._enviar_json({"ok": False, "erro": "Falha interna na operacao; consulte os logs."}, 500)
+
+    def _executar_acao_POST(self, acao, dados):
+        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE, _imagem_origem
 
         if acao == "carregar_gcode":
             if _job_em_execucao:
@@ -94,6 +130,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             estado_importacao_gcode.update({
                 "linhas": conteudo.splitlines(), "programa": programa,
                 "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
+                "usar_parametros_arquivo": bool(dados.get("usar_parametros_arquivo", False)),
             })
             registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
             self._enviar_json({"ok": True, "blocos": len(programa)})
@@ -167,7 +204,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                             registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
                             return
                     registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                threading.Thread(target=_rodar_perimetro, daemon=True).start()
+                # Executa enquanto a reserva da maquina esta ativa.
+                _rodar_perimetro()
                 self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
                 return
 
@@ -187,9 +225,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if acao == "conectar_portas":
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
-            _grbl_global.conectar(p_grbl)
-            _reset_global.conectar(p_reset)
-            self._enviar_json({"ok": True})
+            ok_grbl = _grbl_global.conectar(p_grbl)
+            if ok_grbl and (SIMULADO or not reles_z):
+                inicializar_gpio_z()
+            ok_reset = _reset_global.conectar(p_reset)
+            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl, "reset": ok_reset})
             return
 
         if acao == "jog":
@@ -211,7 +251,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "abort":
                 _job_abortar = True
                 _job_pausado = False
-                if _job_em_execucao:
+                if _job_em_execucao or _operacao_manual:
                     abortar_job_evento.set()
                 _grbl_global.soft_reset()
             elif cmd == "jog_cancel":
@@ -243,9 +283,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "wcs":
                 _grbl_global.selecionar_wcs(dados.get("wcs", "G54"))
             elif cmd == "teste_t":
-                threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
+                if not testar_reles_um_a_um():
+                    self._enviar_json({"ok": False, "erro": "Teste Z interrompido ou bloqueado."}, 409)
+                    return
             elif cmd == "seq_cabecote":
-                threading.Thread(target=acionar_sequencia_cabecote, daemon=True).start()
+                if not acionar_sequencia_cabecote():
+                    self._enviar_json({"ok": False, "erro": "Sequencia Z interrompida ou bloqueada."}, 409)
+                    return
             self._enviar_json({"ok": True})
             return
 
@@ -260,15 +304,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "config_cabecote":
-            if dados.get("feed") is not None:
-                FEED_RATE = max(50.0, float(dados.get("feed")))
-            configurar_parametros_pulsos_z(
-                on_ms=dados.get("on_ms"),
-                off_ms=dados.get("off_ms"),
-                pausa_ms=dados.get("pausa_ms"),
-                pulsos_por_nivel=dados.get("pulsos_por_nivel"),
-                usar_fixo=False,
-            )
+            try:
+                feed_novo = float(dados.get("feed", FEED_RATE))
+                if not math.isfinite(feed_novo) or not 50 <= feed_novo <= 5000:
+                    raise ValueError("Feed deve estar entre 50 e 5000 mm/min.")
+                parametros = {
+                    "on_ms": dados.get("on_ms"), "off_ms": dados.get("off_ms"),
+                    "pausa_ms": dados.get("pausa_ms"),
+                    "pulsos_por_nivel": dados.get("pulsos_por_nivel"),
+                    "usar_fixo": False,
+                }
+                configurar_parametros_pulsos_z(**parametros)
+                FEED_RATE = feed_novo
+            except (ValueError, TypeError) as exc:
+                self._enviar_json({"ok": False, "erro": str(exc)}, 400)
+                return
             if _matriz_atual is not None:
                 atualizar_matriz_global(_matriz_atual)
             self._enviar_json({"ok": True})
@@ -276,44 +326,69 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
         if acao == "iniciar_job":
             if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(_grbl_global, estado_importacao_gcode["programa"])
+                ok = executar_job_gcode_em_background(
+                    _grbl_global, estado_importacao_gcode["programa"],
+                    origem="gcode",
+                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
+                )
             else:
                 ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
             self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
             return
 
         if acao == "reset_mecanico":
+            if not SIMULADO and _reset_global.simulado:
+                self._enviar_json({"ok": False, "erro": "Arduino de reset fisico nao conectado."}, 409)
+                return
             sub = dados.get("subcmd", "completo")
             if sub == "completo":
-                _reset_global.ciclo_completo_reset(_matriz_atual)
-                atualizar_matriz_global(_matriz_atual)
+                ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
+                if ok_reset:
+                    _imagem_origem = None
+                    atualizar_matriz_global(_matriz_atual, descartar_importacao=True)
+                else:
+                    self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
+                    return
             elif sub == "descer":
-                _reset_global.descer_atuadores()
+                ok_reset, _ = _reset_global.descer_atuadores()
             elif sub == "subir":
-                _reset_global.subir_atuadores()
+                ok_reset, _ = _reset_global.subir_atuadores()
             elif sub == "varrer":
-                _reset_global.varrer_eixo_x_linha(250.0)
+                ok_reset, _ = _reset_global.varrer_eixo_x_linha(250.0)
             elif sub == "home":
-                _reset_global.home_eixo_x_linha()
-            self._enviar_json({"ok": True})
+                ok_reset, _ = _reset_global.home_eixo_x_linha()
+            else:
+                self._enviar_json({"ok": False, "erro": "Subcomando reset desconhecido."}, 400)
+                return
+            self._enviar_json({"ok": bool(ok_reset)})
             return
 
         if acao == "gerar_padrao":
+            _imagem_origem = None
             padrao = dados.get("padrao", "domo")
             nova = gerar_padrao_teste(padrao, NIVEIS_MAX)
-            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}")
+            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
         if acao == "mudar_profundidade":
-            MODO_PROFUNDIDADE = dados.get("modo", "distancia")
-            if _matriz_atual is not None:
+            modo = dados.get("modo", "distancia")
+            if modo not in ("distancia", "luminancia", "binario"):
+                self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                return
+            if _imagem_origem is None and modo == "luminancia":
+                self._enviar_json({"ok": False, "erro": "Luminancia precisa da imagem original; importe uma imagem primeiro."}, 409)
+                return
+            MODO_PROFUNDIDADE = modo
+            if _imagem_origem is not None:
+                nova, _ = processar_imagem_para_matriz(_imagem_origem, modo_profundidade=modo)
+            elif _matriz_atual is not None:
                 mascara = (_matriz_atual > 0).astype(np.uint8)
-                if MODO_PROFUNDIDADE == "binario":
-                    nova = mascara * NIVEIS_MAX
-                else:
-                    nova = calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
-                atualizar_matriz_global(nova)
+                nova = mascara * NIVEIS_MAX if modo == "binario" else calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
+            else:
+                self._enviar_json({"ok": False, "erro": "Nao ha matriz para reprocessar."}, 409)
+                return
+            atualizar_matriz_global(nova)
             self._enviar_json({"ok": True})
             return
 
@@ -324,11 +399,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             raw = base64.b64decode(b64_str)
             if Image is not None:
                 pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+                _imagem_origem = pil_img.copy()
+                modo = dados.get("modo_profundidade", MODO_PROFUNDIDADE)
+                if modo not in ("distancia", "luminancia", "binario"):
+                    self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                    return
                 nova, _ = processar_imagem_para_matriz(
                     pil_img,
-                    modo_profundidade=dados.get("modo_profundidade", MODO_PROFUNDIDADE),
+                    modo_profundidade=modo,
                 )
-                atualizar_matriz_global(nova, "Imagem IA (ONNX)")
+                MODO_PROFUNDIDADE = modo
+                atualizar_matriz_global(nova, "Imagem IA (ONNX)", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
@@ -376,9 +457,12 @@ def main():
                       f"A={PONTO_A} B={PONTO_B} C={PONTO_C} D={PONTO_D}", "aviso")
     for aviso in validar_cantos():
         registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
-    inicializar_gpio_z()
     _grbl_global = ControladorGRBL()
-    _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
+    grbl_conectado = _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
+    if grbl_conectado:
+        inicializar_gpio_z()
+    else:
+        registrar_log("GPIO nao inicializado: GRBL nao esta pronto; conecte a controladora antes.", "erro")
 
     _reset_global = ControladorResetArduino()
     _reset_global.conectar(PORTA_ARDUINO_RESET)

@@ -67,7 +67,6 @@ JOG_FEED_RATE = 900.0
 NOME_MODELO = "deeplabv3plus_int8.onnx"
 LIMIAR_IA_PADRAO = 0.42
 
-ESPACAMENTO_PINO_MM = 3.0
 TAMANHO_MATRIZ = (100, 100)
 LIMITE_X_MM = 297.0
 LIMITE_Y_MM = 297.0
@@ -126,8 +125,6 @@ TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
 FATOR_TIMEOUT_MOV = 1.5
 MARGEM_TIMEOUT_MOV_S = 5.0
-MAX_FALHAS_CONSECUTIVAS = 5
-PAUSA_APOS_Z_S = 0.015  # 15 ms de filtragem anti-ruído EMI após desligar relé Z
 
 # Tempos de pulso em segundos (padrão 10 ms = 0.01 s, configuráveis pelo usuário em ms)
 PAUSA_ANTES_Z_S = 0.01
@@ -144,19 +141,15 @@ INTERVALO_POLL_IDLE_S = 0.02
 
 TIMEOUT_LEITURA_SERIAL_S = 0.05
 TIMEOUT_BOOT_GRBL_S = 3.0
-TIMEOUT_CICLO_RESET_S = 60.0
 
 VOLTAR_ORIGEM = True
-IGNORAR_FIM_DE_CURSO = True
+IGNORAR_FIM_DE_CURSO = False
 AUTO_RESET_APOS_PLOT = False
-TEMPO_EXPOSICAO_ANTES_RESET_S = 10.0
 
 RELE_ATIVO_ALTO = False
 NIVEIS_MAX = 8
 MODO_PROFUNDIDADE = "distancia"
 SIMULADO = False
-MOSTRAR_GRAFICO = True
-MODO_ENTRADA = "teste"
 
 # Sequência EXATA dos pinos GPIO do cabeçote conforme a foto enviada:
 PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
@@ -173,7 +166,6 @@ _input_name_onnx = None
 _input_hw_onnx = (513, 513)
 _processo_atual = psutil.Process(os.getpid()) if psutil else None
 
-RE_POSICAO_GRBL = re.compile(r"[WM]Pos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_MPOS = re.compile(r"MPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_WPOS = re.compile(r"WPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_WCO = re.compile(r"WCO:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
@@ -257,6 +249,8 @@ def salvar_calibracao_matriz():
         "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
         "inverter_jog_x": INVERTER_JOG_X,
         "inverter_jog_y": INVERTER_JOG_Y,
+        "sinal_eixo_x": SINAL_EIXO_X,
+        "sinal_eixo_y": SINAL_EIXO_Y,
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -267,7 +261,7 @@ def salvar_calibracao_matriz():
 
 def carregar_calibracao_matriz():
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
-    global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y
+    global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
@@ -285,6 +279,8 @@ def carregar_calibracao_matriz():
         ORIGEM_X_NA_DIREITA = bool(d.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
         INVERTER_JOG_X = bool(d.get("inverter_jog_x", INVERTER_JOG_X))
         INVERTER_JOG_Y = bool(d.get("inverter_jog_y", INVERTER_JOG_Y))
+        SINAL_EIXO_X = -1.0 if float(d.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
+        SINAL_EIXO_Y = -1.0 if float(d.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
         return True
     except Exception:
         return False
@@ -303,6 +299,13 @@ def indice_para_mm_fisico(x_idx, y_idx):
     rows = TAMANHO_MATRIZ[0]
     u = max(0.0, min(1.0, float(x_idx) / float(max(1, cols - 1))))  # 0.0 (Esquerda) -> 1.0 (Direita)
     v = max(0.0, min(1.0, float(y_idx) / float(max(1, rows - 1))))  # 0.0 (Topo)     -> 1.0 (Base)
+
+    # Uma unica orientacao X para o mapeamento e sua inversa.
+    # A janela e uma subregiao ABSOLUTA da caixa calibrada; A..D a delimitam.
+    # O sinal X muda a orientacao da imagem, nao multiplica coordenadas absolutas.
+    inverter_u = bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0)
+    if inverter_u:
+        u = 1.0 - u
 
     if USAR_JANELA_PLOTAGEM:
         x_min, x_max = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
@@ -340,6 +343,8 @@ def mm_fisico_para_indice(x_grbl, y_grbl):
         y_base = 0.5 * (PONTO_A[1] + PONTO_B[1])
 
     u = ((float(x_grbl) - x_esq) / (x_dir - x_esq)) if abs(x_dir - x_esq) > 1e-6 else 0.0
+    if bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0):
+        u = 1.0 - u
     v = ((float(y_grbl) - y_topo) / (y_base - y_topo)) if abs(y_base - y_topo) > 1e-6 else 0.0
     u = max(0.0, min(1.0, u))
     v = max(0.0, min(1.0, v))

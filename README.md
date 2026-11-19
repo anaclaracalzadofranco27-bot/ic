@@ -8,7 +8,7 @@ Software de controle da **Smart 3D Matrix**, uma matriz tátil de 100 × 100 pon
 
 ## 1. Visão geral do funcionamento
 
-O sistema possui dois caminhos de entrada:
+O sistema possui dois caminhos de entrada, que convergem para um **único executor híbrido XY/Z**:
 
 1. **Imagem ou padrão gerado pela interface:** a imagem é transformada em uma matriz de níveis de relevo, convertida em pontos e executada pelo controlador da matriz.
 2. **Arquivo G-code híbrido importado:** um interpretador valida o arquivo antes da execução, envia os movimentos X/Y ao GRBL e converte as instruções Z em pulsos nos GPIOs da Raspberry Pi.
@@ -223,13 +223,13 @@ Transforma a matriz 100 × 100 em uma sequência física de movimentos e acionam
 
 **Edite esta pasta quando:** precisar corrigir ordem de plotagem, mapeamento dos pontos, planejamento de trajetória, progresso da execução por imagem ou retorno à origem.
 
-**Importante:** este é o caminho de execução para **imagens e padrões gerados**. Arquivos G-code importados são tratados pela próxima pasta.
+**Importante:** o caminho da matriz prepara os blocos de movimentos e chama o mesmo motor híbrido usado para o G-code importado. Assim, pausa, abortamento e Z obedecem às mesmas regras.
 
 ### `smartv42_src/08_gcode/` — Leitor e executor G-code híbrido
 
 **Arquivo:** `hybrid_runner.pyfrag`
 
-Implementa a correção que separa os movimentos cartesianos do acionamento físico Z. É usado ao **importar um arquivo G-code** pela interface.
+Separa os movimentos cartesianos do acionamento físico Z. Agora é o **executor único** de trabalhos gerados a partir de matrizes e de arquivos G-code importados.
 
 Etapas:
 
@@ -305,7 +305,7 @@ A opção `--check` **não** altera o executável: ela falha se detectar diverg�
 
 ### `tests/` — Testes automatizados
 
-`tests/test_smartv42.py` usa um controlador GRBL fictício e mocks para testar o interpretador híbrido sem hardware conectado. Os testes cobrem, entre outros:
+`tests/test_smartv42.py` preserva os testes anteriores. `tests/test_regression_smartv42.py` adiciona regressões de segurança, conexão, coordenadas, parâmetros e reset, sempre sem hardware real. Os testes cobrem, entre outros:
 
 - Interpretação das instruções `M42` emitidas pelo compilador.
 - Rejeição de Z cartesiano e comandos não suportados.
@@ -463,3 +463,32 @@ Não envie diretamente o arquivo híbrido exportado a um transmissor G-code conv
 A divisão atual facilita corrigir trechos específicos, mas os fragmentos ainda compartilham estado global. Uma futura refatoração pode convertê-los em módulos Python importáveis com interfaces explícitas; isso exige testes de regressão mais abrangentes.
 
 Os arquivos históricos `smartv41.py` e `smaartvmatriz-main.zip` foram retirados da **versão atual** do repositório após a geração e validação da Smart Matrix v42. As versões anteriores continuam recuperáveis pelo histórico Git.
+
+## 11. Atualização de segurança e manutenção A–H (novembro de 2026)
+
+As correções da auditoria foram implementadas nas oito etapas propostas, com testes de regressão e revisão da operação física.
+
+**A — Segurança:** O GRBL físico deixa de ser substituído silenciosamente por uma porta simulada quando USB falha. O Z físico exige conexão GRBL real e estado Idle; Check e outros estados bloqueiam o acionamento. O envio GRBL rejeita coordenadas Z cartesianas, inclusive pelo console. O GPIO é inicializado apenas depois que a conexão GRBL estiver pronta.
+
+**B — Estados da máquina:** Um job e as operações manuais não podem ser executados ao mesmo tempo. Pausa e Abort são observados antes de novos pulsos Z; o tempo em Hold não consome o timeout normal do trabalho. Testes sequenciais não são mais iniciados em threads soltas sem reserva da máquina.
+
+**C — Coordenadas:** Os cantos A/B/C/D são os limites físicos da bancada; a janela de plotagem é uma subárea absoluta dentro deles. O mapeamento e a transformação inversa compartilham as mesmas regras de origem e orientação. Sinais X/Y são persistidos na calibração. O GRBL não recebe zeramento nem jog cartesiano Z.
+
+**D — Dados e parâmetros:** Alterar parâmetros do cabeçote/calibração não descarta o arquivo G-code importado. A luminância é reprocessada a partir da imagem original, quando disponível. Na importação, a opção **Z do arquivo** permite escolher explicitamente os tempos e pulsos contidos no arquivo; por padrão prevalece a configuração Z atual do cabeçote.
+
+**E — Motor de execução único:** Padrões, imagens e G-code importado compartilham o mesmo executor validado. A trajetória completa é inspecionada antes do primeiro movimento e novamente depois de preparar o GRBL.
+
+**F — Interface e logs:** OFF=0 e Pausa=0 agora são valores possíveis na interface. Erros de comunicação, reset, jog e telemetria são exibidos; os resultados dos jobs ficam disponíveis no estado da aplicação.
+
+**G — Limpeza residual:** Constantes e funções sem referências internas foram removidas. O compilador não emite mais marcadores M3/M5 ou G4 P0 por ponto, pois o sincronismo XY ocorre dentro do controlador. O parser continua aceitando marcadores antigos para compatibilidade.
+
+**H — Testes:** Os testes existentes foram ampliados com uma suíte de regressão sem hardware, executada no GitHub Actions a cada alteração dos fragmentos.
+
+### Atenção antes de acionar a bancada
+
+- Execute primeiro em modo simulado, com o argumento --simulado. A falha de USB em modo físico agora **bloqueia o trabalho**, sem fallback silencioso.
+- Confirme a região de plotagem padrão X=246..270 mm, Y=-50..-29 mm e sua compatibilidade com os quatro cantos reais; confira também o sentido dos motores ($3 do GRBL).
+- O reset mecânico completo envia o comando **D uma única vez**. No modo físico, o firmware do Arduino deve responder **DONE** ou **CONCLUIDO** para confirmar que o ciclo terminou; apenas OK não comprova conclusão.
+- Mesmo com intertravamentos de software, é obrigatório ter uma **parada elétrica de emergência independente**, e validar os GPIOs, a polaridade dos relés e o movimento físico antes de iniciar uma plotagem.
+- Os testes do GitHub Actions são simulados: **não comprovam segurança elétrica ou mecânica**, nem validam uma Raspberry Pi conectada à máquina.
+
