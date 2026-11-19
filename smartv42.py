@@ -67,7 +67,6 @@ JOG_FEED_RATE = 900.0
 NOME_MODELO = "deeplabv3plus_int8.onnx"
 LIMIAR_IA_PADRAO = 0.42
 
-ESPACAMENTO_PINO_MM = 3.0
 TAMANHO_MATRIZ = (100, 100)
 LIMITE_X_MM = 297.0
 LIMITE_Y_MM = 297.0
@@ -126,8 +125,6 @@ TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
 FATOR_TIMEOUT_MOV = 1.5
 MARGEM_TIMEOUT_MOV_S = 5.0
-MAX_FALHAS_CONSECUTIVAS = 5
-PAUSA_APOS_Z_S = 0.015  # 15 ms de filtragem anti-ruído EMI após desligar relé Z
 
 # Tempos de pulso em segundos (padrão 10 ms = 0.01 s, configuráveis pelo usuário em ms)
 PAUSA_ANTES_Z_S = 0.01
@@ -144,19 +141,15 @@ INTERVALO_POLL_IDLE_S = 0.02
 
 TIMEOUT_LEITURA_SERIAL_S = 0.05
 TIMEOUT_BOOT_GRBL_S = 3.0
-TIMEOUT_CICLO_RESET_S = 60.0
 
 VOLTAR_ORIGEM = True
-IGNORAR_FIM_DE_CURSO = True
+IGNORAR_FIM_DE_CURSO = False
 AUTO_RESET_APOS_PLOT = False
-TEMPO_EXPOSICAO_ANTES_RESET_S = 10.0
 
 RELE_ATIVO_ALTO = False
 NIVEIS_MAX = 8
 MODO_PROFUNDIDADE = "distancia"
 SIMULADO = False
-MOSTRAR_GRAFICO = True
-MODO_ENTRADA = "teste"
 
 # Sequência EXATA dos pinos GPIO do cabeçote conforme a foto enviada:
 PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
@@ -173,7 +166,6 @@ _input_name_onnx = None
 _input_hw_onnx = (513, 513)
 _processo_atual = psutil.Process(os.getpid()) if psutil else None
 
-RE_POSICAO_GRBL = re.compile(r"[WM]Pos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_MPOS = re.compile(r"MPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_WPOS = re.compile(r"WPos:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
 RE_WCO = re.compile(r"WCO:\s*(-?\d+\.?\d*),(-?\d+\.?\d*),(-?\d+\.?\d*)")
@@ -257,6 +249,8 @@ def salvar_calibracao_matriz():
         "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
         "inverter_jog_x": INVERTER_JOG_X,
         "inverter_jog_y": INVERTER_JOG_Y,
+        "sinal_eixo_x": SINAL_EIXO_X,
+        "sinal_eixo_y": SINAL_EIXO_Y,
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -267,7 +261,7 @@ def salvar_calibracao_matriz():
 
 def carregar_calibracao_matriz():
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
-    global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y
+    global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
@@ -285,6 +279,8 @@ def carregar_calibracao_matriz():
         ORIGEM_X_NA_DIREITA = bool(d.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
         INVERTER_JOG_X = bool(d.get("inverter_jog_x", INVERTER_JOG_X))
         INVERTER_JOG_Y = bool(d.get("inverter_jog_y", INVERTER_JOG_Y))
+        SINAL_EIXO_X = -1.0 if float(d.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
+        SINAL_EIXO_Y = -1.0 if float(d.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
         return True
     except Exception:
         return False
@@ -303,6 +299,13 @@ def indice_para_mm_fisico(x_idx, y_idx):
     rows = TAMANHO_MATRIZ[0]
     u = max(0.0, min(1.0, float(x_idx) / float(max(1, cols - 1))))  # 0.0 (Esquerda) -> 1.0 (Direita)
     v = max(0.0, min(1.0, float(y_idx) / float(max(1, rows - 1))))  # 0.0 (Topo)     -> 1.0 (Base)
+
+    # Uma unica orientacao X para o mapeamento e sua inversa.
+    # A janela e uma subregiao ABSOLUTA da caixa calibrada; A..D a delimitam.
+    # O sinal X muda a orientacao da imagem, nao multiplica coordenadas absolutas.
+    inverter_u = bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0)
+    if inverter_u:
+        u = 1.0 - u
 
     if USAR_JANELA_PLOTAGEM:
         x_min, x_max = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
@@ -340,6 +343,8 @@ def mm_fisico_para_indice(x_grbl, y_grbl):
         y_base = 0.5 * (PONTO_A[1] + PONTO_B[1])
 
     u = ((float(x_grbl) - x_esq) / (x_dir - x_esq)) if abs(x_dir - x_esq) > 1e-6 else 0.0
+    if bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0):
+        u = 1.0 - u
     v = ((float(y_grbl) - y_topo) / (y_base - y_topo)) if abs(y_base - y_topo) > 1e-6 else 0.0
     u = max(0.0, min(1.0, u))
     v = max(0.0, min(1.0, v))
@@ -444,12 +449,6 @@ def exportar_snapshot_de_logs(nome_saida="log_snapshot_atual.txt", n_linhas=50):
         registrar_log(f"Erro ao exportar snapshot de logs: {e}", "erro")
 
 
-def thread_exportador_de_logs(intervalo=15):
-    while sistema_ativo.is_set():
-        exportar_snapshot_de_logs()
-        time.sleep(intervalo)
-
-
 def monitorar_telemetria():
     while sistema_ativo.is_set():
         try:
@@ -497,13 +496,27 @@ def configurar_parametros_pulsos_z(
 ):
     global TEMPO_ON_Z_S, TEMPO_OFF_Z_S, PAUSA_ANTES_Z_S, NUM_PULSOS_Z, PULSOS_POR_NIVEL, USAR_PULSOS_FIXOS, PINOS_GPIO_Z
 
-    if on_ms is not None and float(on_ms) > 0:
+    # Valida primeiro, para impedir configuracoes parciais ou silenciosamente ignoradas.
+    for nome, valor, minimo, maximo in (
+        ("ON", on_ms, 1, 2000), ("OFF", off_ms, 0, 2000),
+        ("Pausa", pausa_ms, 0, 2000),
+    ):
+        if valor is not None and (not math.isfinite(float(valor)) or not minimo <= float(valor) <= maximo):
+            raise ValueError(f"{nome} deve estar em {minimo}..{maximo} ms")
+    if num_pulsos_fixo is not None and not 1 <= int(num_pulsos_fixo) <= 500:
+        raise ValueError("Pulsos fixos devem estar em 1..500")
+    if pulsos_por_nivel is not None:
+        partes_teste = ([int(x.strip()) for x in pulsos_por_nivel.split(",") if x.strip()]
+                        if isinstance(pulsos_por_nivel, str) else [int(x) for x in pulsos_por_nivel])
+        if len(partes_teste) not in (1, NIVEIS_MAX) or any(not 1 <= x <= 500 for x in partes_teste):
+            raise ValueError("Informe 1 ou 8 valores de pulsos, cada um entre 1 e 500")
+    if on_ms is not None:
         TEMPO_ON_Z_S = float(on_ms) / 1000.0
-    if off_ms is not None and float(off_ms) >= 0:
+    if off_ms is not None:
         TEMPO_OFF_Z_S = float(off_ms) / 1000.0
-    if pausa_ms is not None and float(pausa_ms) >= 0:
+    if pausa_ms is not None:
         PAUSA_ANTES_Z_S = float(pausa_ms) / 1000.0
-    if num_pulsos_fixo is not None and int(num_pulsos_fixo) >= 1:
+    if num_pulsos_fixo is not None:
         NUM_PULSOS_Z = int(num_pulsos_fixo)
     if usar_fixo is not None:
         USAR_PULSOS_FIXOS = bool(usar_fixo)
@@ -574,7 +587,38 @@ def inicializar_gpio_z():
             "ok",
         )
     except Exception as e:
+        for rele in reles_z:
+            try:
+                rele.off()
+                rele.close()
+            except Exception:
+                pass
+        reles_z.clear()
         registrar_log(f"Falha critica ao inicializar GPIO: {e}", "erro")
+
+
+trava_gpio_z = threading.RLock()
+
+
+def validar_conexao_fisica_z():
+    if SIMULADO:
+        return True, ""
+    grbl = globals().get("_grbl_global")
+    if grbl is None or not getattr(grbl, "conexao_real", False):
+        return False, "Bloqueado: XY nao conectado ao GRBL fisico."
+    status = grbl.ler_status_grbl(timeout=0.7)
+    if not status.startswith("<Idle"):
+        return False, f"Bloqueado: GRBL nao confirmou Idle ({status})."
+    if abortar_job_evento.is_set() or _job_abortar:
+        return False, "Z bloqueado: operacao abortada."
+    return True, ""
+
+
+def aguardar_liberacao_z():
+    """Intertravamento de Z: pausa nao permite iniciar o proximo pulso."""
+    while _job_pausado and not _job_abortar and not abortar_job_evento.is_set() and sistema_ativo.is_set():
+        time.sleep(0.025)
+    return sistema_ativo.is_set() and not _job_abortar and not abortar_job_evento.is_set()
 
 
 def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_override=None):
@@ -598,6 +642,10 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
     t_on = (float(on_ms_override) / 1000.0) if on_ms_override is not None else TEMPO_ON_Z_S
     t_off = (float(off_ms_override) / 1000.0) if off_ms_override is not None else TEMPO_OFF_Z_S
 
+    permitido, motivo_bloqueio = validar_conexao_fisica_z()
+    if not permitido:
+        info["erro"] = motivo_bloqueio
+        return False, info
     if not SIMULADO and (not GPIO_DISPONIVEL or len(reles_z) != len(PINOS_GPIO_Z)):
         info["erro"] = "GPIO Z indisponivel: confira reles ou use --simulado"
         return False, info
@@ -608,12 +656,25 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
         info["erro"] = "Duracao Z invalida (ON 1..2000ms; OFF 0..2000ms)"
         return False, info
     pulsos_realizados = 0
+    with trava_gpio_z:
+        return _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio)
+
+
+def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio):
+    pulsos_realizados = 0
     if not SIMULADO and reles_z and len(reles_z) >= sensor:
         pino_rele = reles_z[sensor - 1]
         try:
+            ultimo_check = time.monotonic()
             for i in range(num_batidas):
-                if abortar_job_evento.is_set():
+                if not aguardar_liberacao_z():
                     break
+                if (time.monotonic() - ultimo_check) >= 0.25:
+                    pronto, motivo = validar_conexao_fisica_z()
+                    ultimo_check = time.monotonic()
+                    if not pronto:
+                        info["erro"] = motivo
+                        break
                 pino_rele.on()
                 time.sleep(t_on)
                 pino_rele.off()
@@ -624,7 +685,7 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
             pino_rele.off()
     else:
         for i in range(num_batidas):
-            if abortar_job_evento.is_set():
+            if not aguardar_liberacao_z():
                 break
             time.sleep(t_on)
             pulsos_realizados += 1
@@ -634,7 +695,7 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
     info["pulsos"] = pulsos_realizados
     info["tempo_ms"] = int((time.perf_counter() - t_inicio) * 1000)
     if pulsos_realizados != num_batidas:
-        info["erro"] = "Z interrompido antes do fim da sequencia de pulsos"
+        info["erro"] = "Z interrompido ou pausado antes do fim da sequencia de pulsos"
         return False, info
     return True, info
 
@@ -647,25 +708,38 @@ def acionar_sequencia_cabecote(ate_nivel=8, pulsos_por_pino=None, on_ms=None, of
         "info",
     )
     total_pulsos = 0
+    falhou = False
     t0 = time.perf_counter()
     for nv in range(1, ate_nivel + 1):
         if abortar_job_evento.is_set():
             break
         ok, info = acionar_eixo_z(nv, pulsos_override=pulsos_por_pino, on_ms_override=on_ms, off_ms_override=off_ms)
         total_pulsos += info.get("pulsos", 0)
+        if not ok:
+            falhou = True
         registrar_terminal(
             "Z-SEQ",
             f"Ordem #{nv} -> GPIO {PINOS_GPIO_Z[nv-1]} acionado ({info.get('pulsos', 0)} pulsos, {info.get('tempo_ms', 0)} ms)",
             "ok" if ok else "erro",
         )
+        if not ok:
+            break
     ESTADO_ESTUDIO["z_atual"] = 0
     dt_ms = int((time.perf_counter() - t0) * 1000)
-    registrar_log(f"[SEQUENCIA CABECOTE] Concluida ({ate_nivel} pinos, {total_pulsos} pulsos totais em {dt_ms} ms).", "ok")
-    return True
+    sucesso = not falhou and not abortar_job_evento.is_set()
+    registrar_log(f"[SEQUENCIA CABECOTE] {('Concluida' if sucesso else 'Interrompida')} ({total_pulsos} pulsos em {dt_ms} ms).", "ok" if sucesso else "erro")
+    return sucesso
 
 
 def testar_reles_um_a_um(tempo_ligado_s=0.5):
+    pronto, erro = validar_conexao_fisica_z()
+    if not pronto:
+        registrar_log(f"Teste sequencial Z bloqueado: {erro}", "erro")
+        return False
     if not reles_z:
+        if not SIMULADO:
+            registrar_log("Teste Z bloqueado: reles fisicos indisponiveis.", "erro")
+            return False
         registrar_log(
             f"[TESTE] Sem GPIO fisico (modo simulado). Testando na ordem exata {PINOS_GPIO_Z}...",
             "aviso",
@@ -679,11 +753,15 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
             registrar_terminal("TESTE-Z", msg, "info")
             time.sleep(tempo_ligado_s)
         ESTADO_ESTUDIO["z_atual"] = 0
-        return
+        return not abortar_job_evento.is_set()
     try:
         for i, (pino, rele) in enumerate(zip(PINOS_GPIO_Z, reles_z), start=1):
             if abortar_job_evento.is_set():
                 break
+            pronto, erro = validar_conexao_fisica_z()
+            if not pronto:
+                registrar_log(f"Teste Z interrompido: {erro}", "erro")
+                return False
             ESTADO_ESTUDIO["z_atual"] = i
             msg = f"[TESTE] Ordem #{i} -> Rele {i} (GPIO {pino}) LIGADO por {tempo_ligado_s:.1f}s"
             registrar_log(msg, "info")
@@ -697,6 +775,7 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
             rele.off()
         ESTADO_ESTUDIO["z_atual"] = 0
     registrar_log("[TESTE] Fim. Sequencia verificada: [5, 6, 16, 27, 23, 17, 24, 25].", "ok")
+    return not abortar_job_evento.is_set()
 
 
 def perguntar_config_pulsos_interativo():
@@ -740,42 +819,6 @@ def perguntar_config_pulsos_interativo():
         print("\nMantendo configuração padrão de pulsos.")
     except Exception as e:
         registrar_log(f"Aviso ao ler configuração interativa: {e}. Mantendo valores atuais.", "aviso")
-
-
-def modo_calibracao_eixo_z():
-    registrar_log(f"Mapeamento do Cabeçote Ativo — Ordem GPIO: {PINOS_GPIO_Z}", "info")
-    perguntar_config_pulsos_interativo()
-    while sistema_ativo.is_set():
-        try:
-            entrada = input(
-                f"\n[CALIBRACAO Z DIRETA RPI] Nivel (1-{NIVEIS_MAX}), "
-                f"'t' = testar relé por relé na ordem {PINOS_GPIO_Z}, "
-                f"'s' = acionar sequência completa 1..8, 'c' = reconfigurar ms/pulsos, ou 'sair': "
-            ).strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        if entrada.lower() == "sair":
-            break
-        if entrada.lower() == "t":
-            testar_reles_um_a_um()
-            continue
-        if entrada.lower() == "s":
-            acionar_sequencia_cabecote(NIVEIS_MAX)
-            continue
-        if entrada.lower() == "c":
-            perguntar_config_pulsos_interativo()
-            continue
-        if not entrada.isdigit() or not (1 <= int(entrada) <= NIVEIS_MAX):
-            print(f"Digite um numero entre 1 e {NIVEIS_MAX}, 't', 's', 'c' ou 'sair'.")
-            continue
-
-        nv = int(entrada)
-        ok, info = acionar_eixo_z(nv)
-        detalhe = f"GPIO={info['pino_gpio']} pulsos={info['pulsos']} tempo_rpi={info['tempo_ms']}ms"
-        registrar_log(
-            f"[CALIBRACAO] Nivel {nv} -> {'OK' if ok else 'FALHOU: ' + info['erro']} | {detalhe}",
-            "ok" if ok else "erro",
-        )
 # =============================================================================
 # 2. DIAGNÓSTICO DE ALARMES, LIMITES E CONTROLADOR GRBL 1.1 + FUNÇÕES UGS
 # =============================================================================
@@ -810,8 +853,8 @@ def explicar_pinos(status):
 def avaliar_status_para_mover(status):
     if not status:
         return False, "GRBL nao respondeu ao '?'"
-    if status.startswith("<Alarm"):
-        return False, "GRBL em alarme com a maquina parada"
+    if not status.startswith("<Idle"):
+        return False, f"GRBL nao esta Idle para movimento: {status}"
     fins_xy = "/".join(p for p in pinos_ativos(status) if p in "XY")
     if fins_xy and not IGNORAR_FIM_DE_CURSO:
         return False, f"fim de curso {fins_xy} acionado com a maquina parada"
@@ -823,7 +866,8 @@ def fora_dos_limites(x_mm, y_mm):
     Verifica limites respeitando os 4 cantos físicos calibrados (PONTO_A, PONTO_B, PONTO_C, PONTO_D),
     permitindo toda a faixa real medida na bancada (ex: X de 0 a 450, Y de -500 a +500).
     """
-    margem = 30.0
+    # Uma janela de 30 mm alem dos cantos nao e intertravamento seguro.
+    margem = 0.0
     xs = [p[0] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     ys = [p[1] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     if x_mm < min(xs) - margem or x_mm > max(xs) + margem:
@@ -1189,7 +1233,8 @@ class ControladorGRBL:
         self.pinos_pn = ""
         self.ultimo_status_raw = ""
         self.porta_atual = PORTA_GRBL
-        self.em_execucao_job = False
+        self.conexao_real = False
+        self.modo_simulacao = False
         self.config_eeprom = {}
         self.offsets_wcs = {}
         self.estado_parser = "G0 G54 G17 G21 G90 G94"
@@ -1216,9 +1261,17 @@ class ControladorGRBL:
                 except Exception:
                     pass
 
-            if porta.upper() == "SIMULADO" or serial is None:
+            self.conexao_real = False
+            self.modo_simulacao = False
+            if porta.upper() == "SIMULADO" or SIMULADO:
                 self.porta_atual = "SIMULADO"
+                self.modo_simulacao = True
                 self.ser = PortaSimulada("grbl")
+            elif serial is None:
+                self.ser = None
+                self.porta_atual = "DESCONECTADO"
+                registrar_log("pyserial ausente: conexao fisica indisponivel. Sem fallback para simulacao.", "erro")
+                return False
                 registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
                 registrar_terminal("SYS", "Conectado ao Simulador GRBL 1.1h (UGS Completo)", "ok")
             else:
@@ -1234,8 +1287,8 @@ class ControladorGRBL:
                             self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S, exclusive=True)
                         except TypeError:
                             self.ser = serial.Serial(p_tentativa, baud, timeout=TIMEOUT_LEITURA_SERIAL_S)
-                        SIMULADO = False
                         self.porta_atual = p_tentativa
+                        self.conexao_real = True
                         conectou_real = True
                         if p_tentativa != porta:
                             registrar_log(f"Porta {porta} mudou para {p_tentativa}! Conectado automaticamente em {p_tentativa}.", "ok")
@@ -1246,10 +1299,12 @@ class ControladorGRBL:
                     except Exception as e:
                         ultimo_erro = str(e)
                 if not conectou_real:
-                    self.porta_atual = "SIMULADO"
-                    self.ser = PortaSimulada("grbl")
-                    registrar_log(f"Porta {porta} indisponivel ({ultimo_erro}). Verifique o cabo USB! Usando Modo Simulado temporario.", "aviso")
-                    registrar_terminal("SYS", f"Sem USB ({ultimo_erro}) -> Modo Simulado temporario", "aviso")
+                    self.porta_atual = "DESCONECTADO"
+                    self.ser = None
+                    self.conexao_real = False
+                    registrar_log(f"Porta GRBL indisponivel ({ultimo_erro}). JOB BLOQUEADO; reconecte ou execute --simulado.", "erro")
+                    registrar_terminal("SYS", "Falha USB: nenhum movimento sera simulado automaticamente.", "erro")
+                    return False
 
             t0 = time.perf_counter()
             if self._aguardar_grbl_pronto_nolock(TIMEOUT_BOOT_GRBL_S):
@@ -1267,30 +1322,7 @@ class ControladorGRBL:
             registrar_log(f"ATENCAO: {motivo}. Do jeito que esta, a trajetoria nao vai comecar.", "aviso")
             if "fim de curso" in motivo:
                 registrar_log(DICA_FIM_DE_CURSO, "aviso")
-        return True
-
-    def recuperar_usb_grbl(self, pos_atual=None):
-        registrar_log("[AUTO-RECUPERACAO USB] Reconectando porta serial do GRBL apos interferencia...", "aviso")
-        with self.lock:
-            try:
-                if self.ser:
-                    self.ser.close()
-            except Exception:
-                pass
-            self.ser = None
-        time.sleep(1.0)
-        self.conectar(PORTA_GRBL, BAUD)
-        if self.porta_atual != "SIMULADO":
-            self.enviar_comando("$X", logar=False)
-            self.enviar_comando("G21 G90", logar=False)
-            if pos_atual is not None:
-                px, py = pos_atual
-                self.enviar_comando(f"G10 P0 L20 X{px:.3f} Y{py:.3f}", logar=False)
-                self.enviar_comando(f"G92 X{px:.3f} Y{py:.3f}", logar=False)
-                self.wpos[0], self.wpos[1] = px, py
-                registrar_log(f"[AUTO-RECUPERACAO USB] Reconectado em {self.porta_atual} e posicao ({px:.2f}, {py:.2f}) restaurada!", "ok")
-            return True
-        return False
+        return bool(pronto and status_grbl.startswith("<Idle"))
 
     def _ler_linha_nolock(self, limite):
         pedaco = b""
@@ -1380,22 +1412,22 @@ class ControladorGRBL:
             self.spindle_override = int(m_ov.group(3))
 
     def preparar_grbl(self):
+        """Nunca desbloqueia alarmes, ativa modo Check ou simula movimento silenciosamente."""
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            registrar_log("GRBL fisico nao conectado: job bloqueado.", "erro")
+            return ""
         status = self.ler_status_grbl()
-        if not status or status.startswith("<Alarm"):
-            registrar_log(
-                f"GRBL em alarme/sem resposta ao conectar ({status or 'sem status'}). Enviando soft-reset.",
-                "aviso",
-            )
-            self.soft_reset()
-        for comando in ("$X", "G21 G90"):
+        pronto, motivo = avaliar_status_para_mover(status)
+        if not pronto:
+            registrar_log(f"GRBL nao esta pronto: {motivo}; corrija manualmente.", "erro")
+            return ""
+        for comando in ("G21", "G90", "G54"):
             ok, msg = self.enviar_comando(comando, logar=False)
             if not ok:
-                registrar_log(f"Aviso: '{comando}' -> {msg}", "aviso")
-        for _ in range(3):
-            status = self.ler_status_grbl()
-            if status:
-                break
-        return status
+                registrar_log(f"GRBL recusou {comando}: {msg}", "erro")
+                return ""
+        status = self.ler_status_grbl()
+        return status if avaliar_status_para_mover(status)[0] else ""
 
     def enviar_byte_tempo_real(self, byte_cmd, descricao=""):
         if not self.ser:
@@ -1470,6 +1502,9 @@ class ControladorGRBL:
         cmd_limpo = comando.strip()
         if not cmd_limpo:
             return True, ""
+        # Todas as entradas GRBL (inclusive terminal e jog) obedecem a separacao do Z GPIO.
+        if re.search(r"Z\s*[+-]?(?:\d|\.)", cmd_limpo.upper()):
+            return False, "GRBL bloqueou coordenada cartesiana Z; use comandos discretos Z1..Z8."
 
         timeout = TIMEOUT_OK_GRBL if timeout is None else timeout
         if registrar_no_terminal:
@@ -1544,6 +1579,13 @@ class ControladorGRBL:
         Executa Jog incremental no padrão oficial do UGS / GRBL 1.1 ($J=G91 G21 X... Y... Z... F...),
         respeitando INVERTER_JOG_X / INVERTER_JOG_Y caso o operador queira inverter o sentido das setas.
         """
+        if abs(dz) > 1e-6:
+            return False, "Eixo Z nao e cartesiano: use Z1..Z8 pelo GPIO."
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            return False, "GRBL fisico indisponivel para jog."
+        estado = self.ler_status_grbl()
+        if not estado.startswith("<Idle"):
+            return False, f"Jog bloqueado; estado GRBL: {estado}"
         vel = JOG_FEED_RATE if feed is None else float(feed)
         dx_real = -dx if INVERTER_JOG_X else dx
         dy_real = -dy if INVERTER_JOG_Y else dy
@@ -1552,22 +1594,11 @@ class ControladorGRBL:
             partes.append(f"X{dx_real:.3f}")
         if abs(dy_real) > 1e-6:
             partes.append(f"Y{dy_real:.3f}")
-        if abs(dz) > 1e-6:
-            partes.append(f"Z{dz:.3f}")
         if len(partes) == 1:
             return True, "Sem deslocamento"
         partes.append(f"F{vel:g}")
-        if self.estado.startswith("ALARM"):
-            registrar_log("GRBL estava em Alarme antes do Jog -> enviando $X automaticamente.", "aviso")
-            self.enviar_comando("$X", logar=False)
         cmd_jog = " ".join(partes)
         ok, resp = self.enviar_comando(cmd_jog, timeout=5.0, logar=True)
-        if not ok and ("error:8" in str(resp) or "error:9" in str(resp) or "ALARM" in str(resp)):
-            registrar_log("Destravando GRBL ($X) e movendo via G91 G1...", "aviso")
-            self.enviar_comando("$X", logar=False)
-            cmd_g1 = "G91 G21 G1 " + " ".join(partes[1:])
-            ok, resp = self.enviar_comando(cmd_g1, timeout=5.0, logar=True)
-            self.enviar_comando("G90", logar=False)
         self.atualizar_status()
         return ok, resp
 
@@ -1575,6 +1606,10 @@ class ControladorGRBL:
         timeout = TIMEOUT_IDLE_GRBL if timeout is None else timeout
         limite = time.perf_counter() + timeout
         while sistema_ativo.is_set() and not abortar_job_evento.is_set():
+            if _job_pausado and _job_em_execucao:
+                time.sleep(0.05)
+                limite += 0.05
+                continue
             if time.perf_counter() > limite:
                 registrar_log(f"TIMEOUT ({timeout:.0f}s) esperando GRBL ficar Idle.", "erro")
                 return False, "GRBL nao ficou Idle"
@@ -1582,20 +1617,25 @@ class ControladorGRBL:
             if status.startswith("<Alarm"):
                 registrar_log(f"GRBL em alarme: {status}{explicar_pinos(status)}", "erro")
                 return False, "GRBL em alarme"
-            if status.startswith(("<Idle", "<Check")):
+            if status.startswith("<Idle"):
                 return True, ""
+            if status.startswith(("<Check", "<Hold", "<Door", "<Sleep")):
+                return False, f"Estado nao executavel: {status}"
             time.sleep(INTERVALO_POLL_IDLE_S)
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
-        if not self.ser:
-            return False, "Desconectado", "Serial GRBL fechada"
+        if not self.ser or (not SIMULADO and not self.conexao_real):
+            return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
         if fora_dos_limites(x_mm, y_mm):
             return (
-                False,
-                "alvo fora dos limites",
-                f"Alvo X={x_mm:.3f} Y={y_mm:.3f} fora da caixa calibrada (A,B,C,D +-30 mm). Movimento NAO enviado.",
+                False, "alvo fora dos limites",
+                f"Alvo X={x_mm:.3f} Y={y_mm:.3f} fora dos quatro cantos calibrados. Movimento nao enviado.",
             )
+        status_antes = self.ler_status_grbl(timeout=0.7)
+        pronto, motivo = avaliar_status_para_mover(status_antes)
+        if not pronto:
+            return False, "GRBL nao pronto", motivo
         vel = FEED_RATE if feed is None else feed
         if timeout is None:
             dist = math.hypot(x_mm - self.wpos[0], y_mm - self.wpos[1])
@@ -1612,6 +1652,10 @@ class ControladorGRBL:
                 while respostas < 2:
                     if abortar_job_evento.is_set() or not sistema_ativo.is_set():
                         return False, "interrompido", f"Interrompido durante: {comando}"
+                    if _job_pausado and _job_em_execucao:
+                        time.sleep(0.05)
+                        limite += 0.05
+                        continue
                     if time.perf_counter() > limite:
                         if respostas == 0:
                             return (
@@ -1680,6 +1724,11 @@ class ControladorGRBL:
 
     def zerar_eixo(self, eixo="XY", valor_x=0.0, valor_y=0.0, valor_z=0.0):
         eixo = eixo.upper()
+        if "Z" in eixo:
+            registrar_log("Z nao e eixo cartesiano; zeramento GRBL limitado a XY.", "aviso")
+            eixo = eixo.replace("Z", "")
+        if not eixo or any(letra not in "XY" for letra in eixo):
+            return False
         partes = []
         if "X" in eixo:
             partes.append(f"X{float(valor_x):.3f}")
@@ -1688,18 +1737,19 @@ class ControladorGRBL:
         if "Z" in eixo:
             partes.append(f"Z{float(valor_z):.3f}")
         coords = " ".join(partes) if partes else "X0 Y0"
-        self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
-        self.enviar_comando(f"G92 {coords}", logar=False)
+        ok1, _ = self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
+        ok2, _ = self.enviar_comando(f"G92 {coords}", logar=False)
         self.atualizar_status()
-        registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
-        return True
+        if ok1 and ok2:
+            registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
+        return bool(ok1 and ok2)
 
     def executar_homing(self):
         registrar_log("Executando ciclo de Homing físico ($H)...", "info")
         ok, msg = self.enviar_comando("$H", timeout=45.0, logar=False)
         if ok:
             self.aguardar_grbl_idle(timeout=45.0)
-            self.zerar_eixo("XYZ")
+            self.zerar_eixo("XY")
             registrar_log("Homing ($H) concluido e origem (0,0,0) calibrada!", "ok")
         else:
             registrar_log(f"Falha no Homing ($H): {msg}", "erro")
@@ -1980,16 +2030,16 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         if _job_em_execucao:
             return {"ok": False, "resposta": "Teste Z bloqueado durante job."}
         abortar_job_evento.clear()
-        threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
-        return {"ok": True, "resposta": "Teste sequencial dos 8 reles iniciado."}
+        ok_teste = testar_reles_um_a_um()
+        return {"ok": bool(ok_teste), "resposta": "Teste dos 8 reles concluido." if ok_teste else "Teste Z bloqueado/interrompido."}
 
     if up == "SEQ_Z":
         registrar_terminal("TX", ">>> SEQ_Z", "cmd")
         if _job_em_execucao:
             return {"ok": False, "resposta": "Sequencia Z bloqueada durante job."}
         abortar_job_evento.clear()
-        threading.Thread(target=acionar_sequencia_cabecote, args=(NIVEIS_MAX,), daemon=True).start()
-        return {"ok": True, "resposta": f"Sequencia {PINOS_GPIO_Z} iniciada."}
+        ok_seq = acionar_sequencia_cabecote(ate_nivel=NIVEIS_MAX)
+        return {"ok": bool(ok_seq), "resposta": f"Sequencia {PINOS_GPIO_Z} concluida." if ok_seq else "Sequencia Z interrompida."}
 
     if up.startswith(("MS=", "ON_MS=")):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
@@ -2123,9 +2173,12 @@ class ControladorResetArduino:
                         respostas.append(linha)
                         if any(k in linha.upper() for k in ("OK", "DONE", "CONCLUIDO", "PAROU")):
                             break
-                resp_str = " | ".join(respostas) if respostas else "OK"
-                registrar_log(f"[RESET ARDUINO] {cmd} -> {resp_str}")
-                return True, resp_str
+                resp_str = " | ".join(respostas) if respostas else "SEM RESPOSTA"
+                confirmado = any(k in resp_str.upper() for k in ("OK", "DONE", "CONCLUIDO"))
+                if "PAROU" in resp_str.upper():
+                    confirmado = False
+                registrar_log(f"[RESET ARDUINO] {cmd} -> {resp_str}", "ok" if confirmado else "erro")
+                return confirmado, resp_str
             except Exception as e:
                 registrar_log(f"Erro na serial do Arduino de Reset: {e}")
                 return False, str(e)
@@ -2133,44 +2186,52 @@ class ControladorResetArduino:
     def descer_atuadores(self):
         self.estado_atuadores = "DESCENDO (PRESSIONANDO)"
         ok, msg = self._enviar_cmd("M1_01", 0.3)
-        self._enviar_cmd("M2_01", 0.3)
-        self.estado_atuadores = "AVANCADOS (BASE)"
-        return ok, msg
+        ok2, msg2 = self._enviar_cmd("M2_01", 0.3)
+        if ok and ok2:
+            self.estado_atuadores = "AVANCADOS (BASE)"
+        return bool(ok and ok2), msg + " | " + msg2
 
     def subir_atuadores(self):
         self.estado_atuadores = "SUBINDO (RECUANDO)"
         ok, msg = self._enviar_cmd("M1_00", 0.3)
-        self._enviar_cmd("M2_00", 0.3)
-        self.estado_atuadores = "RECUADOS (TOPO)"
-        return ok, msg
+        ok2, msg2 = self._enviar_cmd("M2_00", 0.3)
+        if ok and ok2:
+            self.estado_atuadores = "RECUADOS (TOPO)"
+        return bool(ok and ok2), msg + " | " + msg2
 
     def varrer_eixo_x_linha(self, destino_mm=250.0):
         self.estado_atuadores = f"VARRENDO EIXO X' -> {destino_mm:.0f}mm"
         ok, msg = self._enviar_cmd(f"X_SWEEP:{destino_mm:.1f}", 0.5)
-        self.posicao_x_linha = float(destino_mm)
+        if ok:
+            self.posicao_x_linha = float(destino_mm)
         return ok, msg
 
     def home_eixo_x_linha(self):
         self.estado_atuadores = "RETORNANDO X' (HOME)"
         ok, msg = self._enviar_cmd("X_HOME", 0.4)
-        self.posicao_x_linha = 0.0
-        self.estado_atuadores = "RECUADOS (TOPO)"
+        if ok:
+            self.posicao_x_linha = 0.0
+            self.estado_atuadores = "RECUADOS (TOPO)"
         return ok, msg
 
     def ciclo_completo_reset(self, matriz_ref=None):
+        """D e comando de ciclo COMPLETO: nao repete as etapas individuais."""
         if self.em_ciclo:
             return False, "Ciclo de reset ja em andamento."
+        if self.simulado and not SIMULADO:
+            return False, "Arduino de reset nao conectado fisicamente."
         self.em_ciclo = True
         try:
-            registrar_log("Iniciando Ciclo Completo de Reset Mecanico (Comando 'D' / 4 Atuadores + Eixo X')...")
-            self._enviar_cmd("D", 0.4)
-            self.descer_atuadores()
-            self.varrer_eixo_x_linha(250.0)
-            self.subir_atuadores()
-            self.home_eixo_x_linha()
+            registrar_log("Iniciando ciclo completo de reset mecanico (apenas comando D).")
+            ok, resposta = self._enviar_cmd("D", 0.4)
+            if not ok:
+                return False, f"Arduino nao confirmou D: {resposta}"
+            # Somente DONE/CONCLUIDO confirma que o ciclo fisico foi finalizado.
+            if not self.simulado and not any(chave in resposta.upper() for chave in ("DONE", "CONCLUIDO")):
+                return False, f"Arduino recebeu D, mas conclusao nao confirmada: {resposta}"
             if matriz_ref is not None:
                 matriz_ref.fill(0)
-            registrar_log("Ciclo Completo de Reset Mecanico finalizado. Todos os pinos zerados.")
+            registrar_log("Reset mecanico concluido pelo Arduino.", "ok")
             return True, "Reset completo executado."
         finally:
             self.em_ciclo = False
@@ -2507,7 +2568,6 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         "G21 ; unidades em mm",
         "G90 ; posicionamento absoluto",
         "G54 ; sistema de coordenadas",
-        f"M3 S1000 ; ativa matriz ({len(pontos)} pinos | Janela X=[{PLOT_X_MIN}..{PLOT_X_MAX}] Y=[{PLOT_Y_MIN}..{PLOT_Y_MAX}] | SinalY={SINAL_EIXO_Y:+.0f} | GPIO={PINOS_GPIO_Z})",
     ]
 
     trajetoria_ui = []
@@ -2520,7 +2580,6 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         linhas_gcode.append(
             f"G1 X{x_mm:.3f} Y{y_mm:.3f} F{FEED_RATE:.0f} ; pino_img=({x_i},{y_i}) nivel={nivel}"
         )
-        linhas_gcode.append("G4 P0 ; sincroniza XY")
         linhas_gcode.append(
             f"M42 P1 ; Z_LEVEL={nivel} GPIO={pino_bcm} PULSOS={qtd_pulsos} ON_MS={on_ms} OFF_MS={off_ms} IDX=({x_i},{y_i})"
         )
@@ -2534,8 +2593,8 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
             "pulsos": int(qtd_pulsos),
         })
 
-    linhas_gcode.append("M5 ; desativa cabecote")
-    linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A (origem 0,0)")
+    if VOLTAR_ORIGEM and pontos:
+        linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A")
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     ESTADO_ESTUDIO["matriz"] = matriz.tolist()
@@ -2557,6 +2616,24 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
 
 _job_lock = threading.Lock()
 _job_em_execucao = False
+_operacao_manual = False
+
+def reservar_operacao_manual():
+    """Bloqueia jog/reset/calibracao/testes concorrentes com jobs."""
+    global _operacao_manual, _job_abortar
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False
+        _operacao_manual = True
+        _job_abortar = False
+        abortar_job_evento.clear()
+        return True
+
+def liberar_operacao_manual():
+    global _operacao_manual
+    with _job_lock:
+        _operacao_manual = False
+
 _job_pausado = False
 _job_abortar = False
 _job_progresso = {
@@ -2576,123 +2653,22 @@ _job_progresso = {
 
 
 def executar_job_em_background(grbl, reset_ctrl, matriz):
-    global _job_em_execucao, _job_pausado, _job_abortar
-    with _job_lock:
-        if _job_em_execucao:
-            registrar_log("Job ja esta em execucao.")
-            return False
-        _job_em_execucao = True
-        _job_pausado = False
-        _job_abortar = False
-        abortar_job_evento.clear()
-
-    def _worker():
-        global _job_em_execucao, _job_pausado, _job_abortar
-        pontos = montar_pontos(matriz)
-        total = len(pontos)
-        _job_progresso.update({
-            "ativo": True,
-            "pausado": False,
-            "atual": 0,
-            "total": total,
-            "inicio_ts": time.monotonic(),
-        })
-
-        origem_txt = "DIREITA (0,0 na extremidade direita)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (0,0 na extremidade esquerda)"
-        registrar_log(
-            f"Iniciando trajetoria ({total} pontos | Origem X={origem_txt} | SinalX={SINAL_EIXO_X:+.0f} | "
-            f"feed={FEED_RATE:.0f} mm/min | GPIO={PINOS_GPIO_Z} | "
-            f"PausaZ={PAUSA_ANTES_Z_S*1000:.1f}ms | ON={TEMPO_ON_Z_S*1000:.1f}ms | OFF={TEMPO_OFF_Z_S*1000:.1f}ms)."
-        )
-
-        falhou = False
-        try:
-            ok_cal, erro_cal = validar_janela_calibrada()
-            if not ok_cal:
-                registrar_log(erro_cal, "erro")
-                return
-            if not grbl.preparar_grbl():
-                registrar_log("ABORTADO antes de mover: GRBL nao ficou pronto.")
-                return
-
-            for idx, (x_i, y_i, nivel) in enumerate(pontos, start=1):
-                if _job_abortar or not sistema_ativo.is_set():
-                    registrar_log(f"Trajetoria abortada pelo usuario no ponto {idx}/{total}.")
-                    break
-
-                while _job_pausado and not _job_abortar and sistema_ativo.is_set():
-                    _job_progresso["pausado"] = True
-                    time.sleep(0.05)
-                _job_progresso["pausado"] = False
-
-                # Converte (x_i, y_i) da matriz para coordenada fisica real em mm
-                # respeitando ORIGEM_X_NA_DIREITA e SINAL_EIXO_X
-                x_mm, y_mm = indice_para_mm_fisico(x_i, y_i)
-                idx_p = max(0, min(len(PINOS_GPIO_Z) - 1, int(nivel) - 1))
-                pino_bcm = PINOS_GPIO_Z[idx_p]
-                qtd_pulsos = obter_pulsos_para_nivel(nivel)
-
-                _job_progresso.update({
-                    "atual": idx,
-                    "x_idx": int(x_i),
-                    "y_idx": int(y_i),
-                    "x_mm": round(float(x_mm), 3),
-                    "y_mm": round(float(y_mm), 3),
-                    "nivel_z": int(nivel),
-                    "gpio_atual": int(pino_bcm),
-                    "pulsos_atuais": int(qtd_pulsos),
-                })
-
-                if USAR_JANELA_PLOTAGEM:
-                    x_lo, x_hi = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-                    y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-                    if not (x_lo - 1e-6 <= x_mm <= x_hi + 1e-6 and y_lo - 1e-6 <= y_mm <= y_hi + 1e-6):
-                        registrar_log(
-                            f"BLOQUEADO ponto {idx}/{total}: (X={x_mm:.2f}, Y={y_mm:.2f}) fora da janela "
-                            f"X=[{x_lo}..{x_hi}], Y=[{y_lo}..{y_hi}].",
-                            "erro",
-                        )
-                        falhou = True
-                        break
-
-                ok_mov, st_mov, det_mov = grbl.mover_xy_e_aguardar(x_mm, y_mm, feed=FEED_RATE)
-                if not ok_mov:
-                    registrar_log(
-                        f"FALHA no ponto {idx}/{total} (X={x_mm:.2f}, Y={y_mm:.2f}): {st_mov} | {det_mov}. "
-                        f"Trajetoria INTERROMPIDA sem acionar Z.",
-                        "erro",
-                    )
-                    falhou = True
-                    break
-
-                if PAUSA_ANTES_Z_S > 0:
-                    time.sleep(PAUSA_ANTES_Z_S)
-
-                ok_z, info_z = acionar_eixo_z(nivel)
-                if not ok_z:
-                    registrar_log(f"FALHA no Z do ponto {idx}/{total}: {info_z.get('erro')}", "erro")
-                    falhou = True
-                    break
-
-            if not _job_abortar and not falhou and sistema_ativo.is_set():
-                if VOLTAR_ORIGEM:
-                    registrar_log(f"Retornando cabecote para o Ponto A (origem X={PONTO_A[0]:.2f}, Y={PONTO_A[1]:.2f})...")
-                    ok_r, st_r, det_r = grbl.mover_xy_e_aguardar(PONTO_A[0], PONTO_A[1], feed=FEED_RATE)
-                    if not ok_r:
-                        registrar_log(f"Nao conseguiu voltar ao Ponto A: {st_r} | {det_r}", "erro")
-                registrar_log("Trajetoria concluida com sucesso!")
-                if AUTO_RESET_APOS_PLOT:
-                    reset_ctrl.ciclo_completo_reset()
-        finally:
-            _job_progresso["ativo"] = False
-            _job_progresso["pausado"] = False
-            _job_progresso["nivel_z"] = 0
-            with _job_lock:
-                _job_em_execucao = False
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return True
+    """Converte a matriz em blocos tipados e usa o MESMO motor do G-code importado."""
+    if matriz is None or not np.any(matriz):
+        registrar_log("Matriz vazia: nao ha pontos para plotar.", "erro")
+        return False
+    try:
+        linhas, _, _ = compilar_matriz_para_estudio(matriz)
+        programa = analisar_gcode_hibrido("\n".join(linhas))
+        # Bloqueia todas as coordenadas antes de criar a thread.
+        validar_programa_antes_movimento(grbl, programa)
+    except (ValueError, RuntimeError) as exc:
+        registrar_log(f"Falha ao preparar a matriz: {exc}", "erro")
+        return False
+    return executar_job_gcode_em_background(
+        grbl, programa, reset_ctrl=reset_ctrl,
+        origem="matriz", usar_parametros_arquivo=True,
+    )
 # ==============================================================================
 # SMARTV42: Interpretador hibrido G-code XY (GRBL) + Z discreto (GPIO)
 # Z1..Z8 sao acionamentos independentes; NUNCA coordenadas cartesianas.
@@ -2701,10 +2677,12 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
 
 def validar_janela_calibrada():
     """Impede usar calibracao antiga que nao cobre a janela de plotagem."""
-    if not USAR_JANELA_PLOTAGEM:
-        return True, ""
     xs = [float(p[0]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     ys = [float(p[1]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    if not all(math.isfinite(v) for v in xs + ys):
+        return False, "Calibracao tem coordenadas nao finitas."
+    if not USAR_JANELA_PLOTAGEM:
+        return True, ""
     if (min(xs) > min(PLOT_X_MIN, PLOT_X_MAX) or
             max(xs) < max(PLOT_X_MIN, PLOT_X_MAX) or
             min(ys) > min(PLOT_Y_MIN, PLOT_Y_MAX) or
@@ -2805,6 +2783,29 @@ def analisar_gcode_hibrido(texto):
     return programa
 
 
+def validar_programa_antes_movimento(grbl, programa):
+    """Valida as coordenadas de todos os blocos antes do primeiro movimento."""
+    posicao = None
+    wx, wy = grbl.wpos[:2]
+    for bloco in programa:
+        if bloco["tipo"] == "xy":
+            wx = wx if bloco["x"] is None else bloco["x"]
+            wy = wy if bloco["y"] is None else bloco["y"]
+            if not math.isfinite(wx) or not math.isfinite(wy) or fora_dos_limites(wx, wy):
+                raise ValueError(f"Linha {bloco['linha']}: XY fora dos cantos calibrados ({wx}, {wy}).")
+            posicao = (wx, wy)
+        elif bloco["tipo"] == "z":
+            if posicao is None:
+                raise ValueError(f"Linha {bloco['linha']}: acionamento Z sem deslocamento XY anterior.")
+            x, y = posicao
+            if USAR_JANELA_PLOTAGEM and not (
+                min(PLOT_X_MIN, PLOT_X_MAX) - 1e-6 <= x <= max(PLOT_X_MIN, PLOT_X_MAX) + 1e-6
+                and min(PLOT_Y_MIN, PLOT_Y_MAX) - 1e-6 <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX) + 1e-6
+            ):
+                raise ValueError(f"Linha {bloco['linha']}: Z fora da janela em ({x}, {y}).")
+    return True
+
+
 def executar_bloco_hibrido(grbl, bloco, contexto):
     """Executa instrucoes validadas, sem encaminhar Z/M42 ao GRBL."""
     tipo = bloco["tipo"]
@@ -2823,7 +2824,8 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
         if not ok:
             raise RuntimeError(f"GRBL rejeitou XY: {estado}; {detalhe}")
         contexto["posicao_xy"] = (x, y)
-        _job_progresso.update({"x_mm": x, "y_mm": y})
+        xi, yi = mm_fisico_para_indice(x, y)
+        _job_progresso.update({"x_mm": x, "y_mm": y, "x_idx": xi, "y_idx": yi})
         return
     if tipo == "z":
         pos = contexto.get("posicao_xy")
@@ -2834,16 +2836,25 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
             if not (min(PLOT_X_MIN, PLOT_X_MAX) <= x <= max(PLOT_X_MIN, PLOT_X_MAX)
                     and min(PLOT_Y_MIN, PLOT_Y_MAX) <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX)):
                 raise RuntimeError(f"Z fora da janela em X={x:.3f}, Y={y:.3f}.")
+        if not aguardar_liberacao_z():
+            raise RuntimeError("Z interrompido durante pausa.")
         pronto, motivo = grbl.aguardar_grbl_idle()
         if not pronto:
             raise RuntimeError(f"GRBL nao esta Idle; Z bloqueado ({motivo}).")
         if _job_abortar or abortar_job_evento.is_set():
             raise RuntimeError("Z interrompido pelo operador.")
+        if not aguardar_liberacao_z():
+            raise RuntimeError("Z bloqueado por pausa/abortamento.")
         if PAUSA_ANTES_Z_S > 0:
             time.sleep(PAUSA_ANTES_Z_S)
+        if not aguardar_liberacao_z():
+            raise RuntimeError("Z bloqueado por pausa/abortamento.")
+        arquivo_prevalece = bool(contexto.get("usar_parametros_arquivo", False))
         ok, info = acionar_eixo_z(
-            bloco["nivel"], pulsos_override=bloco.get("pulsos"),
-            on_ms_override=bloco.get("on_ms"), off_ms_override=bloco.get("off_ms"),
+            bloco["nivel"],
+            pulsos_override=bloco.get("pulsos") if arquivo_prevalece else None,
+            on_ms_override=bloco.get("on_ms") if arquivo_prevalece else None,
+            off_ms_override=bloco.get("off_ms") if arquivo_prevalece else None,
         )
         if not ok:
             raise RuntimeError("Falha no mecanismo Z: " + str(info.get("erro", "erro desconhecido")))
@@ -2854,14 +2865,20 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
     raise RuntimeError(f"Tipo de instrucao invalido: {tipo}")
 
 
-def executar_job_gcode_em_background(grbl, programa):
-    """Trava compartilhada com a execucao por matriz tradicional."""
+def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
+                                      usar_parametros_arquivo=False):
+    """Motor UNICO de comandos XY/Z, usado por matriz e G-code externo."""
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
+    try:
+        validar_programa_antes_movimento(grbl, programa)
+    except (ValueError, RuntimeError) as exc:
+        registrar_log(f"Programa rejeitado antes de movimentar: {exc}", "erro")
+        return False
     with _job_lock:
-        if _job_em_execucao:
-            registrar_log("Ja existe um job em execucao.", "erro")
+        if _job_em_execucao or _operacao_manual:
+            registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
             return False
         _job_em_execucao = True
         _job_pausado = False
@@ -2873,6 +2890,7 @@ def executar_job_gcode_em_background(grbl, programa):
         _job_progresso.update({
             "ativo": True, "pausado": False, "atual": 0, "total": len(programa),
             "inicio_ts": time.monotonic(), "nivel_z": 0,
+            "origem": origem, "erro": "", "concluido": False,
         })
         try:
             ok_cal, erro_cal = validar_janela_calibrada()
@@ -2880,22 +2898,34 @@ def executar_job_gcode_em_background(grbl, programa):
                 raise RuntimeError(erro_cal)
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
-            contexto = {}
+            # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
+            validar_programa_antes_movimento(grbl, programa)
+            contexto = {"usar_parametros_arquivo": usar_parametros_arquivo}
             for pos, bloco in enumerate(programa, 1):
                 if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
                     raise RuntimeError("Execucao interrompida pelo operador.")
                 while _job_pausado and not _job_abortar and sistema_ativo.is_set():
                     _job_progresso["pausado"] = True
                     time.sleep(0.05)
+                if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
+                    raise RuntimeError("Trabalho interrompido durante pausa.")
                 _job_progresso["pausado"] = False
                 _job_progresso["atual"] = pos
                 try:
                     executar_bloco_hibrido(grbl, bloco, contexto)
                 except Exception as exc:
                     raise RuntimeError(f"Linha {bloco['linha']}: {exc}") from exc
-            registrar_log(f"G-code hibrido concluido: {len(programa)} blocos.", "ok")
+            if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
+                if not SIMULADO and reset_ctrl.simulado:
+                    raise RuntimeError("Reset fisico solicitado mas Arduino de reset esta simulado.")
+                ok_reset, detalhe_reset = reset_ctrl.ciclo_completo_reset()
+                if not ok_reset:
+                    raise RuntimeError(f"Reset mecanico falhou: {detalhe_reset}")
+            _job_progresso["concluido"] = True
+            registrar_log(f"Job {origem} concluido: {len(programa)} blocos.", "ok")
         except Exception as exc:
-            registrar_log(f"JOB G-CODE INTERROMPIDO: {exc}", "erro")
+            _job_progresso["erro"] = str(exc)
+            registrar_log(f"JOB {origem} INTERROMPIDO: {exc}", "erro")
         finally:
             _job_progresso.update({"ativo": False, "pausado": False, "nivel_z": 0})
             with _job_lock:
@@ -3389,6 +3419,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           ⬆ Importar G-code X/Y + Z
           <input type="file" id="inp-file-gcode" accept=".gcode,.nc,.tap,.txt" style="display:none;" onchange="importarGcodeHibrido(this)">
         </label>
+        <label style="display:flex;gap:5px;align-items:center;font-size:10px;" title="Desmarcado usa a configuracao Z atual; marcado usa ON/OFF/PULSOS do arquivo.">
+          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;"> Z do arquivo
+        </label>
         <select id="sel-profundidade" style="width:125px;" onchange="reprocessarProfundidade()">
           <option value="distancia">Prof: Distancia EDT</option>
           <option value="luminancia">Prof: Luminancia</option>
@@ -3520,7 +3553,11 @@ async function apiPost(acao, payload = {}) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: acao, ...payload })
   });
-  return await res.json();
+  let dados;
+  try { dados = await res.json(); }
+  catch (e) { return { ok: false, erro: 'Resposta invalida do servidor: ' + res.status }; }
+  if (!res.ok) console.error('API Smart Matrix:', acao, dados);
+  return dados;
 }
 
 function lerNumeroInput(id, padrao) {
@@ -3572,7 +3609,8 @@ async function inverterMotorXGrbl() {
 async function conectarPortas() {
   const pGrbl = document.getElementById('sel-porta-grbl').value;
   const pReset = document.getElementById('sel-porta-reset').value;
-  await apiPost('conectar_portas', { porta_grbl: pGrbl, porta_reset: pReset });
+  const resp = await apiPost('conectar_portas', { porta_grbl: pGrbl, porta_reset: pReset });
+  if (!resp.ok) alert('Falha ao conectar: GRBL=' + resp.grbl + ', reset=' + resp.reset);
   atualizarStatus();
 }
 
@@ -3584,12 +3622,14 @@ function obterPassoJog() {
 async function jog(dxSign, dySign) {
   const passo = obterPassoJog();
   const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
-  await apiPost('jog', { dx: dxSign * passo, dy: dySign * passo, feed });
+  const resp = await apiPost('jog', { dx: dxSign * passo, dy: dySign * passo, feed });
+  if (!resp.ok) alert(resp.erro || 'Jog bloqueado; confira estado GRBL e logs.');
   atualizarStatus();
 }
 
 async function acaoUGS(tipo) {
-  await apiPost('ugs_cmd', { cmd: tipo });
+  const resp = await apiPost('ugs_cmd', { cmd: tipo });
+  if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
   atualizarStatus();
 }
 
@@ -3617,11 +3657,12 @@ async function salvarConfigCabecote() {
   for (let i = 1; i <= 8; i++) {
     pulsos.push(parseInt(document.getElementById('p-nv-' + i).value) || i);
   }
-  const on_ms = parseFloat(document.getElementById('inp-on-ms').value) || 10;
-  const off_ms = parseFloat(document.getElementById('inp-off-ms').value) || 10;
-  const pausa_ms = parseFloat(document.getElementById('inp-pausa-ms').value) || 10;
-  const feed = parseFloat(document.getElementById('inp-feed').value) || 900;
-  await apiPost('config_cabecote', { on_ms, off_ms, pausa_ms, feed, pulsos_por_nivel: pulsos });
+  const on_ms = lerNumeroInput('inp-on-ms', 10);
+  const off_ms = lerNumeroInput('inp-off-ms', 10);
+  const pausa_ms = lerNumeroInput('inp-pausa-ms', 10);
+  const feed = lerNumeroInput('inp-feed', 900);
+  const resp = await apiPost('config_cabecote', { on_ms, off_ms, pausa_ms, feed, pulsos_por_nivel: pulsos });
+  if (!resp.ok) { alert(resp.erro || 'Parametros Z invalidos'); return; }
   await carregarEstadoInicial();
 }
 
@@ -3632,12 +3673,14 @@ async function iniciarJob() {
 }
 
 async function executarResetCompleto() {
-  await apiPost('reset_mecanico', { subcmd: 'completo' });
+  const resp = await apiPost('reset_mecanico', { subcmd: 'completo' });
+  if (!resp.ok) { alert(resp.erro || 'Reset nao confirmado pelo Arduino.'); return; }
   await carregarEstadoInicial();
 }
 
 async function acaoReset(subcmd) {
-  await apiPost('reset_mecanico', { subcmd });
+  const resp = await apiPost('reset_mecanico', { subcmd });
+  if (!resp.ok) alert(resp.erro || 'Comando de reset nao confirmado.');
 }
 
 async function carregarPadrao(padrao) {
@@ -3647,7 +3690,8 @@ async function carregarPadrao(padrao) {
 
 async function reprocessarProfundidade() {
   const modo = document.getElementById('sel-profundidade').value;
-  await apiPost('mudar_profundidade', { modo });
+  const resp = await apiPost('mudar_profundidade', { modo });
+  if (!resp.ok) { alert(resp.erro || 'Nao foi possivel reprocessar.'); return; }
   await carregarEstadoInicial();
 }
 
@@ -3660,13 +3704,15 @@ async function importarGcodeHibrido(input) {
     return;
   }
   const texto = await arquivo.text();
-  const resp = await apiPost('carregar_gcode', { nome: arquivo.name, conteudo: texto });
+  const usar_parametros_arquivo = document.getElementById('usar-parametros-gcode').checked;
+  const resp = await apiPost('carregar_gcode', { nome: arquivo.name, conteudo: texto, usar_parametros_arquivo });
   if (!resp.ok) {
     alert('Erro ao importar G-code: ' + (resp.erro || 'formato nao suportado'));
     return;
   }
   await carregarEstadoInicial();
-  alert('G-code validado: ' + resp.blocos + ' blocos. O Z sera enviado aos GPIOs, nao ao GRBL.');
+  alert('G-code validado: ' + resp.blocos + ' blocos. Parametros Z: ' +
+        (usar_parametros_arquivo ? 'arquivo' : 'configuracao atual') + '. Z nao sera enviado ao GRBL.');
 }
 
 async function enviarImagemIA(input) {
@@ -3674,7 +3720,8 @@ async function enviarImagemIA(input) {
   const reader = new FileReader();
   reader.onload = async function(e) {
     const modo = document.getElementById('sel-profundidade').value;
-    await apiPost('upload_imagem', { imagem_b64: e.target.result, modo_profundidade: modo });
+    const resp = await apiPost('upload_imagem', { imagem_b64: e.target.result, modo_profundidade: modo });
+    if (!resp.ok) { alert(resp.erro || 'Falha ao carregar imagem.'); return; }
     await carregarEstadoInicial();
   };
   reader.readAsDataURL(input.files[0]);
@@ -3686,6 +3733,7 @@ async function enviarCmdTerminal() {
   if (!cmd) return;
   inp.value = '';
   const r = await apiPost('terminal_cmd', { cmd });
+  if (!r.ok) alert(r.erro || r.resp || 'Erro no terminal integrado.');
   if (r.historico) {
     const box = document.getElementById('term-historico');
     box.textContent = r.historico.slice().reverse().map(h => `[${h.hora}] (${h.dir}) ${h.msg}`).join('\n');
@@ -3827,6 +3875,7 @@ async function carregarEstadoInicial() {
   }
   document.getElementById('box-gcode').textContent = (d.gcode || []).slice(0, 180).join('\n');
   document.getElementById('badge-qtd-pinos').textContent = d.gcode_importado ? String(d.linhas_importadas || 0) + ' linhas importadas' : String(d.pinos_ativos || 0) + ' pinos';
+  if (d.gcode_importado) document.getElementById('usar-parametros-gcode').checked = !!d.usar_parametros_arquivo;
   desenharMatriz();
 }
 
@@ -3858,7 +3907,8 @@ async function atualizarStatus() {
     if (st.job && st.job.ativo) {
       document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
-      document.getElementById('info-progresso').textContent = 'Pronto';
+      document.getElementById('info-progresso').textContent =
+        st.job.erro ? 'Falha: ' + st.job.erro : (st.job.concluido ? 'Concluido' : 'Pronto');
     }
     if (st.logs) {
       const lb = document.getElementById('box-logs');
@@ -3866,7 +3916,10 @@ async function atualizarStatus() {
       lb.scrollTop = lb.scrollHeight;
     }
     desenharMatriz();
-  } catch (e) {}
+  } catch (e) {
+    console.error('Falha ao atualizar telemetria Smart Matrix:', e);
+    document.getElementById('info-progresso').textContent = 'Telemetria indisponivel';
+  }
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -3889,12 +3942,14 @@ _reset_global = None
 _matriz_atual = None
 _gcode_atual = []
 _trajetoria_atual = []
-estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None}
+estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
+_imagem_origem = None
 
 
-def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D"):
+def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
     global _matriz_atual, _gcode_atual, _trajetoria_atual
-    estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None})
+    if descartar_importacao:
+        estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False})
     _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
     _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
 
@@ -3928,6 +3983,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
                 "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
                 "gcode_importado": estado_importacao_gcode["linhas"] is not None,
+                "usar_parametros_arquivo": estado_importacao_gcode["usar_parametros_arquivo"],
                 "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
                 "pinos_ativos": pinos_ativos,
                 "coord": obter_estado_coordenadas(),
@@ -3959,9 +4015,42 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if tamanho > 6_000_000:
             self._enviar_json({"ok": False, "erro": "Requisicao maior que 6 MB."}, 413)
             return
-        bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
-        dados = json.loads(bruto) if bruto else {}
+        try:
+            bruto = self.rfile.read(tamanho).decode("utf-8") if tamanho > 0 else "{}"
+            dados = json.loads(bruto) if bruto else {}
+            if not isinstance(dados, dict):
+                raise ValueError("JSON deve conter um objeto.")
+        except (UnicodeError, ValueError) as exc:
+            self._enviar_json({"ok": False, "erro": f"Requisicao invalida: {exc}"}, 400)
+            return
         acao = dados.get("action", "")
+        # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
+        # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
+        simultanea = acao == "iniciar_job" or (
+            acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
+        )
+        if simultanea:
+            return self._executar_acao_com_erros(acao, dados)
+        if not reservar_operacao_manual():
+            self._enviar_json({"ok": False, "erro": "Maquina ocupada: finalize ou aborte o trabalho atual."}, 409)
+            return
+        try:
+            return self._executar_acao_com_erros(acao, dados)
+        finally:
+            liberar_operacao_manual()
+
+    def _executar_acao_com_erros(self, acao, dados):
+        try:
+            return self._executar_acao_POST(acao, dados)
+        except (ValueError, TypeError, KeyError, OverflowError) as exc:
+            registrar_log(f"Acao {acao} rejeitada: {exc}", "erro")
+            self._enviar_json({"ok": False, "erro": str(exc)}, 400)
+        except Exception as exc:
+            registrar_log(f"Acao {acao} falhou: {exc}", "erro")
+            self._enviar_json({"ok": False, "erro": "Falha interna na operacao; consulte os logs."}, 500)
+
+    def _executar_acao_POST(self, acao, dados):
+        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE, _imagem_origem
 
         if acao == "carregar_gcode":
             if _job_em_execucao:
@@ -3976,6 +4065,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             estado_importacao_gcode.update({
                 "linhas": conteudo.splitlines(), "programa": programa,
                 "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
+                "usar_parametros_arquivo": bool(dados.get("usar_parametros_arquivo", False)),
             })
             registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
             self._enviar_json({"ok": True, "blocos": len(programa)})
@@ -4049,7 +4139,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                             registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
                             return
                     registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                threading.Thread(target=_rodar_perimetro, daemon=True).start()
+                # Executa enquanto a reserva da maquina esta ativa.
+                _rodar_perimetro()
                 self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
                 return
 
@@ -4069,9 +4160,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         if acao == "conectar_portas":
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
-            _grbl_global.conectar(p_grbl)
-            _reset_global.conectar(p_reset)
-            self._enviar_json({"ok": True})
+            ok_grbl = _grbl_global.conectar(p_grbl)
+            if ok_grbl and (SIMULADO or not reles_z):
+                inicializar_gpio_z()
+            ok_reset = _reset_global.conectar(p_reset)
+            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl, "reset": ok_reset})
             return
 
         if acao == "jog":
@@ -4093,7 +4186,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "abort":
                 _job_abortar = True
                 _job_pausado = False
-                if _job_em_execucao:
+                if _job_em_execucao or _operacao_manual:
                     abortar_job_evento.set()
                 _grbl_global.soft_reset()
             elif cmd == "jog_cancel":
@@ -4125,9 +4218,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "wcs":
                 _grbl_global.selecionar_wcs(dados.get("wcs", "G54"))
             elif cmd == "teste_t":
-                threading.Thread(target=testar_reles_um_a_um, daemon=True).start()
+                if not testar_reles_um_a_um():
+                    self._enviar_json({"ok": False, "erro": "Teste Z interrompido ou bloqueado."}, 409)
+                    return
             elif cmd == "seq_cabecote":
-                threading.Thread(target=acionar_sequencia_cabecote, daemon=True).start()
+                if not acionar_sequencia_cabecote():
+                    self._enviar_json({"ok": False, "erro": "Sequencia Z interrompida ou bloqueada."}, 409)
+                    return
             self._enviar_json({"ok": True})
             return
 
@@ -4142,15 +4239,21 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "config_cabecote":
-            if dados.get("feed") is not None:
-                FEED_RATE = max(50.0, float(dados.get("feed")))
-            configurar_parametros_pulsos_z(
-                on_ms=dados.get("on_ms"),
-                off_ms=dados.get("off_ms"),
-                pausa_ms=dados.get("pausa_ms"),
-                pulsos_por_nivel=dados.get("pulsos_por_nivel"),
-                usar_fixo=False,
-            )
+            try:
+                feed_novo = float(dados.get("feed", FEED_RATE))
+                if not math.isfinite(feed_novo) or not 50 <= feed_novo <= 5000:
+                    raise ValueError("Feed deve estar entre 50 e 5000 mm/min.")
+                parametros = {
+                    "on_ms": dados.get("on_ms"), "off_ms": dados.get("off_ms"),
+                    "pausa_ms": dados.get("pausa_ms"),
+                    "pulsos_por_nivel": dados.get("pulsos_por_nivel"),
+                    "usar_fixo": False,
+                }
+                configurar_parametros_pulsos_z(**parametros)
+                FEED_RATE = feed_novo
+            except (ValueError, TypeError) as exc:
+                self._enviar_json({"ok": False, "erro": str(exc)}, 400)
+                return
             if _matriz_atual is not None:
                 atualizar_matriz_global(_matriz_atual)
             self._enviar_json({"ok": True})
@@ -4158,44 +4261,69 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
         if acao == "iniciar_job":
             if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(_grbl_global, estado_importacao_gcode["programa"])
+                ok = executar_job_gcode_em_background(
+                    _grbl_global, estado_importacao_gcode["programa"],
+                    origem="gcode",
+                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
+                )
             else:
                 ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
             self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
             return
 
         if acao == "reset_mecanico":
+            if not SIMULADO and _reset_global.simulado:
+                self._enviar_json({"ok": False, "erro": "Arduino de reset fisico nao conectado."}, 409)
+                return
             sub = dados.get("subcmd", "completo")
             if sub == "completo":
-                _reset_global.ciclo_completo_reset(_matriz_atual)
-                atualizar_matriz_global(_matriz_atual)
+                ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
+                if ok_reset:
+                    _imagem_origem = None
+                    atualizar_matriz_global(_matriz_atual, descartar_importacao=True)
+                else:
+                    self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
+                    return
             elif sub == "descer":
-                _reset_global.descer_atuadores()
+                ok_reset, _ = _reset_global.descer_atuadores()
             elif sub == "subir":
-                _reset_global.subir_atuadores()
+                ok_reset, _ = _reset_global.subir_atuadores()
             elif sub == "varrer":
-                _reset_global.varrer_eixo_x_linha(250.0)
+                ok_reset, _ = _reset_global.varrer_eixo_x_linha(250.0)
             elif sub == "home":
-                _reset_global.home_eixo_x_linha()
-            self._enviar_json({"ok": True})
+                ok_reset, _ = _reset_global.home_eixo_x_linha()
+            else:
+                self._enviar_json({"ok": False, "erro": "Subcomando reset desconhecido."}, 400)
+                return
+            self._enviar_json({"ok": bool(ok_reset)})
             return
 
         if acao == "gerar_padrao":
+            _imagem_origem = None
             padrao = dados.get("padrao", "domo")
             nova = gerar_padrao_teste(padrao, NIVEIS_MAX)
-            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}")
+            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
         if acao == "mudar_profundidade":
-            MODO_PROFUNDIDADE = dados.get("modo", "distancia")
-            if _matriz_atual is not None:
+            modo = dados.get("modo", "distancia")
+            if modo not in ("distancia", "luminancia", "binario"):
+                self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                return
+            if _imagem_origem is None and modo == "luminancia":
+                self._enviar_json({"ok": False, "erro": "Luminancia precisa da imagem original; importe uma imagem primeiro."}, 409)
+                return
+            MODO_PROFUNDIDADE = modo
+            if _imagem_origem is not None:
+                nova, _ = processar_imagem_para_matriz(_imagem_origem, modo_profundidade=modo)
+            elif _matriz_atual is not None:
                 mascara = (_matriz_atual > 0).astype(np.uint8)
-                if MODO_PROFUNDIDADE == "binario":
-                    nova = mascara * NIVEIS_MAX
-                else:
-                    nova = calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
-                atualizar_matriz_global(nova)
+                nova = mascara * NIVEIS_MAX if modo == "binario" else calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
+            else:
+                self._enviar_json({"ok": False, "erro": "Nao ha matriz para reprocessar."}, 409)
+                return
+            atualizar_matriz_global(nova)
             self._enviar_json({"ok": True})
             return
 
@@ -4206,11 +4334,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             raw = base64.b64decode(b64_str)
             if Image is not None:
                 pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+                _imagem_origem = pil_img.copy()
+                modo = dados.get("modo_profundidade", MODO_PROFUNDIDADE)
+                if modo not in ("distancia", "luminancia", "binario"):
+                    self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                    return
                 nova, _ = processar_imagem_para_matriz(
                     pil_img,
-                    modo_profundidade=dados.get("modo_profundidade", MODO_PROFUNDIDADE),
+                    modo_profundidade=modo,
                 )
-                atualizar_matriz_global(nova, "Imagem IA (ONNX)")
+                MODO_PROFUNDIDADE = modo
+                atualizar_matriz_global(nova, "Imagem IA (ONNX)", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
@@ -4258,9 +4392,12 @@ def main():
                       f"A={PONTO_A} B={PONTO_B} C={PONTO_C} D={PONTO_D}", "aviso")
     for aviso in validar_cantos():
         registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
-    inicializar_gpio_z()
     _grbl_global = ControladorGRBL()
-    _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
+    grbl_conectado = _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
+    if grbl_conectado:
+        inicializar_gpio_z()
+    else:
+        registrar_log("GPIO nao inicializado: GRBL nao esta pronto; conecte a controladora antes.", "erro")
 
     _reset_global = ControladorResetArduino()
     _reset_global.conectar(PORTA_ARDUINO_RESET)
