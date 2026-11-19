@@ -106,11 +106,13 @@ _operacao_manual = False
 
 def reservar_operacao_manual():
     """Bloqueia jog/reset/calibracao/testes concorrentes com jobs."""
-    global _operacao_manual
+    global _operacao_manual, _job_abortar
     with _job_lock:
         if _job_em_execucao or _operacao_manual:
             return False
         _operacao_manual = True
+        _job_abortar = False
+        abortar_job_evento.clear()
         return True
 
 def liberar_operacao_manual():

@@ -45,7 +45,8 @@ def fora_dos_limites(x_mm, y_mm):
     Verifica limites respeitando os 4 cantos físicos calibrados (PONTO_A, PONTO_B, PONTO_C, PONTO_D),
     permitindo toda a faixa real medida na bancada (ex: X de 0 a 450, Y de -500 a +500).
     """
-    margem = 30.0
+    # Uma janela de 30 mm alem dos cantos nao e intertravamento seguro.
+    margem = 0.0
     xs = [p[0] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     ys = [p[1] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     if x_mm < min(xs) - margem or x_mm > max(xs) + margem:

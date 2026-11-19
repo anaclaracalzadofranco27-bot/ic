@@ -6,10 +6,12 @@
 
 def validar_janela_calibrada():
     """Impede usar calibracao antiga que nao cobre a janela de plotagem."""
-    if not USAR_JANELA_PLOTAGEM:
-        return True, ""
     xs = [float(p[0]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
     ys = [float(p[1]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    if not all(math.isfinite(v) for v in xs + ys):
+        return False, "Calibracao tem coordenadas nao finitas."
+    if not USAR_JANELA_PLOTAGEM:
+        return True, ""
     if (min(xs) > min(PLOT_X_MIN, PLOT_X_MAX) or
             max(xs) < max(PLOT_X_MIN, PLOT_X_MAX) or
             min(ys) > min(PLOT_Y_MIN, PLOT_Y_MAX) or

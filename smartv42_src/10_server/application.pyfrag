@@ -7,12 +7,14 @@ _reset_global = None
 _matriz_atual = None
 _gcode_atual = []
 _trajetoria_atual = []
-estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None}
+estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
+_imagem_origem = None
 
 
-def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D"):
+def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
     global _matriz_atual, _gcode_atual, _trajetoria_atual
-    estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None})
+    if descartar_importacao:
+        estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False})
     _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
     _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
 
@@ -46,6 +48,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
                 "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
                 "gcode_importado": estado_importacao_gcode["linhas"] is not None,
+                "usar_parametros_arquivo": estado_importacao_gcode["usar_parametros_arquivo"],
                 "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
                 "pinos_ativos": pinos_ativos,
                 "coord": obter_estado_coordenadas(),
@@ -111,6 +114,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             estado_importacao_gcode.update({
                 "linhas": conteudo.splitlines(), "programa": programa,
                 "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
+                "usar_parametros_arquivo": bool(dados.get("usar_parametros_arquivo", False)),
             })
             registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
             self._enviar_json({"ok": True, "blocos": len(programa)})
@@ -301,10 +305,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "reset_mecanico":
+            global _imagem_origem
             sub = dados.get("subcmd", "completo")
             if sub == "completo":
-                _reset_global.ciclo_completo_reset(_matriz_atual)
-                atualizar_matriz_global(_matriz_atual)
+                ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
+                if ok_reset:
+                    _imagem_origem = None
+                    atualizar_matriz_global(_matriz_atual, descartar_importacao=True)
+                else:
+                    self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
+                    return
             elif sub == "descer":
                 _reset_global.descer_atuadores()
             elif sub == "subir":
@@ -317,21 +327,32 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "gerar_padrao":
+            global _imagem_origem
+            _imagem_origem = None
             padrao = dados.get("padrao", "domo")
             nova = gerar_padrao_teste(padrao, NIVEIS_MAX)
-            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}")
+            atualizar_matriz_global(nova, f"Padrao: {padrao.upper()}", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
         if acao == "mudar_profundidade":
-            MODO_PROFUNDIDADE = dados.get("modo", "distancia")
-            if _matriz_atual is not None:
+            modo = dados.get("modo", "distancia")
+            if modo not in ("distancia", "luminancia", "binario"):
+                self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                return
+            if _imagem_origem is None and modo == "luminancia":
+                self._enviar_json({"ok": False, "erro": "Luminancia precisa da imagem original; importe uma imagem primeiro."}, 409)
+                return
+            MODO_PROFUNDIDADE = modo
+            if _imagem_origem is not None:
+                nova, _ = processar_imagem_para_matriz(_imagem_origem, modo_profundidade=modo)
+            elif _matriz_atual is not None:
                 mascara = (_matriz_atual > 0).astype(np.uint8)
-                if MODO_PROFUNDIDADE == "binario":
-                    nova = mascara * NIVEIS_MAX
-                else:
-                    nova = calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
-                atualizar_matriz_global(nova)
+                nova = mascara * NIVEIS_MAX if modo == "binario" else calcular_niveis_por_distancia(mascara, NIVEIS_MAX)
+            else:
+                self._enviar_json({"ok": False, "erro": "Nao ha matriz para reprocessar."}, 409)
+                return
+            atualizar_matriz_global(nova)
             self._enviar_json({"ok": True})
             return
 
@@ -342,11 +363,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             raw = base64.b64decode(b64_str)
             if Image is not None:
                 pil_img = Image.open(io.BytesIO(raw)).convert("RGB")
+                _imagem_origem = pil_img.copy()
+                modo = dados.get("modo_profundidade", MODO_PROFUNDIDADE)
+                if modo not in ("distancia", "luminancia", "binario"):
+                    self._enviar_json({"ok": False, "erro": "Modo de profundidade invalido."}, 400)
+                    return
                 nova, _ = processar_imagem_para_matriz(
                     pil_img,
-                    modo_profundidade=dados.get("modo_profundidade", MODO_PROFUNDIDADE),
+                    modo_profundidade=modo,
                 )
-                atualizar_matriz_global(nova, "Imagem IA (ONNX)")
+                MODO_PROFUNDIDADE = modo
+                atualizar_matriz_global(nova, "Imagem IA (ONNX)", descartar_importacao=True)
             self._enviar_json({"ok": True})
             return
 
