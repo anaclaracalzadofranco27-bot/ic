@@ -52,7 +52,6 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         "G21 ; unidades em mm",
         "G90 ; posicionamento absoluto",
         "G54 ; sistema de coordenadas",
-        f"M3 S1000 ; ativa matriz ({len(pontos)} pinos | Janela X=[{PLOT_X_MIN}..{PLOT_X_MAX}] Y=[{PLOT_Y_MIN}..{PLOT_Y_MAX}] | SinalY={SINAL_EIXO_Y:+.0f} | GPIO={PINOS_GPIO_Z})",
     ]
 
     trajetoria_ui = []
@@ -65,7 +64,6 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         linhas_gcode.append(
             f"G1 X{x_mm:.3f} Y{y_mm:.3f} F{FEED_RATE:.0f} ; pino_img=({x_i},{y_i}) nivel={nivel}"
         )
-        linhas_gcode.append("G4 P0 ; sincroniza XY")
         linhas_gcode.append(
             f"M42 P1 ; Z_LEVEL={nivel} GPIO={pino_bcm} PULSOS={qtd_pulsos} ON_MS={on_ms} OFF_MS={off_ms} IDX=({x_i},{y_i})"
         )
@@ -79,8 +77,8 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
             "pulsos": int(qtd_pulsos),
         })
 
-    linhas_gcode.append("M5 ; desativa cabecote")
-    linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A (origem 0,0)")
+    if VOLTAR_ORIGEM and pontos:
+        linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A")
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     ESTADO_ESTUDIO["matriz"] = matriz.tolist()
@@ -139,126 +137,19 @@ _job_progresso = {
 
 
 def executar_job_em_background(grbl, reset_ctrl, matriz):
-    global _job_em_execucao, _job_pausado, _job_abortar
-    with _job_lock:
-        if _job_em_execucao or _operacao_manual:
-            registrar_log("Outro job ou operacao manual em andamento.")
-            return False
-        _job_em_execucao = True
-        _job_pausado = False
-        _job_abortar = False
-        abortar_job_evento.clear()
-
-    def _worker():
-        global _job_em_execucao, _job_pausado, _job_abortar
-        pontos = montar_pontos(matriz)
-        total = len(pontos)
-        _job_progresso.update({
-            "ativo": True,
-            "pausado": False,
-            "atual": 0,
-            "total": total,
-            "inicio_ts": time.monotonic(),
-        })
-
-        origem_txt = "DIREITA (0,0 na extremidade direita)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (0,0 na extremidade esquerda)"
-        registrar_log(
-            f"Iniciando trajetoria ({total} pontos | Origem X={origem_txt} | SinalX={SINAL_EIXO_X:+.0f} | "
-            f"feed={FEED_RATE:.0f} mm/min | GPIO={PINOS_GPIO_Z} | "
-            f"PausaZ={PAUSA_ANTES_Z_S*1000:.1f}ms | ON={TEMPO_ON_Z_S*1000:.1f}ms | OFF={TEMPO_OFF_Z_S*1000:.1f}ms)."
-        )
-
-        falhou = False
-        try:
-            ok_cal, erro_cal = validar_janela_calibrada()
-            if not ok_cal:
-                registrar_log(erro_cal, "erro")
-                return
-            if not grbl.preparar_grbl():
-                registrar_log("ABORTADO antes de mover: GRBL nao ficou pronto.")
-                return
-
-            for idx, (x_i, y_i, nivel) in enumerate(pontos, start=1):
-                if _job_abortar or not sistema_ativo.is_set():
-                    registrar_log(f"Trajetoria abortada pelo usuario no ponto {idx}/{total}.")
-                    break
-
-                while _job_pausado and not _job_abortar and sistema_ativo.is_set():
-                    _job_progresso["pausado"] = True
-                    time.sleep(0.05)
-                _job_progresso["pausado"] = False
-
-                # Converte (x_i, y_i) da matriz para coordenada fisica real em mm
-                # respeitando ORIGEM_X_NA_DIREITA e SINAL_EIXO_X
-                x_mm, y_mm = indice_para_mm_fisico(x_i, y_i)
-                idx_p = max(0, min(len(PINOS_GPIO_Z) - 1, int(nivel) - 1))
-                pino_bcm = PINOS_GPIO_Z[idx_p]
-                qtd_pulsos = obter_pulsos_para_nivel(nivel)
-
-                _job_progresso.update({
-                    "atual": idx,
-                    "x_idx": int(x_i),
-                    "y_idx": int(y_i),
-                    "x_mm": round(float(x_mm), 3),
-                    "y_mm": round(float(y_mm), 3),
-                    "nivel_z": int(nivel),
-                    "gpio_atual": int(pino_bcm),
-                    "pulsos_atuais": int(qtd_pulsos),
-                })
-
-                if USAR_JANELA_PLOTAGEM:
-                    x_lo, x_hi = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-                    y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-                    if not (x_lo - 1e-6 <= x_mm <= x_hi + 1e-6 and y_lo - 1e-6 <= y_mm <= y_hi + 1e-6):
-                        registrar_log(
-                            f"BLOQUEADO ponto {idx}/{total}: (X={x_mm:.2f}, Y={y_mm:.2f}) fora da janela "
-                            f"X=[{x_lo}..{x_hi}], Y=[{y_lo}..{y_hi}].",
-                            "erro",
-                        )
-                        falhou = True
-                        break
-
-                ok_mov, st_mov, det_mov = grbl.mover_xy_e_aguardar(x_mm, y_mm, feed=FEED_RATE)
-                if not ok_mov:
-                    registrar_log(
-                        f"FALHA no ponto {idx}/{total} (X={x_mm:.2f}, Y={y_mm:.2f}): {st_mov} | {det_mov}. "
-                        f"Trajetoria INTERROMPIDA sem acionar Z.",
-                        "erro",
-                    )
-                    falhou = True
-                    break
-
-                if not aguardar_liberacao_z():
-                    registrar_log("Z interrompido por pausa/abortamento.", "aviso")
-                    falhou = True
-                    break
-                if PAUSA_ANTES_Z_S > 0:
-                    time.sleep(PAUSA_ANTES_Z_S)
-                if not aguardar_liberacao_z():
-                    falhou = True
-                    break
-                ok_z, info_z = acionar_eixo_z(nivel)
-                if not ok_z:
-                    registrar_log(f"FALHA no Z do ponto {idx}/{total}: {info_z.get('erro')}", "erro")
-                    falhou = True
-                    break
-
-            if not _job_abortar and not falhou and sistema_ativo.is_set():
-                if VOLTAR_ORIGEM:
-                    registrar_log(f"Retornando cabecote para o Ponto A (origem X={PONTO_A[0]:.2f}, Y={PONTO_A[1]:.2f})...")
-                    ok_r, st_r, det_r = grbl.mover_xy_e_aguardar(PONTO_A[0], PONTO_A[1], feed=FEED_RATE)
-                    if not ok_r:
-                        registrar_log(f"Nao conseguiu voltar ao Ponto A: {st_r} | {det_r}", "erro")
-                registrar_log("Trajetoria concluida com sucesso!")
-                if AUTO_RESET_APOS_PLOT:
-                    reset_ctrl.ciclo_completo_reset()
-        finally:
-            _job_progresso["ativo"] = False
-            _job_progresso["pausado"] = False
-            _job_progresso["nivel_z"] = 0
-            with _job_lock:
-                _job_em_execucao = False
-
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
-    return True
+    """Converte a matriz em blocos tipados e usa o MESMO motor do G-code importado."""
+    if matriz is None or not np.any(matriz):
+        registrar_log("Matriz vazia: nao ha pontos para plotar.", "erro")
+        return False
+    try:
+        linhas, _, _ = compilar_matriz_para_estudio(matriz)
+        programa = analisar_gcode_hibrido("\n".join(linhas))
+        # Bloqueia todas as coordenadas antes de criar a thread.
+        validar_programa_antes_movimento(grbl, programa)
+    except (ValueError, RuntimeError) as exc:
+        registrar_log(f"Falha ao preparar a matriz: {exc}", "erro")
+        return False
+    return executar_job_gcode_em_background(
+        grbl, programa, reset_ctrl=reset_ctrl,
+        origem="matriz", usar_parametros_arquivo=True,
+    )

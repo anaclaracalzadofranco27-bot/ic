@@ -99,7 +99,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             liberar_operacao_manual()
 
     def _executar_acao_POST(self, acao, dados):
-        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE
+        global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE, _imagem_origem
 
         if acao == "carregar_gcode":
             if _job_em_execucao:
@@ -298,14 +298,17 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
 
         if acao == "iniciar_job":
             if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(_grbl_global, estado_importacao_gcode["programa"])
+                ok = executar_job_gcode_em_background(
+                    _grbl_global, estado_importacao_gcode["programa"],
+                    origem="gcode",
+                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
+                )
             else:
                 ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
             self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
             return
 
         if acao == "reset_mecanico":
-            global _imagem_origem
             sub = dados.get("subcmd", "completo")
             if sub == "completo":
                 ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
@@ -327,7 +330,6 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "gerar_padrao":
-            global _imagem_origem
             _imagem_origem = None
             padrao = dados.get("padrao", "domo")
             nova = gerar_padrao_teste(padrao, NIVEIS_MAX)
