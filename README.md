@@ -165,14 +165,14 @@ Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emer
 
 1. Busca as chaves **sempre em X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua **5 mm em X e 15 mm em Y** e grava esse ponto como **A = (0, 0)** no G54.
 2. Vai de **A até B** (X = 297).
-3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
+3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua **15 mm** e grava esse Y em **C e D** (no máximo 297 mm).
 4. Vai até **D** e volta para **A**.
 
 O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa. Se `Pn:Y` já estiver acionado no início, o programa anda **Y+ 10 mm**: se a chave soltar, era a chave 1 (lado A) e o Home segue; se continuar acionada, é a chave 2 (lado C/D), então volta **Y− 25 mm** (os 10 mm mais o recuo de 15 mm) para soltá-la e segue. Se mesmo assim não soltar, o Home para. A busca da chave 2 vai **até Y = 350 mm** (`HOME_AUTO_Y_LIMITE_CHAVE2_MM`). Se a chave acionar antes de 297 mm, C/D recebem o Y medido depois do recuo; se acionar depois, C/D ficam em 297 mm, porque a malha tem 100 pontos a 3 mm. Se não acionar até 350 mm, o Home para com "Segunda chave Y nao encontrada" e os cantos não mudam.
 
 No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
 
-O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de 4 mm na chave 2, perímetro a **F1000** e busca da chave 2 a F800 (aproximação) / F480 (perto da chave). O GRBL limita a velocidade real pelo `$110`/`$111`. Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
+O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de **15 mm** na chave 2, perímetro a **F1000** e busca da chave 2 a F800 (aproximação) / F480 (perto da chave). O GRBL limita a velocidade real pelo `$110`/`$111`. Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
 
 ### Etapa D — Testar XY sem movimentar Z
 

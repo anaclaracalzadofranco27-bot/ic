@@ -1191,10 +1191,10 @@ class PortaSimulada:
         self.home_simulado_y = float(self.mpos[1]) - 3.0
         self.home_simulado_y_sentido = -1
         # A fica 'recuo' mm depois do ponto onde a busca parou (ate um trecho
-        # alem da chave 1). A chave 2 comuta alguns mm antes do Y nominal de
-        # C/D para a sonda encontra-la dentro do limite.
+        # alem da chave 1). A chave 2 comuta alguns mm depois do Y nominal de
+        # C/D; com o recuo de 15 mm o cabecote volta para dentro da malha.
         self.home_simulado_y_oposto = (
-            self.home_simulado_y + float(recuo) + float(extensao_y) - 6.0
+            self.home_simulado_y + float(recuo) + float(extensao_y) + 5.0
         )
 
     def write(self, dados):
@@ -2448,10 +2448,10 @@ class ControladorGRBL:
         if not 50.0 <= feed_aproximacao <= 1000.0:
             raise ValueError("Sonda Y2: feed de aproximacao 50..1000 mm/min.")
         if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 500.0 and
-                2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
+                2.0 <= recuo <= 15.0 and 0.2 <= passo <= 2.0):
             raise ValueError(
                 "Sonda Y2: busca final 1..20 mm, feed 50..500, "
-                "recuo 2..10 mm, trecho 0,2..2 mm."
+                "recuo 2..15 mm, trecho 0,2..2 mm."
             )
         bloquear_z_fisico("Sonda Y2 automatica: Z proibido")
         estado = self._status_home_xy()
@@ -4969,7 +4969,7 @@ async function homeAutomatico() {
     'HOME AUTOMÁTICO\n' +
     '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 15 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
-    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
+    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 15 mm\n' +
     '4) Vai até D e volta para A\n\n' +
     'Z fica desligado. O botão Abortar continua disponível.\n' +
     'Confirmo que existe parada de emergência física independente e área livre.'
@@ -5800,6 +5800,7 @@ HOME_AUTO_FEED_PERIMETRO = 1000.0    # A->B, C->D, D->A
 HOME_AUTO_FEED_CHAVE2_APROX = 800.0  # B->C ate 25 mm antes de 297
 HOME_AUTO_FEED_CHAVE2_BUSCA = 480.0  # B->C perto da chave 2 (ate Y=350)
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_RECUO_CHAVE2_MM = 15.0  # recuo depois de tocar a chave 2 (Y2)
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
@@ -5940,7 +5941,8 @@ def iniciar_home_automatico(grbl):
 
             _fase("Home 3/4: B -> C procurando a chave 2 de Y")
             medicao = grbl.sondar_chave_y_oposta(
-                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA, recuo=4.0, passo=1.0,
+                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA,
+                recuo=HOME_AUTO_RECUO_CHAVE2_MM, passo=1.0,
                 feed_aproximacao=HOME_AUTO_FEED_CHAVE2_APROX,
                 progresso=lambda t: _fase("Home 3/4: " + t),
                 y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,

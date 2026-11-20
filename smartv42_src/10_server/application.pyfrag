@@ -367,6 +367,7 @@ HOME_AUTO_FEED_PERIMETRO = 1000.0    # A->B, C->D, D->A
 HOME_AUTO_FEED_CHAVE2_APROX = 800.0  # B->C ate 25 mm antes de 297
 HOME_AUTO_FEED_CHAVE2_BUSCA = 480.0  # B->C perto da chave 2 (ate Y=350)
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_RECUO_CHAVE2_MM = 15.0  # recuo depois de tocar a chave 2 (Y2)
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
@@ -507,7 +508,8 @@ def iniciar_home_automatico(grbl):
 
             _fase("Home 3/4: B -> C procurando a chave 2 de Y")
             medicao = grbl.sondar_chave_y_oposta(
-                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA, recuo=4.0, passo=1.0,
+                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA,
+                recuo=HOME_AUTO_RECUO_CHAVE2_MM, passo=1.0,
                 feed_aproximacao=HOME_AUTO_FEED_CHAVE2_APROX,
                 progresso=lambda t: _fase("Home 3/4: " + t),
                 y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
