@@ -112,6 +112,7 @@ class PortaSimulada:
         self.home_simulado_x = -3.0
         self.home_simulado_y = 3.0
         self.home_simulado_y_sentido = 1  # -1: chave virtual em Y negativo
+        self.home_simulado_y_oposto = None  # outra chave Y, somente no simulador
         self.settings = {
             0: ("10", "Step pulse time, microseconds"),
             1: ("25", "Step idle delay, milliseconds"),
@@ -165,9 +166,15 @@ class PortaSimulada:
                 if self.home_simulado_y_sentido < 0
                 else self.mpos[1] >= self.home_simulado_y
             )
+            y_oposto_ativo = (
+                self.home_simulado_y_oposto is not None and
+                (self.mpos[1] <= self.home_simulado_y_oposto
+                 if self.home_simulado_y_sentido > 0
+                 else self.mpos[1] >= self.home_simulado_y_oposto)
+            )
             pn_simulado = (
                 ("X" if self.mpos[0] <= self.home_simulado_x else "") +
-                ("Y" if y_chave_ativa else "")
+                ("Y" if (y_chave_ativa or y_oposto_ativo) else "")
             )
             campo_pn = f"|Pn:{pn_simulado}" if pn_simulado else ""
             status = (
@@ -1365,6 +1372,120 @@ class ControladorGRBL:
                 ("/".join(e for e in ("X", "Y") if e not in encontrados) or "nenhum"),
                 "info",
             )
+
+    def sondar_chave_y_oposta(self, curso=15.0, feed=120.0,
+                             recuo=4.0, passo=1.0):
+        """Mede somente a chave Y da extremidade oposta ao Home.
+
+        Exige Home valido e inicio perto de C, sobre o mesmo X de B.
+        Move um trecho curto em direcao a C e cancela a fila ao ler Pn:Y.
+        Recuo no sentido de B define um Y util seguro para C e D,
+        sem extrapolar o limite e sem alterar G54 neste metodo.
+        """
+        if not self.home_xy_referenciado:
+            raise RuntimeError(
+                "Calibre a chave Y oposta somente apos refazer o Home XY."
+            )
+        if not self.ser or self.conexao_real == self.modo_simulacao:
+            raise RuntimeError("Conexao GRBL ausente ou inconsistente.")
+        valores = (curso, feed, recuo, passo)
+        if not all(math.isfinite(v) for v in valores):
+            raise ValueError("Parametros de sonda Y precisam ser finitos.")
+        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
+                2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
+            raise ValueError(
+                "Sonda Y: busca 1..20 mm, feed 50..250 mm/min, "
+                "recuo 2..10 mm, passo 0,2..2 mm."
+            )
+        bloquear_z_fisico("Calibracao da chave Y oposta: somente XY")
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle") or "Y" in pinos_ativos(estado):
+            raise RuntimeError(
+                "A sonda Y precisa iniciar em Idle e com Pn:Y livre. "
+                "Se houve ALARM, resolva-o e execute Home antes de repetir."
+            )
+        ok_cfg, msg_cfg, cfg = self.consultar_configuracoes_grbl()
+        if not ok_cfg or any(cfg.get(k) != "0" for k in ("$20", "$21", "$22")):
+            raise RuntimeError(
+                "Sonda software exige $20=$21=$22=0; "
+                "nao altera EEPROM nem destrava alarmes. " + msg_cfg
+            )
+        _, y_atual = self.wpos[:2]
+        x_atual = self.wpos[0]
+        direcao = 1 if PONTO_C[1] > PONTO_B[1] else -1
+        distancia_ate_c = direcao * (float(PONTO_C[1]) - y_atual)
+        if not (0.0 <= distancia_ate_c <= 35.0 and
+                abs(x_atual - float(PONTO_B[0])) <= 8.0):
+            raise RuntimeError(
+                "Posicione manualmente o cabecote perto de C, do lado de dentro "
+                "da malha, no mesmo X de B (ate 8 mm), e a no maximo 35 mm "
+                "do Y previsto para C. Nao inicie a sonda desde A ou B."
+            )
+        registrar_log(
+            f"SONDA Y OPOSTA: de Y={y_atual:.3f}, "
+            f"direcao {'+' if direcao > 0 else '-'}, "
+            f"curso max {curso:.1f} mm, F{feed:.1f}; "
+            "identificacao pelo sentido oposto ao Home.", "info"
+        )
+        try:
+            contatos, estado = self._buscar_xy_em_fluxo_home(
+                ("Y",), {"Y": direcao}, {"Y": curso},
+                {"Y": 0.0}, passo, feed
+            )
+            if "Y" not in contatos:
+                raise RuntimeError(
+                    f"Chave Y oposta nao encontrada em ate {curso:.1f} mm. "
+                    "Nao foram alterados os cantos C/D."
+                )
+            y_contato = float(self.wpos[1])
+            self._recuar_chave_home(
+                "Y", direcao, feed, recuo,
+                f"Recuando {recuo:.1f} mm da chave Y oposta"
+            )
+            estado = self._status_home_xy()
+            if "Y" in pinos_ativos(estado) or not estado.startswith("<Idle"):
+                raise RuntimeError(
+                    "A chave Y oposta nao liberou: nao gravar C/D."
+                )
+            y_util = float(self.wpos[1])
+            if -direcao * (y_util - y_contato) < 0.5:
+                raise RuntimeError(
+                    "O recuo de Y nao ocorreu no sentido de B. "
+                    "Nao atualizar C/D."
+                )
+            candidatos = (
+                list(PONTO_A), list(PONTO_B),
+                [float(PONTO_C[0]), y_util],
+                [float(PONTO_D[0]), y_util],
+            )
+            ok_cantos, motivo = validar_calibracao_cantos(candidatos)
+            if not ok_cantos:
+                raise RuntimeError(
+                    "Limite Y oposto medido, mas coordenada interna nao e "
+                    "compativel com 100 pontos a 3 mm: " + motivo +
+                    ". Verifique distancia entre chaves, calibracao e offset."
+                )
+            registrar_log(
+                f"SONDA Y OPOSTA: contato em Y={y_contato:.3f}, "
+                f"livre em Y={y_util:.3f}; aplicar esta coordenada a C/D. "
+                "MPos/WPos sao estimativas do GRBL, nao encoder.", "ok"
+            )
+            return {
+                "y_contato": round(y_contato, 3),
+                "y_cd": round(y_util, 3),
+                "ponto_c": candidatos[2],
+                "ponto_d": candidatos[3],
+                "recuo": recuo,
+            }
+        except Exception:
+            # Nao liberar alarme nem repetir busca automaticamente.
+            self.enviar_byte_tempo_real(
+                b"\x85", "Sonda Y oposta interrompida: cancelar jog"
+            )
+            self.invalidar_home_xy(
+                "Sonda Y oposta nao concluida. Confirme sensores e refaca Home."
+            )
+            raise
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=5.0, feed=500.0,
