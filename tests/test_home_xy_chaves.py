@@ -296,10 +296,10 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(amostras, ["X", "livre", "livre"])
         with patch.object(ctrl, "_status_home_xy",
-                          side_effect=[livre, ativo, livre, ativo]):
+                          side_effect=[livre, ativo] * 6):
             ok, _, amostras = ctrl._confirmar_chave_liberada_home("X")
         self.assertFalse(ok)
-        self.assertEqual(amostras, ["livre", "X", "livre", "X"])
+        self.assertEqual(amostras, ["livre", "X"] * 6)
 
     def test_y_negativo_com_feed_500_e_busca_maxima_300_mm(self):
         ctrl = self.novo_controlador()
@@ -392,7 +392,7 @@ class HomeXYChavesTeste(unittest.TestCase):
         ctrl.ser.home_simulado_x = -999.0
         ok, erro = self.executar_simulado(ctrl, curso_x=1.0)
         self.assertFalse(ok)
-        self.assertIn("Chave X nao encontrada", erro)
+        self.assertIn("Busca do eixo X encerrada por limite", erro)
         self.assertFalse(ctrl.home_xy_referenciado)
 
     def test_abortar_antes_da_busca_bloqueia_motor(self):
