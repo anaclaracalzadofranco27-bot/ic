@@ -414,6 +414,12 @@ class ControladorGRBL:
         self.porta_atual = PORTA_GRBL
         self.conexao_real = False
         self.modo_simulacao = False
+        # Referencia XY eh valida somente ate reset, alarme ou reconexao da USB.
+        self.home_xy_referenciado = False
+        self.home_xy_estado = {
+            "ativo": False, "concluido": False, "fase": "Nao referenciado",
+            "eixo": "", "erro": "", "passos": 0,
+        }
         self.config_eeprom = {}
         self.offsets_wcs = {}
         self.estado_parser = "G0 G54 G17 G21 G90 G94"
@@ -433,6 +439,7 @@ class ControladorGRBL:
         global SIMULADO
         porta = (porta or PORTA_GRBL).strip()
         baud = baud or BAUD
+        self.invalidar_home_xy("Conexao USB reiniciada")
         with self.lock:
             if self.ser and getattr(self.ser, "is_open", False):
                 try:
@@ -446,13 +453,12 @@ class ControladorGRBL:
                 self.porta_atual = "SIMULADO"
                 self.modo_simulacao = True
                 self.ser = PortaSimulada("grbl")
+                registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
             elif serial is None:
                 self.ser = None
                 self.porta_atual = "DESCONECTADO"
                 registrar_log("pyserial ausente: conexao fisica indisponivel. Sem fallback para simulacao.", "erro")
                 return False
-                registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
-                registrar_terminal("SYS", "Conectado ao Simulador GRBL 1.1h (UGS Completo)", "ok")
             else:
                 candidatas = [porta]
                 for p_alt in ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0", "/dev/ttyUSB1"):
@@ -564,6 +570,8 @@ class ControladorGRBL:
 
     def _parse_status(self, linha):
         self.ultimo_status_raw = linha
+        if linha.startswith(("<Alarm", "<Sleep")):
+            self.invalidar_home_xy(f"GRBL informou {linha.split('|', 1)[0]}")
         partes = linha.strip("<>").split("|")
         if partes:
             self.estado = partes[0].split(":")[0].upper()
@@ -643,6 +651,7 @@ class ControladorGRBL:
         return self.enviar_override_tempo_real("jog_cancel")
 
     def soft_reset(self):
+        self.invalidar_home_xy("Soft reset GRBL")
         if not self.ser:
             return False
         registrar_terminal("TX", "Ctrl+X (0x18 Soft-Reset)", "aviso")
@@ -681,6 +690,8 @@ class ControladorGRBL:
         cmd_limpo = comando.strip()
         if not cmd_limpo:
             return True, ""
+        if cmd_limpo.upper() == "$H":
+            return False, "Homing $H exige eixo Z nesse firmware. Use Home XY por chaves no SmartV42."
         # Todas as entradas GRBL (inclusive terminal e jog) obedecem a separacao do Z GPIO.
         if re.search(r"Z\s*[+-]?(?:\d|\.)", cmd_limpo.upper()):
             return False, "GRBL bloqueou coordenada cartesiana Z; use comandos discretos Z1..Z8."
@@ -707,6 +718,8 @@ class ControladorGRBL:
                         self._parse_status(linha)
                         continue
                     if linha == "ok":
+                        if re.match(r"^(?:G10\b|G92\b|G92\.1\b|\$X\b|\$2[012]=)", cmd_limpo, re.I):
+                            self.invalidar_home_xy("Referencia alterada por comando GRBL externo")
                         if registrar_no_terminal:
                             registrar_terminal("RX", "ok", "ok")
                         if logar:
@@ -923,16 +936,182 @@ class ControladorGRBL:
             registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
         return bool(ok1 and ok2)
 
+
+    def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
+        """Nao persiste a referencia: GRBL perde confiabilidade apos reset/alarme."""
+        self.home_xy_referenciado = False
+        estado = getattr(self, "home_xy_estado", None)
+        if estado is not None:
+            estado.update({"concluido": False})
+            if not estado.get("ativo"):
+                estado.update({"fase": "Nao referenciado", "erro": motivo})
+
+    def _estado_home_xy(self, fase, eixo="", passos=None):
+        self.home_xy_estado.update({"fase": fase, "eixo": eixo})
+        if passos is not None:
+            self.home_xy_estado["passos"] = passos
+
+    def _status_home_xy(self):
+        if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
+            raise RuntimeError("Home XY cancelado pelo operador.")
+        if _job_pausado:
+            raise RuntimeError("Home XY interrompido pelo Hold.")
+        status = self.ler_status_grbl(timeout=0.7)
+        if not status:
+            raise RuntimeError("Sem resposta ao consultar os sensores X/Y. Home bloqueado.")
+        if not status.startswith(("<Idle", "<Jog", "<Run")):
+            raise RuntimeError(f"Estado GRBL nao permite Home XY: {status}")
+        return status
+
+    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0):
+        """Comando incremental delimitado. Cancela o jog ao detectar a chave."""
+        if eixo not in ("X", "Y") or abs(deslocamento) > passo_max + 1e-6:
+            raise RuntimeError("Passo de Home XY excede o limite permitido.")
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL nao esta Idle antes do passo de Home XY.")
+        comando = f"$J=G91 G21 {eixo}{deslocamento:+.3f} F{feed:.1f}"
+        ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
+        if not ok:
+            raise RuntimeError(f"GRBL rejeitou jog de {eixo}: {msg}")
+        prazo = time.monotonic() + max(5.0, abs(deslocamento) * 60.0 / feed + 4.0)
+        acionou = False
+        while time.monotonic() < prazo:
+            estado = self._status_home_xy()
+            if eixo in pinos_ativos(estado):
+                acionou = True
+                if estado.startswith(("<Jog", "<Run")):
+                    # Jog cancel e em tempo real, nao um comando de movimento adicional.
+                    if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
+                        raise RuntimeError("Falhou o envio de cancelamento de jog.")
+            if estado.startswith("<Idle"):
+                return acionou or eixo in pinos_ativos(estado), estado
+            time.sleep(0.025)
+        self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
+        raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
+
+    def _home_um_eixo(self, eixo, direcao, curso_max, passo, feed, recuo):
+        """Busca a chave fisica em passos curtos, com curso maximo verificavel."""
+        self._estado_home_xy(f"Buscando chave {eixo}", eixo)
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL precisa estar Idle antes da busca.")
+        # Caso a maquina ja esteja sobre o contato, libera primeiro sem buscar alem do limite.
+        if eixo in pinos_ativos(estado):
+            self._estado_home_xy(f"Liberando chave {eixo} inicialmente acionada", eixo)
+            self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo)
+            estado = self._status_home_xy()
+            if eixo in pinos_ativos(estado):
+                raise RuntimeError(f"Chave {eixo} continuou acionada apos liberar {recuo:.1f} mm.")
+
+        percorrido = 0.0
+        achou = False
+        while percorrido < curso_max - 1e-6:
+            incremento = min(passo, curso_max - percorrido)
+            achou, estado = self._jog_passo_home_xy(eixo, direcao * incremento, feed, passo_max=passo)
+            percorrido += incremento
+            self._estado_home_xy(f"Busca {eixo}: {percorrido:.1f}/{curso_max:.1f} mm", eixo)
+            if achou:
+                break
+        if not achou:
+            raise RuntimeError(f"Chave {eixo} nao encontrada no curso limitado de {curso_max:.1f} mm.")
+
+        # A chave deve continuar acionada apos o motor parar: evita referencia por ruido.
+        time.sleep(0.05)
+        estado = self._status_home_xy()
+        if eixo not in pinos_ativos(estado):
+            raise RuntimeError(f"Leitura da chave {eixo} instavel; nao foi possivel confirmar o contato.")
+        self._estado_home_xy(f"Recuando {recuo:.1f} mm da chave {eixo}", eixo)
+        self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo)
+        time.sleep(0.05)
+        estado = self._status_home_xy()
+        if eixo in pinos_ativos(estado):
+            raise RuntimeError(f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm.")
+        registrar_log(f"Home XY: eixo {eixo} referenciado pela chave e recuado {recuo:.1f} mm.", "ok")
+
+    def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
+                               coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
+                               recuo=2.0, seguranca_confirmada=False):
+        """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
+        self.invalidar_home_xy("Iniciando nova referencia XY")
+        self.home_xy_estado.update({
+            "ativo": True, "concluido": False, "erro": "",
+            "fase": "Validando configuracao GRBL", "eixo": "", "passos": 0,
+        })
+        try:
+            if not seguranca_confirmada:
+                raise ValueError("Confirme parada de emergencia fisica independente antes de iniciar.")
+            if not self.ser or (not SIMULADO and not self.conexao_real):
+                raise RuntimeError("Controladora GRBL fisica nao conectada.")
+            if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
+                raise ValueError("Defina expressamente a direcao de busca X e Y em coordenadas GRBL.")
+            for nome, valor in (("curso X", curso_x), ("curso Y", curso_y), ("coordenada X", coord_x),
+                                ("coordenada Y", coord_y), ("passo", passo), ("feed", feed)):
+                if not math.isfinite(valor):
+                    raise ValueError(f"{nome} deve ser finito.")
+            if not 0.1 <= passo <= 0.5 or not 20.0 <= feed <= 150.0:
+                raise ValueError("Home requer passo 0.1..0.5 mm e feed 20..150 mm/min.")
+            if not 1.0 <= curso_x <= 320.0 or not 1.0 <= curso_y <= 320.0:
+                raise ValueError("Cursos de busca devem estar no intervalo de 1..320 mm.")
+            if recuo != 2.0:
+                raise ValueError("Esta rotina usa recuo fixo de 2.0 mm.")
+            if fora_dos_limites(coord_x, coord_y):
+                raise ValueError("Posicao declarada apos o recuo nao pertence aos limites A/B/C/D.")
+
+            ok_cfg, msg_cfg, cfg = self.consultar_configuracoes_grbl()
+            if not ok_cfg or "$21" not in cfg or "$22" not in cfg:
+                raise RuntimeError(f"Nao foi possivel confirmar $21 e $22 do firmware: {msg_cfg}")
+            if float(cfg["$22"]) != 0.0:
+                raise RuntimeError("Desative o homing do firmware ($22=0), conferindo pelo comando $ antes.")
+            if float(cfg["$21"]) != 0.0:
+                raise RuntimeError(
+                    "$21=1 causaria ALARM nas chaves X/Y. Home por software requer $21=0, "
+                    "com parada fisica independente. O programa NAO desabilita limites automaticamente."
+                )
+            if float(cfg.get("$20", "0")) != 0:
+                raise RuntimeError("$20=1 (soft limits) depende de referencia valida do GRBL; revise $20.")
+            self._status_home_xy()
+            self._home_um_eixo("X", direcao_x, curso_x, passo, feed, recuo)
+            self._home_um_eixo("Y", direcao_y, curso_y, passo, feed, recuo)
+            if _job_abortar or abortar_job_evento.is_set():
+                raise RuntimeError("Home cancelado antes de gravar origem.")
+            estado = self._status_home_xy()
+            if not estado.startswith("<Idle") or any(eixo in pinos_ativos(estado) for eixo in "XY"):
+                raise RuntimeError("Home XY nao pode definir origem com fins de curso acionados.")
+            self._estado_home_xy("Gravando origem G54 (sem G92)")
+            for comando in ("G21", "G90", "G54", f"G10 L20 P1 X{coord_x:.3f} Y{coord_y:.3f}"):
+                ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
+                if not ok:
+                    raise RuntimeError(f"GRBL recusou {comando}: {msg}")
+            estado = self._status_home_xy()
+            if abs(self.wpos[0] - coord_x) > 0.15 or abs(self.wpos[1] - coord_y) > 0.15:
+                raise RuntimeError(
+                    f"Origem nao confirmada pelo GRBL: WPos={self.wpos[:2]}, esperado=({coord_x},{coord_y})."
+                )
+            self.home_xy_referenciado = True
+            self.home_xy_estado.update({"concluido": True, "fase": "Home XY concluido", "erro": "", "eixo": ""})
+            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo de 2.0 mm em ambos; "
+                   f"G54 definido em X{coord_x:.3f} Y{coord_y:.3f}.")
+            registrar_log(msg, "ok")
+            return True, msg
+        except Exception as exc:
+            self.home_xy_referenciado = False
+            erro = str(exc)
+            self.home_xy_estado.update({"concluido": False, "fase": "Home XY interrompido", "erro": erro})
+            registrar_log(f"HOME XY NAO CONCLUIDO: {erro}", "erro")
+            # O jog eh finito; um cancelamento adicional evita que a proxima etapa prossiga.
+            try:
+                if self.ser:
+                    self.enviar_byte_tempo_real(b"\x85", "Home XY cancelado/interrompido")
+            except Exception:
+                pass
+            return False, erro
+        finally:
+            self.home_xy_estado["ativo"] = False
+
     def executar_homing(self):
-        registrar_log("Executando ciclo de Homing físico ($H)...", "info")
-        ok, msg = self.enviar_comando("$H", timeout=45.0, logar=False)
-        if ok:
-            self.aguardar_grbl_idle(timeout=45.0)
-            self.zerar_eixo("XY")
-            registrar_log("Homing ($H) concluido e origem (0,0,0) calibrada!", "ok")
-        else:
-            registrar_log(f"Falha no Homing ($H): {msg}", "erro")
-        return ok
+        registrar_log("Home $H desabilitado nesta instalacao: exige Z. Use Home XY por chaves.", "erro")
+        return False
 
     def calibrar_home(
         self,
@@ -1283,3 +1462,28 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
     ok, resp = ctrl_grbl.enviar_comando(cmd, timeout=timeout_cmd, logar=True, registrar_no_terminal=True)
     ctrl_grbl.atualizar_status()
     return {"ok": ok, "resposta": resp}
+
+
+def iniciar_home_xy_em_background(grbl, **parametros):
+    """Reserva a maquina durante todo o Home XY. Abort continua disponivel."""
+    global _operacao_manual
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False, "Maquina ocupada com job ou comando manual."
+        _operacao_manual = True
+        abortar_job_evento.clear()
+    def _worker():
+        global _operacao_manual
+        try:
+            grbl.executar_home_xy_chaves(**parametros)
+        finally:
+            with _job_lock:
+                _operacao_manual = False
+    try:
+        threading.Thread(target=_worker, daemon=True, name="home-xy-chaves").start()
+    except Exception as exc:
+        with _job_lock:
+            _operacao_manual = False
+        return False, f"Nao foi possivel iniciar Home XY: {exc}"
+    return True, "Home XY iniciou; acompanhe o estado e use Abortar para interromper."
+
