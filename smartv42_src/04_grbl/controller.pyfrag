@@ -972,8 +972,9 @@ class ControladorGRBL:
             raise RuntimeError(f"Estado GRBL nao permite Home XY: {status}")
         return status
 
-    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0):
-        """Comando incremental delimitado. Cancela o jog ao detectar a chave."""
+    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0,
+                          detectar_contato=True):
+        """Passo incremental: detecta chave na busca, mas a ignora durante recuo."""
         if eixo not in ("X", "Y") or abs(deslocamento) > passo_max + 1e-6:
             raise RuntimeError("Passo de Home XY excede o limite permitido.")
         estado = self._status_home_xy()
@@ -987,7 +988,7 @@ class ControladorGRBL:
         acionou = False
         while time.monotonic() < prazo:
             estado = self._status_home_xy()
-            if eixo in pinos_ativos(estado):
+            if detectar_contato and eixo in pinos_ativos(estado):
                 if not acionou and estado.startswith(("<Jog", "<Run")):
                     # Jog cancel e em tempo real, nao um comando de movimento adicional.
                     if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
@@ -1008,7 +1009,8 @@ class ControladorGRBL:
         # Caso a maquina ja esteja sobre o contato, libera primeiro sem buscar alem do limite.
         if eixo in pinos_ativos(estado):
             self._estado_home_xy(f"Liberando chave {eixo} inicialmente acionada", eixo)
-            self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo)
+            self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
+                                    detectar_contato=False)
             estado = self._status_home_xy()
             if eixo in pinos_ativos(estado):
                 raise RuntimeError(f"Chave {eixo} continuou acionada apos liberar {recuo:.1f} mm.")
@@ -1031,7 +1033,8 @@ class ControladorGRBL:
         if eixo not in pinos_ativos(estado):
             raise RuntimeError(f"Leitura da chave {eixo} instavel; nao foi possivel confirmar o contato.")
         self._estado_home_xy(f"Recuando {recuo:.1f} mm da chave {eixo}", eixo)
-        self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo)
+        self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
+                                detectar_contato=False)
         time.sleep(0.05)
         estado = self._status_home_xy()
         if eixo in pinos_ativos(estado):
