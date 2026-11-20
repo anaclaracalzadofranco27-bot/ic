@@ -138,7 +138,10 @@ class TestesCDCoordenadasEDados(unittest.TestCase):
             self.assertEqual(mod.estado_importacao_gcode["nome"], "teste")
             self.assertTrue(mod.estado_importacao_gcode["usar_parametros_arquivo"])
             mod.atualizar_matriz_global(np.zeros((100, 100), dtype=np.uint8), descartar_importacao=True)
-            self.assertIsNone(mod.estado_importacao_gcode["programa"])
+            # descartar_importacao eh parametro legado: seleciona matriz, NAO apaga arquivo.
+            self.assertEqual(mod.estado_importacao_gcode["nome"], "teste")
+            self.assertIsNotNone(mod.estado_importacao_gcode["programa"])
+            self.assertEqual(mod.obter_fonte_job_ativa(), "matriz")
 
     def test_luminancia_eh_processada_pelo_pipeline_de_imagem(self):
         codigo = (ROOT / "smartv42_src/10_server/application.pyfrag").read_text(encoding="utf-8")
@@ -196,7 +199,7 @@ class TestesEHMotorUnico(unittest.TestCase):
         bloco = {"tipo": "z", "nivel": 4, "pulsos": 12, "on_ms": 15, "off_ms": 0}
         with patch.object(mod, "acionar_eixo_z", return_value=(True, {"pino_gpio": 27, "pulsos": 4})) as z, patch.object(mod.time, "sleep"):
             mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": False})
-            self.assertIsNone(z.call_args.kwargs["pulsos_override"])
+            self.assertEqual(z.call_args.kwargs["pulsos_override"], mod.obter_pulsos_para_nivel(4))
             mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": True})
             self.assertEqual(z.call_args.kwargs["pulsos_override"], 12)
             self.assertEqual(z.call_args.kwargs["off_ms_override"], 0)
