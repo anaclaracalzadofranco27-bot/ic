@@ -239,6 +239,50 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(amostras, ["livre", "X", "livre", "X"])
 
+    def test_y_negativo_com_feed_500_e_busca_maxima_300_mm(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ctrl.ser.home_simulado_y_sentido = -1
+        ctrl.ser.home_simulado_y = -3.0
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, msg = self.executar_simulado(
+                ctrl, direcao_y=-1, feed=500.0, curso_x=300.0, curso_y=300.0
+            )
+        self.assertTrue(ok, msg)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-0.500 Y-0.500 F500.0" in c
+                            for c in comandos))
+        self.assertTrue(any("$J=G91 G21 X5.000 Y5.000 F500.0" in c
+                            for c in comandos))
+        self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], 2.0, places=2)
+
+    def test_home_rejeita_curso_acima_de_300_e_feed_acima_de_600(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ok, msg = self.executar_simulado(ctrl, curso_y=301.0)
+        self.assertFalse(ok)
+        self.assertIn("1..300 mm", msg)
+        ok, msg = self.executar_simulado(ctrl, feed=601.0)
+        self.assertFalse(ok)
+        self.assertIn("20..600 mm/min", msg)
+
+    def test_inversao_y_no_grbl_exige_confirmacao_e_preserva_x(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$3=1")
+        respostas = []
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        handler._enviar_json = lambda corpo, status=200: respostas.append((corpo, status))
+        with patch.object(mod, "_grbl_global", ctrl):
+            handler._executar_acao_POST("inverter_motor_y_grbl", {"confirmado": False})
+            self.assertFalse(respostas[-1][0]["ok"])
+            self.assertEqual(ctrl.ser.settings[3][0], "1")
+            handler._executar_acao_POST("inverter_motor_y_grbl", {"confirmado": True})
+        self.assertTrue(respostas[-1][0]["ok"], respostas[-1])
+        self.assertEqual(respostas[-1][0]["mascara"], 3)
+        self.assertEqual(ctrl.ser.settings[3][0], "3")
+        self.assertFalse(ctrl.home_xy_referenciado)
+
     def test_usb_reconectada_invalida_referencia(self):
         ctrl = self.novo_controlador()
         ctrl.home_xy_referenciado = True
