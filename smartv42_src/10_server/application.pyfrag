@@ -225,6 +225,134 @@ def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esper
     return _preparador_jobs.iniciar(grbl, reset_ctrl, fonte_esperada, revisao_esperada)
 
 
+
+# Sonda Y2 e perimetro em thread: a interface nunca fica bloqueada
+# aguardando ~300 mm de movimento, e o botao Abortar segue responsivo.
+_estado_sonda_y2 = {
+    "ativo": False, "concluido": False, "erro": "", "fase": "",
+    "medicao": None, "perimetro": False,
+}
+
+
+def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
+    """Reserva a CNC, mede Y2 desde A/B e opcionalmente percorre A-B-C-D-A.
+
+    O primeiro deslocamento Y e sempre um Jog supervisionado pelas chaves.
+    Quando Y2 ja esta calibrada, o perimetro usa a geometria validada sem
+    sondar novamente. Abort da interface continua independente da reserva.
+    """
+    global _operacao_manual
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False, "Maquina ocupada com outro movimento."
+        if not grbl.home_xy_referenciado:
+            return False, "Execute Home XY com as duas chaves antes de calibrar Y2."
+        if not testar_perimetro and BORDA_Y_OPOSTA_CALIBRADA:
+            return False, (
+                "A segunda chave Y ja esta calibrada nesta geometria. "
+                "Use Perimetro para conferir ou altere conscientemente a calibracao."
+            )
+        _operacao_manual = True
+        abortar_job_evento.clear()
+        _estado_sonda_y2.update({
+            "ativo": True, "concluido": False, "erro": "",
+            "fase": "Reservado: verificando Home e chaves",
+            "medicao": None, "perimetro": bool(testar_perimetro),
+        })
+
+    def _fase(texto):
+        _estado_sonda_y2["fase"] = texto
+
+    def _worker():
+        global _operacao_manual
+        try:
+            bloquear_z_fisico("Sonda Y2/perimetro automatico: somente XY")
+            if not BORDA_Y_OPOSTA_CALIBRADA:
+                medicao = grbl.sondar_chave_y_oposta(
+                    curso=15.0, feed=120.0, recuo=4.0,
+                    passo=1.0, progresso=_fase,
+                )
+                # A/B e G54 preservados, pois a sonda muda apenas Y de C/D.
+                configurar_sistema_coordenadas(
+                    ponto_c=medicao["ponto_c"],
+                    ponto_d=medicao["ponto_d"],
+                    medicao_chave_y_oposta=True,
+                )
+                _estado_sonda_y2["medicao"] = medicao
+                if _matriz_atual is not None:
+                    atualizar_matriz_global(_matriz_atual)
+                registrar_log(
+                    "Y2 calibrado desde A/B automaticamente; "
+                    f"novo Y de C/D: {medicao['y_cd']:.3f} mm.", "ok"
+                )
+            if testar_perimetro:
+                if not grbl.home_xy_referenciado:
+                    raise RuntimeError(
+                        "Home foi perdido durante a calibracao. "
+                        "Perimetro nao iniciado."
+                    )
+                rota = [
+                    ("A", list(PONTO_A)), ("B", list(PONTO_B)),
+                    ("C", list(PONTO_C)), ("D", list(PONTO_D)),
+                    ("A", list(PONTO_A)),
+                ]
+                for nome, pt in rota:
+                    _fase(
+                        f"Perimetro -> {nome} "
+                        f"X={pt[0]:.2f}, Y={pt[1]:.2f}"
+                    )
+                    if abortar_job_evento.is_set():
+                        raise RuntimeError("Perimetro abortado pelo operador.")
+                    # Perimetro somente apos Y2 validado, feed moderado.
+                    ok_p, info_p = grbl.mover_xy_sincrono(
+                        pt[0], pt[1], feed=min(FEED_RATE, 250.0)
+                    )
+                    if not ok_p:
+                        raise RuntimeError(
+                            f"Perimetro interrompido em {nome}: {info_p}. "
+                            "Confira estado GRBL e Pn antes de repetir."
+                        )
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": True, "erro": "",
+                "fase": (
+                    "Y2 calibrado e perimetro A-B-C-D-A concluido"
+                    if testar_perimetro else
+                    "Y2 encontrado, recuado e C/D atualizados"
+                ),
+            })
+            registrar_log(_estado_sonda_y2["fase"], "ok")
+        except Exception as exc:
+            motivo = str(exc) or type(exc).__name__
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": False,
+                "erro": motivo,
+                "fase": "Sonda Y2/perimetro interrompido",
+            })
+            registrar_log(
+                "SONDA Y2/PERIMETRO NAO CONCLUIDO: " + motivo, "erro"
+            )
+        finally:
+            with _job_lock:
+                _operacao_manual = False
+
+    try:
+        threading.Thread(
+            target=_worker, daemon=True, name="sonda-y2-e-perimetro"
+        ).start()
+    except Exception as exc:
+        with _job_lock:
+            _operacao_manual = False
+        _estado_sonda_y2.update({
+            "ativo": False, "concluido": False, "erro": str(exc),
+            "fase": "Falha ao iniciar thread",
+        })
+        return False, f"Nao foi possivel iniciar sonda Y2: {exc}"
+    return True, (
+        "Sonda Y2 automatica iniciada desde A/B; acompanhe "
+        "a telemetria. Abortar permanece disponivel."
+    )
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -289,6 +417,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "idx": list(mm_fisico_para_indice(_grbl_global.wpos[0], _grbl_global.wpos[1])),
                 "job": _job_progresso,
                 "home_xy": dict(_grbl_global.home_xy_estado, referenciado=_grbl_global.home_xy_referenciado),
+                "sonda_y2": dict(_estado_sonda_y2),
                 "logs": list(ESTADO_ESTUDIO["logs"])[:35],  # mais recentes primeiro
             })
             return
@@ -312,7 +441,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         acao = dados.get("action", "")
         # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
         # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
-        simultanea = acao in ("iniciar_job", "iniciar_home_xy") or (
+        simultanea = acao in ("iniciar_job", "iniciar_home_xy", "calibrar_y_oposto") or (
+            acao == "calibrar_caixa_fisica" and dados.get("etapa") == "testar_perimetro"
+        ) or (
             acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
         )
         if simultanea:
@@ -430,37 +561,16 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if dados.get("confirmado") is not True:
                 self._enviar_json({
                     "ok": False,
-                    "erro": "Confirme os sensores e a parada eletrica independente."
+                    "erro": "Confirme a parada eletrica independente antes da sonda Y2."
                 }, 400)
                 return
-            if _job_em_execucao or not _grbl_global.home_xy_referenciado:
-                self._enviar_json({
-                    "ok": False,
-                    "erro": "Finalize o job e refaca Home XY antes de medir a chave Y oposta."
-                }, 409)
-                return
-            medicao = _grbl_global.sondar_chave_y_oposta(
-                curso=float(dados.get("curso", 15.0)),
-                feed=float(dados.get("feed", 120.0)),
-                recuo=float(dados.get("recuo", 4.0)),
-                passo=float(dados.get("passo", 1.0)),
+            ok_sonda, msg_sonda = iniciar_sonda_y2_automatica(
+                _grbl_global, testar_perimetro=False
             )
-            estado = configurar_sistema_coordenadas(
-                ponto_c=medicao["ponto_c"],
-                ponto_d=medicao["ponto_d"],
-                medicao_chave_y_oposta=True,
-            )
-            if _matriz_atual is not None:
-                atualizar_matriz_global(_matriz_atual)
             self._enviar_json({
-                "ok": True, "coord": estado, "medicao": medicao,
-                "mensagem": (
-                    "Segunda chave Y encontrada e liberada. "
-                    f"Y de C e D = {medicao['y_cd']:.3f} mm, "
-                    f"contato em Y = {medicao['y_contato']:.3f} mm. "
-                    "Nova geometria salva. Refaca Home XY antes de percorrer o perimetro."
-                ),
-            })
+                "ok": ok_sonda, "mensagem": msg_sonda,
+                "erro": None if ok_sonda else msg_sonda
+            }, 200 if ok_sonda else 409)
             return
 
         if acao == "calibrar_caixa_fisica":
@@ -494,40 +604,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
                 return
             if etapa == "testar_perimetro":
-                if not BORDA_Y_OPOSTA_CALIBRADA:
-                    self._enviar_json({
-                        "ok": False,
-                        "erro": (
-                            "Perimetro bloqueado antes de B->C: existe uma segunda "
-                            "chave Y na extremidade C/D. Meça a borda pelo botao "
-                            "'Calibrar C/D pela chave Y oposta' antes do teste. "
-                            "O ponto C padrao pode ultrapassar o batente."
-                        ),
-                    }, 409)
-                    return
-                rota = [("A", PONTO_A), ("B", PONTO_B),
-                        ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
-                registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
-                for nome_p, pt in rota:
-                    registrar_log(
-                        f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})"
-                    )
-                    ok_p, st_p = _grbl_global.mover_xy_sincrono(
-                        pt[0], pt[1], feed=FEED_RATE
-                    )
-                    if not ok_p:
-                        registrar_log(
-                            f"Perimetro interrompido em {nome_p}: {st_p}", "erro"
-                        )
-                        self._enviar_json({
-                            "ok": False,
-                            "erro": f"Perimetro parou em {nome_p}: {st_p}. "
-                                    "Confira GRBL, Pn:Y e chaves antes de repetir.",
-                            "coord": obter_estado_coordenadas(),
-                        }, 409)
-                        return
-                registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
+                ok_rota, msg_rota = iniciar_sonda_y2_automatica(
+                    _grbl_global, testar_perimetro=True
+                )
+                self._enviar_json({
+                    "ok": ok_rota, "mensagem": msg_rota,
+                    "erro": None if ok_rota else msg_rota,
+                }, 200 if ok_rota else 409)
                 return
 
         if acao == "inverter_motor_x_grbl":
