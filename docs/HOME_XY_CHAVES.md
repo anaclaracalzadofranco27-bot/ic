@@ -43,3 +43,18 @@ Nao simula o motor Z, nao envia comandos Z ao GRBL, nao injeta valores falsos de
 - **A acao de software nao garante parada instantanea mecanica** em falha USB/firmware e nao substitui parada eletrica de emergencia. Se a USB nao confirmar envio dos bytes, a interface indica que a parada fisica deve ser acionada.
 
 Se a maquina continuar parando no primeiro passo, com motores DESENERGIZADOS verifique se `?` responde repetidamente com USB conectada, teste `Pn:X` e `Pn:Y` separadamente e procure erros de alimentacao/interferencia. Nao remova intertravamentos de curso nem trate `Pn` ausente como chave acionada.
+
+## Quando X nao libera apos recuo de 2 mm e Y nao se movimenta
+
+A busca e sequencial: primeiro X, depois Y. Se X nao liberar, Y **nao inicia**. Nao e prova de defeito no motor Y.
+
+A mensagem do Home passa a incluir o recuo solicitado, a diferenca de posicao **informada** pelo GRBL (MPos) e o Pn final. MPos e contabilizacao de passos do controlador, **nao** sensor de deslocamento real do carro; um motor travado ou desconectado pode gerar MPos aparentemente normal.
+
+1. Desligue a alimentacao dos motores (mantenha a USB/GRBL funcionando). Envie `?` no Terminal UGS com as duas chaves soltas. Nao deve haver `Pn:X` nem `Pn:Y`.
+2. Pressione somente a chave X: `Pn:X` deve aparecer. Solte: precisa desaparecer. Repita com a Y e `Pn:Y`. Se X continuar aparecendo solta, confira cabo, contato NO/NC, GND e polaridade `$5`.
+3. Com a CNC parada e area livre, confira se o sentido da busca X selecionado na tela realmente aponta para a chave. O recuo usa o sentido contrario.
+4. Se a posicao MPos reportar recuo ~2 mm mas X permanecer ativo, verifique fisicamente se o carro realmente afastou, o acionador da chave e a folga mecanica. Nao deduza deslocamento mecanico apenas de MPos.
+5. Teste Y separadamente pelo Jog Manual em passo de **0,5 mm**, baixa velocidade e apenas com area desobstruida, chaves livres, Z bloqueado e parada eletrica independente pronta. O Jog nao e um Home valido.
+6. Se o recuo informado estiver errado, confira alimentacao e habilitacao do driver, cabeamento STEP/DIR, acoplamento e configuracao dos passos por mm (`$100` para X e `$101` para Y).
+
+Nao pule a confirmacao do sensor para liberar automaticamente o Y e nao aumente o recuo sem confirmar o espaco mecanico disponivel.
