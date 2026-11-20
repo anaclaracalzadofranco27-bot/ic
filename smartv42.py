@@ -2013,6 +2013,41 @@ class ControladorGRBL:
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
         raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
 
+    def _recuar_chave_home(self, eixo, direcao, feed, recuo, fase):
+        """Recuo supervisionado: valida Pn e movimento INFORMADO pelo GRBL.
+
+        MPos e posicao de passos comandados, nao medicao de deslocamento
+        mecanico por encoder. Mesmo com MPos correto, confira motor, acoplamento
+        e chave fisica antes de repetir o Home.
+        """
+        self._estado_home_xy(fase, eixo)
+        self._status_home_xy()
+        indice = 0 if eixo == "X" else 1
+        posicao_antes = self.mpos[indice]
+        deslocamento = -direcao * recuo
+        self._jog_passo_home_xy(eixo, deslocamento, feed, passo_max=recuo,
+                                detectar_contato=False)
+        time.sleep(0.05)
+        estado = self._status_home_xy()
+        deslocamento_grbl = self.mpos[indice] - posicao_antes
+        pn = pinos_ativos(estado)
+        diagnostico = (f"Comando: {eixo}{deslocamento:+.2f} mm; "
+                       f"MPos informado: {deslocamento_grbl:+.2f} mm; "
+                       f"Pn:{pn or 'livre'}; estado: {estado.split('|', 1)[0]}.")
+        if eixo in pn:
+            raise RuntimeError(
+                f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm. "
+                f"{diagnostico} Confirme fisicamente o afastamento, a direcao, "
+                "a chave e a fiacao (NO/NC, GND e $5). "
+                + ("Y nao foi iniciado porque X falhou." if eixo == "X" else "")
+            )
+        if abs(deslocamento_grbl - deslocamento) > 0.35:
+            raise RuntimeError(
+                f"Recuo {eixo} nao confirmado pela posicao reportada do GRBL. "
+                f"{diagnostico} Pare e verifique comandos, configuracao do eixo e mecanica."
+            )
+        registrar_log(f"Home XY: chave {eixo} liberada. {diagnostico}", "ok")
+
     def _home_um_eixo(self, eixo, direcao, curso_max, passo, feed, recuo):
         """Busca a chave fisica em passos curtos, com curso maximo verificavel."""
         self._estado_home_xy(f"Buscando chave {eixo}", eixo)
@@ -2021,12 +2056,8 @@ class ControladorGRBL:
             raise RuntimeError("GRBL precisa estar Idle antes da busca.")
         # Caso a maquina ja esteja sobre o contato, libera primeiro sem buscar alem do limite.
         if eixo in pinos_ativos(estado):
-            self._estado_home_xy(f"Liberando chave {eixo} inicialmente acionada", eixo)
-            self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
-                                    detectar_contato=False)
-            estado = self._status_home_xy()
-            if eixo in pinos_ativos(estado):
-                raise RuntimeError(f"Chave {eixo} continuou acionada apos liberar {recuo:.1f} mm.")
+            self._recuar_chave_home(eixo, direcao, feed, recuo,
+                                    f"Liberando chave {eixo} inicialmente acionada")
 
         percorrido = 0.0
         achou = False
@@ -2045,13 +2076,8 @@ class ControladorGRBL:
         estado = self._status_home_xy()
         if eixo not in pinos_ativos(estado):
             raise RuntimeError(f"Leitura da chave {eixo} instavel; nao foi possivel confirmar o contato.")
-        self._estado_home_xy(f"Recuando {recuo:.1f} mm da chave {eixo}", eixo)
-        self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
-                                detectar_contato=False)
-        time.sleep(0.05)
-        estado = self._status_home_xy()
-        if eixo in pinos_ativos(estado):
-            raise RuntimeError(f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm.")
+        self._recuar_chave_home(eixo, direcao, feed, recuo,
+                                f"Recuando {recuo:.1f} mm da chave {eixo}")
         registrar_log(f"Home XY: eixo {eixo} referenciado pela chave e recuado {recuo:.1f} mm.", "ok")
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
