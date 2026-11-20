@@ -844,12 +844,16 @@ def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inici
                     break
                 rele.on()
                 try:
-                    time.sleep(t_on)
+                    # Event.wait acorda imediatamente ao clicar Abortar, ao
+                    # contrario de time.sleep(t_on), que segurava o rele ligado.
+                    interrompeu = abortar_job_evento.wait(t_on)
                 finally:
                     rele.off()
+                if interrompeu or _job_abortar or not sistema_ativo.is_set():
+                    break
                 pulsos_realizados += 1
-                if i < num_batidas - 1:
-                    time.sleep(t_off)
+                if i < num_batidas - 1 and abortar_job_evento.wait(t_off):
+                    break
         finally:
             rele.off()
     else:
@@ -928,11 +932,14 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
                 rele = reles_z[i - 1]
                 try:
                     rele.on()
-                    time.sleep(tempo_ligado_s)
+                    # Teste manual Z tambem precisa desligar ao receber Abortar.
+                    interrompeu = abortar_job_evento.wait(tempo_ligado_s)
                 finally:
                     rele.off()
-                if i < NIVEIS_MAX:
-                    time.sleep(0.3)
+                if interrompeu or _job_abortar or not sistema_ativo.is_set():
+                    return False
+                if i < NIVEIS_MAX and abortar_job_evento.wait(0.3):
+                    return False
         finally:
             if modo == "completo":
                 for rele in reles_z:
@@ -1548,9 +1555,12 @@ class ControladorGRBL:
                     self._parse_status(linha)
                     return linha
                 if linha.startswith("ALARM"):
+                    self.invalidar_home_xy(f"GRBL informou {linha}")
+                    self.estado = "ALARM"
                     msg = explicar_alarme(linha)
                     registrar_log(f"GRBL avisou: {msg}", "erro")
                     registrar_terminal("RX", msg, "erro")
+                    return linha
         except Exception as e:
             if "readiness to read" in str(e) or "Input/output error" in str(e) or "Errno 5" in str(e):
                 try:
@@ -1669,15 +1679,25 @@ class ControladorGRBL:
         return True
 
     def parar_grbl(self):
-        if not self.ser:
-            return
+        """Parada por software imediata: prioridade aos bytes em tempo real.
+
+        NAO pega self.lock nem espera serial/status. Pode interromper leitura
+        e comandos longos em outra thread. Exige E-stop eletrico independente.
+        Ctrl+X invalida toda referencia XY do GRBL.
+        """
+        self.invalidar_home_xy("Abortar/Reset GRBL por comando em tempo real")
+        porta = self.ser
+        if porta is None:
+            registrar_log("Abortar: GRBL desconectado; use a parada fisica.", "erro")
+            return False
         try:
-            self.ser.write(b"!")
-            time.sleep(0.3)
-            self.ser.write(b"\x18")
-            registrar_terminal("RT", "Parada de Emergência (! + Ctrl+X)", "erro")
-        except Exception:
-            pass
+            porta.write(b"!")
+            porta.write(b"\x18")
+        except Exception as exc:
+            registrar_log(f"FALHA ao enviar abortamento serial: {exc}; use a parada fisica.", "erro")
+            return False
+        registrar_terminal("RT", "Abortar: Feed Hold (!) + Ctrl+X enviados sem espera serial", "aviso")
+        return True
 
     def enviar_comando(self, comando, timeout=None, logar=True, registrar_no_terminal=True):
         if not self.ser:
@@ -1935,16 +1955,29 @@ class ControladorGRBL:
             self.home_xy_estado["passos"] = passos
 
     def _status_home_xy(self):
-        if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
-            raise RuntimeError("Home XY cancelado pelo operador.")
-        if _job_pausado:
-            raise RuntimeError("Home XY interrompido pelo Hold.")
-        status = self.ler_status_grbl(timeout=0.7)
-        if not status:
-            raise RuntimeError("Sem resposta ao consultar os sensores X/Y. Home bloqueado.")
-        if not status.startswith(("<Idle", "<Jog", "<Run")):
-            raise RuntimeError(f"Estado GRBL nao permite Home XY: {status}")
-        return status
+        """Aceita perda transitoria de status sem confundir Pn vazio com falha.
+
+        Cada jog e limitado em mm; o status somente confirma contato e fim do
+        passo. Tres leituras curtas evitam abortar a rotina por uma unica
+        resposta USB atrasada, sem ignorar ALARM ou abortamento do operador.
+        """
+        for tentativa in range(3):
+            if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
+                raise RuntimeError("Home XY cancelado pelo operador.")
+            if _job_pausado:
+                raise RuntimeError("Home XY interrompido pelo Hold.")
+            status = self.ler_status_grbl(timeout=0.5)
+            if status:
+                if not status.startswith(("<Idle", "<Jog", "<Run")):
+                    raise RuntimeError(f"Estado GRBL nao permite Home XY: {status}")
+                return status
+            if tentativa < 2:
+                time.sleep(0.08)
+        raise RuntimeError(
+            "Sem resposta do status GRBL apos 3 consultas '?' (ate ~1,7 s). "
+            "Confira USB/alimentacao: leitura de Pn:X/Pn:Y nao confirmada. "
+            f"Ultimo status valido: {self.ultimo_status_raw or 'nenhum'}."
+        )
 
     def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0,
                           detectar_contato=True):
@@ -1976,7 +2009,7 @@ class ControladorGRBL:
                 acionou = True
             if estado.startswith("<Idle") and movimento_observado:
                 return acionou or (detectar_contato and eixo in pinos_ativos(estado)), estado
-            time.sleep(0.025)
+            time.sleep(0.15)
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
         raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
 
@@ -2096,8 +2129,8 @@ class ControladorGRBL:
             registrar_log(f"HOME XY NAO CONCLUIDO: {erro}", "erro")
             # O jog eh finito; um cancelamento adicional evita que a proxima etapa prossiga.
             try:
-                if self.ser:
-                    self.enviar_byte_tempo_real(b"\x85", "Home XY cancelado/interrompido")
+                if self.ser and not (_job_abortar or abortar_job_evento.is_set()):
+                    self.enviar_byte_tempo_real(b"\x85", "Home XY interrompido: cancelar jog")
             except Exception:
                 pass
             return False, erro
@@ -4173,6 +4206,19 @@ async function jog(dxSign, dySign) {
 }
 
 async function acaoUGS(tipo) {
+  if (tipo === 'abort') {
+    // Nao espera atualizarStatus(), fetch de telemetria ou animacao.
+    const painel = document.getElementById('info-progresso');
+    if (painel) painel.textContent = 'ABORTAR solicitado: aguarde confirmacao do GRBL; use E-stop fisico se necessario.';
+    try {
+      const resp = await apiPost('ugs_cmd', { cmd: 'abort' });
+      if (!resp.ok) alert(resp.erro || 'Falha na parada serial: USE PARADA FISICA.');
+      else if (painel) painel.textContent = resp.mensagem || 'Comando de abortamento enviado ao GRBL.';
+    } catch (erro) {
+      alert('Sem confirmacao USB. USE A PARADA FISICA de emergencia.');
+    }
+    return;
+  }
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
   atualizarStatus();
@@ -5096,11 +5142,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 _job_pausado = False
                 _grbl_global.enviar_byte_tempo_real(b"~", "Cycle Start (~)")
             elif cmd == "abort":
+                # Prioridade absoluta: liberar a espera do job e enviar bytes
+                # realtime sem adquirir o lock serial da thread em movimento.
                 _job_abortar = True
                 _job_pausado = False
-                if _job_em_execucao or _operacao_manual:
-                    abortar_job_evento.set()
-                _grbl_global.soft_reset()
+                abortar_job_evento.set()
+                ok_parada = _grbl_global.parar_grbl()
+                mensagem = ("Hold + Ctrl+X enviados ao GRBL; confirme parada na CNC."
+                            if ok_parada else
+                            "Nao foi possivel enviar parada pela USB. ACIONE A PARADA ELETRICA.")
+                self._enviar_json({
+                    "ok": bool(ok_parada), "mensagem": mensagem,
+                    "erro": None if ok_parada else mensagem,
+                }, 200 if ok_parada else 503)
+                return
             elif cmd == "jog_cancel":
                 _grbl_global.cancelar_jog()
             elif cmd == "unlock":
