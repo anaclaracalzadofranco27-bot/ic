@@ -526,3 +526,7 @@ O Home XY automático por chaves e recuo de 2 mm foi preservado. O botão de ori
 A Matriz 100×100 e o G-code importado são mantidos em estados independentes. Os botões **Matriz 100 × 100** e **G-code importado** escolhem qual fonte será plotada; o arquivo importado não é apagado por alterações de geometria, pulsos ou imagem. Para apagá-lo, use **Remover G-code** com confirmação. Os arquivos importados permanecem na memória até o servidor reiniciar.
 
 Ao iniciar um job, o SmartV42 cria cópia profunda das instruções e registra um snapshot dos parâmetros do painel, da geometria e do mapa Z; a escolha **Z do arquivo** determina quais parâmetros do G-code externo têm precedência. A revisão do projeto impede iniciar trabalhos com uma tela desatualizada. Consulte [docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md](docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md).
+
+## 16. Arquitetura interna — projeto, plano e executor
+
+A refatoração dos componentes do SmartV42 mantém as dez seções de código e o HTML inalterado. O `RepositorioProjetoStudio` centraliza o estado editável e a revisão da fonte, o `PlanoJobStudio` representa o trabalho preparado como dados imutáveis, `ConfiguracaoExecucao` congela os parâmetros e `MotorExecucaoGCode` executa **matriz e G-code importado pelo mesmo motor**. As APIs e funções antigas permanecem como adaptadores de compatibilidade. Veja [docs/ARQUITETURA_SMARTV42.md](docs/ARQUITETURA_SMARTV42.md).
