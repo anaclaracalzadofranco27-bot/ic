@@ -1758,6 +1758,23 @@ def configurar_sistema_coordenadas(
         raise ValueError("Limite Y precisa cobrir os 297 mm medidos.")
     if any(v is not None for v in (x_inicio_fisico,y_inicio_fisico,x_fim_fisico,y_fim_fisico)):
         raise ValueError("Limites fisicos legados desativados: use somente os quatro cantos A/B/C/D.")
+    # A medicao da chave Y2 atualiza apenas C/D; A/B e G54 ficam no
+    # mesmo lugar. Uma referencia Home previamente validada permanece valida
+    # quando o proprio controlador confirmou Y2 e o recuo com Pn:Y livre.
+    origem_home_antes = tuple(ponto_home_xy())
+    pode_preservar_home = (
+        medicao_chave_y_oposta and
+        ponto_c is not None and ponto_d is not None and
+        ponto_a is None and ponto_b is None and
+        all(v is None for v in (
+            origem_x_na_direita, sinal_eixo_x, sinal_eixo_y,
+            inverter_jog_x, inverter_jog_y, limite_x_mm,
+            limite_y_mm, x_inicio_fisico, y_inicio_fisico,
+            x_fim_fisico, y_fim_fisico
+        )) and
+        abs(float(candidatos[2][0]) - float(PONTO_C[0])) < 1e-6 and
+        abs(float(candidatos[3][0]) - float(PONTO_D[0])) < 1e-6
+    )
     # Os quatro cantos descrevem diretamente a posicao fisica no sistema G54.
     PONTO_A, PONTO_B, PONTO_C, PONTO_D = candidatos
     if medicao_chave_y_oposta:
@@ -1785,7 +1802,18 @@ def configurar_sistema_coordenadas(
     grbl = globals().get("_grbl_global")
     if grbl is not None:
         bloquear_z_fisico("Calibracao ou orientacao XY alterada")
-        grbl.invalidar_home_xy("Calibracao/orientacao modificada: execute Home XY novamente.")
+        if (pode_preservar_home and grbl.home_xy_referenciado and
+                all(abs(a - b) < 1e-6 for a, b in zip(
+                    origem_home_antes, ponto_home_xy()
+                ))):
+            registrar_log(
+                "Y2 calibrado: A/B e coordenada G54 do Home nao mudaram. "
+                "Home valido preservado; Z continua desabilitado.", "ok"
+            )
+        else:
+            grbl.invalidar_home_xy(
+                "Calibracao/orientacao modificada: execute Home XY novamente."
+            )
     salvar_calibracao_matriz()
     est = obter_estado_coordenadas()
     registrar_log(
