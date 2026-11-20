@@ -210,6 +210,68 @@ class EstadosIsolados(unittest.TestCase):
         self.assertNotIn("G1 X3 Y-297 F700", saidas[0]["gcode"])
         self.assertTrue(saidas[0]["gcode_importado"])
 
+    def test_importacao_gcode_desenha_pino_em_malha_sem_substituir_matriz(self):
+        base = mod._matriz_atual.copy()
+        with patch.object(mod, "ORIGEM_X_NA_DIREITA", False):
+            mod.carregar_gcode_importado(
+                "G21\nG90\nG54\nG1 X297 Y0 F500\nZ7\nG1 X294 Y0\nZ2",
+                "pinos_importados.gcode",
+            )
+            previa = mod.gerar_preview_gcode_malha(
+                mod.estado_importacao_gcode["programa"]
+            )
+        self.assertEqual(previa["matriz"][99][99], 7)
+        self.assertEqual(previa["matriz"][99][98], 2)
+        self.assertEqual(previa["pinos_ativos"], 2)
+        self.assertEqual(previa["acionamentos_z"], 2)
+        self.assertTrue(np.array_equal(mod._matriz_atual, base))
+        self.assertEqual(mod.obter_fonte_job_ativa(), "gcode")
+
+    def test_previa_gcode_espelha_x_se_malha_estiver_invertida(self):
+        programa = mod.analisar_gcode_hibrido(
+            "G1 X297 Y0\nZ8\nG1 X0 Y-297\nZ3"
+        )
+        with patch.object(mod, "ORIGEM_X_NA_DIREITA", True):
+            previa = mod.gerar_preview_gcode_malha(programa)
+        self.assertEqual(previa["matriz"][99][0], 8)
+        self.assertEqual(previa["matriz"][0][99], 3)
+
+    def test_gcode_sem_z_mostra_trajetoria_mas_nenhum_pino_ativo(self):
+        programa = mod.analisar_gcode_hibrido(
+            "G0 X0 Y-297\nG1 X3 Y-297 F500\nG1 X6 Y-297"
+        )
+        previa = mod.gerar_preview_gcode_malha(programa)
+        self.assertEqual(previa["pinos_ativos"], 0)
+        self.assertEqual(previa["acionamentos_z"], 0)
+        self.assertGreaterEqual(len(previa["tracos"]), 2)
+        self.assertTrue(any("sem comandos Z" in t for t in previa["notas"]))
+
+    def test_gcode_z_fora_do_centro_nao_e_apresentado_como_pino_valido(self):
+        programa = mod.analisar_gcode_hibrido(
+            "G1 X4 Y-297\nZ4"
+        )
+        previa = mod.gerar_preview_gcode_malha(programa)
+        self.assertEqual(previa["pinos_ativos"], 0)
+        self.assertEqual(previa["acionamentos_z"], 1)
+        self.assertTrue(any("fora dos centros" in t for t in previa["notas"]))
+
+    def test_endpoint_matriz_retorna_preview_apenas_quando_fonte_e_gcode(self):
+        self.importar(nome="preview_malha.gcode")
+        saidas = []
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        handler.path = "/api/matrix"
+        handler._enviar_json = lambda resposta, status=200: saidas.append(resposta)
+        handler.do_GET()
+        self.assertIsNotNone(saidas[-1]["gcode_preview"])
+        self.assertEqual(saidas[-1]["gcode_preview"]["acionamentos_z"], 1)
+        self.assertEqual(saidas[-1]["gcode_preview"]["pinos_ativos"], 1)
+        self.assertEqual(saidas[-1]["fontes_job"]["fonte_ativa"], "gcode")
+        mod.selecionar_fonte_job("matriz")
+        handler.do_GET()
+        self.assertIsNone(saidas[-1]["gcode_preview"])
+        self.assertTrue(saidas[-1]["gcode_importado"])
+        self.assertEqual(saidas[-1]["matriz"][0][1], 4)
+
     def test_job_copia_profunda_programa_antes_da_thread(self):
         programa = mod.analisar_gcode_hibrido("G1 X3 Y-297 F700")
         threads = []
