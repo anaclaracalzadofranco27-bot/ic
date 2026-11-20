@@ -282,28 +282,28 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" style="padding:2px 7px;font-size:10.5px;" onclick="calibrarCantoMatriz('ir_meio')">🎯 Ir ao Centro (50,50)</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span style="width:28px;color:#34d399;font-weight:bold;">A(↙)</span>
+        <span id="rotulo-canto-a" style="width:28px;color:#34d399;font-weight:bold;">A(↙)</span>
         <input type="number" id="inp-xa" value="0.000" step="0.5" title="Ponto A (0,0) - X">
         <input type="number" id="inp-ya" value="0.000" step="0.5" title="Ponto A (0,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_a')">Ir A</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_a')">📍A</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span style="width:28px;color:#38bdf8;font-weight:bold;">B(↘)</span>
+        <span id="rotulo-canto-b" style="width:28px;color:#38bdf8;font-weight:bold;">B(↘)</span>
         <input type="number" id="inp-xb" value="297.000" step="0.5" title="Ponto B (297,0) - X">
         <input type="number" id="inp-yb" value="0.000" step="0.5" title="Ponto B (297,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_b')">Ir B</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_b')">📍B</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
+        <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
         <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,-297) - X">
         <input type="number" id="inp-yc" value="-297.000" step="0.5" title="Ponto C (297,-297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
+        <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
         <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,-297) - X">
         <input type="number" id="inp-yd" value="-297.000" step="0.5" title="Ponto D (0,-297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
@@ -318,7 +318,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
       <div style="font-size:10px;color:var(--muted);margin:5px 0;">
-        Os cantos A/B/C/D são os centros extremos no G54. Defina a origem somente pelo Home XY com chaves, não pelo G92.
+        Os cantos A/B/C/D são os centros extremos no G54. Depois de corrigir os rótulos físicos, o Home fica no canto B (antigo A). Não use G92.
       </div>
       <div class="row" style="justify-content:space-between;font-size:10px;">
         <button class="btn btn-sky" style="padding:2px 6px;font-size:9.5px;" onclick="resetarQuadrado297()">↺ Padrao 297x297 (A..D)</button>
@@ -326,6 +326,15 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
           <input type="checkbox" id="cfg-inv-jog-x" onchange="aplicarConfigCoordenadas()"> Inv. Jog X
         </label>
+      </div>
+      <div class="row" style="gap:5px;margin-top:7px;flex-wrap:wrap;">
+        <button class="btn btn-sky" id="btn-corrigir-rotulos-cantos" onclick="corrigirRotulosFisicosCantos()">⇄ Corrigir A/B físicos (e C/D)</button>
+        <span id="status-rotulos-cantos" style="font-size:10.5px;color:#fbbf24;">Verifique a posição física dos cantos.</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin:4px 0;">
+        Corrige os nomes: antigo A vira B, antigo B vira A; antigo C vira D, antigo D vira C.
+        Mantém a referência física de Home (agora B), a imagem e as posições G54.
+        Não altera a direção dos motores. Refaça Home XY antes de mover.
       </div>
       <div class="row" style="gap:5px;margin-top:7px;flex-wrap:wrap;">
         <button class="btn btn-amber" onclick="calibrarYOposto()">⇅ Calibrar C/D pela 2ª chave Y</button>
@@ -745,13 +754,14 @@ async function aplicarConfigCoordenadas() {
 }
 
 async function resetarQuadrado297() {
-  document.getElementById('inp-xa').value = '0.000';
+  const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
+  document.getElementById('inp-xa').value = trocados ? '297.000' : '0.000';
   document.getElementById('inp-ya').value = '0.000';
-  document.getElementById('inp-xb').value = '297.000';
+  document.getElementById('inp-xb').value = trocados ? '0.000' : '297.000';
   document.getElementById('inp-yb').value = '0.000';
-  document.getElementById('inp-xc').value = '297.000';
+  document.getElementById('inp-xc').value = trocados ? '0.000' : '297.000';
   document.getElementById('inp-yc').value = '-297.000';
-  document.getElementById('inp-xd').value = '0.000';
+  document.getElementById('inp-xd').value = trocados ? '297.000' : '0.000';
   document.getElementById('inp-yd').value = '-297.000';
   await aplicarConfigCoordenadas();
 }
@@ -762,6 +772,26 @@ async function calibrarCantoMatriz(etapa) {
   if (r.coord) configCoord = r.coord;
   await carregarEstadoInicial();
   await atualizarStatus();
+}
+
+async function corrigirRotulosFisicosCantos() {
+  if (configCoord.cantos_x_corrigidos_fisicamente) return;
+  const ok = confirm(
+    'CORRIGIR IDENTIFICAÇÃO FÍSICA DOS CANTOS\n' +
+    'A e B serão trocados; C e D também, para preservar o perímetro.\n' +
+    'O Home/G54 ficará no mesmo ponto físico, agora identificado como B.\n' +
+    'Não move os motores, não altera $3 e mantém o mapa físico da imagem.\n' +
+    'É obrigatório refazer Home XY antes de movimentar a CNC. Aplicar uma vez?'
+  );
+  if (!ok) return;
+  const r = await apiPost('corrigir_rotulos_fisicos_ab', { confirmado: true });
+  if (!r.ok) {
+    alert(r.erro || 'Não foi possível corrigir os rótulos.');
+    return;
+  }
+  await carregarEstadoInicial();
+  const info = document.getElementById('status-rotulos-cantos');
+  if (info) info.textContent = r.mensagem || 'Rótulos corrigidos. Refaça Home XY.';
 }
 
 async function calibrarYOposto() {
@@ -1131,14 +1161,19 @@ function desenharMatriz() {
       const pb = configCoord.ponto_b || [297, 0];
       const pc = configCoord.ponto_c || [297, -297];
       const pd = configCoord.ponto_d || [0, -297];
+      const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
+      const supEsq = trocados ? ['C', pc] : ['D', pd];
+      const supDir = trocados ? ['D', pd] : ['C', pc];
+      const infEsq = trocados ? ['B', pb] : ['A', pa];
+      const infDir = trocados ? ['A', pa] : ['B', pb];
       ctx.fillStyle = '#f43f5e';
-      ctx.fillText(`D(${pd[0]}, ${pd[1]})`, pad + 2, 18);
+      ctx.fillText(`${supEsq[0]}(${supEsq[1][0]}, ${supEsq[1][1]})`, pad + 2, 18);
       ctx.fillStyle = '#fbbf24';
-      ctx.fillText(`C(${pc[0]}, ${pc[1]})`, W - pad - 108, 18);
+      ctx.fillText(`${supDir[0]}(${supDir[1][0]}, ${supDir[1][1]})`, W - pad - 108, 18);
       ctx.fillStyle = '#10b981';
-      ctx.fillText(`A(${pa[0]}, ${pa[1]})`, pad + 2, H - 8);
+      ctx.fillText(`${infEsq[0]}(${infEsq[1][0]}, ${infEsq[1][1]})`, pad + 2, H - 8);
       ctx.fillStyle = '#38bdf8';
-      ctx.fillText(`B(${pb[0]}, ${pb[1]})`, W - pad - 92, H - 8);
+      ctx.fillText(`${infDir[0]}(${infDir[1][0]}, ${infDir[1][1]})`, W - pad - 92, H - 8);
     }
 
     const cx = pad + (posCabecote.x_idx + 0.5) * cellW;
@@ -1186,8 +1221,9 @@ async function carregarEstadoInicial() {
     if (d.coord.ponto_a) {
       document.getElementById('inp-xa').value = d.coord.ponto_a[0];
       document.getElementById('inp-ya').value = d.coord.ponto_a[1];
-      document.getElementById('home-coord-x').value = d.coord.ponto_a[0];
-      document.getElementById('home-coord-y').value = d.coord.ponto_a[1];
+      const coordenadaHome = d.coord.ponto_home_xy || d.coord.ponto_a;
+      document.getElementById('home-coord-x').value = coordenadaHome[0];
+      document.getElementById('home-coord-y').value = coordenadaHome[1];
       document.getElementById('inp-xb').value = d.coord.ponto_b[0];
       document.getElementById('inp-yb').value = d.coord.ponto_b[1];
       document.getElementById('inp-xc').value = d.coord.ponto_c[0];
@@ -1195,6 +1231,16 @@ async function carregarEstadoInicial() {
       document.getElementById('inp-xd').value = d.coord.ponto_d[0];
       document.getElementById('inp-yd').value = d.coord.ponto_d[1];
     }
+    const corrigidos = !!d.coord.cantos_x_corrigidos_fisicamente;
+    document.getElementById('rotulo-canto-a').textContent = corrigidos ? 'A(↘)' : 'A(↙)';
+    document.getElementById('rotulo-canto-b').textContent = corrigidos ? 'B(↙)' : 'B(↘)';
+    document.getElementById('rotulo-canto-c').textContent = corrigidos ? 'C(↖)' : 'C(↗)';
+    document.getElementById('rotulo-canto-d').textContent = corrigidos ? 'D(↗)' : 'D(↖)';
+    document.getElementById('btn-corrigir-rotulos-cantos').disabled = corrigidos;
+    document.getElementById('status-rotulos-cantos').textContent = corrigidos
+      ? 'Nomes físicos corrigidos: A↔B e C↔D; Home em B.'
+      : 'Correção física A/B e C/D ainda não aplicada.';
+    document.getElementById('status-rotulos-cantos').style.color = corrigidos ? '#34d399' : '#fbbf24';
     document.getElementById('lbl-meio-fisico').textContent = `Centro (49,5;49,5): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
     document.getElementById('janela-matriz-info').textContent = d.coord.usar_janela_plotagem
       ? `Recorte: X[${d.coord.plot_x_min},${d.coord.plot_x_max}], Y[${d.coord.plot_y_min},${d.coord.plot_y_max}] · passo físico não muda`
