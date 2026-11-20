@@ -56,7 +56,7 @@ G-code importado ─────────────────────
 
 Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=3` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
 
 Um `calibracao_matriz.json` de versão anterior (Y negativo ou A à esquerda) é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
 
@@ -367,7 +367,7 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 
 **Atenção ao limite de 300 mm:** ele se refere à **busca da chave**, não ao recuo. O recuo depois do acionamento continua em 5 mm. Como o curso nominal da bancada é aproximadamente 299 mm, confira fisicamente se 300 mm são seguros e não aumente a busca antes dessa verificação. Com hard limits desabilitados ($21=0), o software não substitui uma parada elétrica independente.
 
-**Direção física do Y:** com `$3=1`, Y+ vai de A para D e o Home busca Y−. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
+**Direção dos motores:** a bancada usa `$3=3` (X e Y invertidos no GRBL). Com isso X− vai para A (direita), Y− vai para A (frente, chave Y1) e Y+ vai de A para D. Com `$3=1` o Y fica ao contrário e o Home sai em direção a D. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
 
 ### Modo de bancada: ajustes de interface sem bypass de seguranca
 

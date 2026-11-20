@@ -92,13 +92,13 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 # -----------------------------------------------------------------------------
 ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
-SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
+SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=3 na placa
 INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
-# Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
+# Bancada com $3=3: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
 # Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
 # esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
@@ -310,7 +310,7 @@ def carregar_calibracao_matriz():
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
         if dados.get("modelo") != MODELO_CALIBRACAO:
-            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=3,
             # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
                 "Calibracao salva IGNORADA: arquivo de versao anterior "
@@ -1184,8 +1184,8 @@ class PortaSimulada:
     def configurar_chaves_bancada(self, recuo=5.0, extensao_y=297.0):
         """Chaves virtuais iguais a bancada: X e Y no canto A (lado negativo)
         e chave 2 de Y na borda C/D (lado positivo). Somente simulador.
-        Copia tambem a configuracao da placa: $3=1, $20=$21=$22=0."""
-        for numero, valor in ((3, "1"), (20, "0"), (21, "0"), (22, "0")):
+        Copia tambem a configuracao da placa: $3=3, $20=$21=$22=0."""
+        for numero, valor in ((3, "3"), (20, "0"), (21, "0"), (22, "0")):
             self.settings[numero] = (valor, self.settings[numero][1])
         self.home_simulado_x = float(self.mpos[0]) - 3.0
         self.home_simulado_y = float(self.mpos[1]) - 3.0
@@ -5788,7 +5788,7 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 
 # -----------------------------------------------------------------------------
 # Home automatico em um clique: chaves X/Y -> A, A -> B, B -> chave 2 (C),
-# C -> D -> A. Parametros fixos da bancada ($3=1: X+ de A para B, Y+ de A
+# C -> D -> A. Parametros fixos da bancada ($3=3: X+ de A para B, Y+ de A
 # para D). O modal Home XY continua disponivel para ajustes avancados.
 # -----------------------------------------------------------------------------
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto

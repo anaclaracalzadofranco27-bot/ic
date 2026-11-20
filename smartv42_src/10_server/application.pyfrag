@@ -355,7 +355,7 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 
 # -----------------------------------------------------------------------------
 # Home automatico em um clique: chaves X/Y -> A, A -> B, B -> chave 2 (C),
-# C -> D -> A. Parametros fixos da bancada ($3=1: X+ de A para B, Y+ de A
+# C -> D -> A. Parametros fixos da bancada ($3=3: X+ de A para B, Y+ de A
 # para D). O modal Home XY continua disponivel para ajustes avancados.
 # -----------------------------------------------------------------------------
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
