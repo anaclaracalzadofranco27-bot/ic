@@ -92,25 +92,27 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 # -----------------------------------------------------------------------------
 ORIGEM_X_NA_DIREITA = False
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
-SINAL_EIXO_Y = -1.0         # -1.0 = eixo Y invertido com valores negativos (0 a -297)
+SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
 INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
-INVERTER_JOG_Y = True       # True = inverte os botões ↑ Y+ / ↓ Y- para acompanhar Y negativo
+INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
-# CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (Y INVERTIDO NEGATIVO)
-# Plano com eixo X positivo (0..297) e eixo Y invertido negativo (0..-297):
+# CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
+# Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
+# Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
 #   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
 #   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
-#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = -297.000
-#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = -297.000
+#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = 297.000
+#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = 297.000
+# A imagem e plotada dentro do retangulo A-B-C-D.
 # =============================================================================
 ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
 USAR_CALIBRACAO_4_PONTOS = True
 
 PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
 PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
-PONTO_C = [297.000, -297.000]   # Topo-Direita da matriz  (col 99, lin 0)
-PONTO_D = [0.000, -297.000]     # Topo-Esquerda da matriz (col 0,  lin 0)
+PONTO_C = [297.000, 297.000]    # Topo-Direita da matriz  (col 99, lin 0)
+PONTO_D = [0.000, 297.000]      # Topo-Esquerda da matriz (col 0,  lin 0)
 
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
@@ -126,7 +128,7 @@ def ponto_home_xy():
 X_INICIO_FISICO = 0.000
 Y_INICIO_FISICO = 0.000
 X_FIM_FISICO = 297.000
-Y_FIM_FISICO = -297.000
+Y_FIM_FISICO = 297.000
 
 # =============================================================================
 # JANELA OPCIONAL DE RECORTE: mascara pontos sem reescalar o passo fisico.
@@ -135,8 +137,8 @@ Y_FIM_FISICO = -297.000
 USAR_JANELA_PLOTAGEM = False
 PLOT_X_MIN = 0.0
 PLOT_X_MAX = 297.0
-PLOT_Y_MIN = -297.0
-PLOT_Y_MAX = 0.0
+PLOT_Y_MIN = 0.0
+PLOT_Y_MAX = 297.0
 
 TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
@@ -301,6 +303,17 @@ def carregar_calibracao_matriz():
         ok, motivo = validar_calibracao_cantos(pontos)
         if not ok:
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
+            return False
+        y_ab = 0.5 * (pontos[0][1] + pontos[1][1])
+        y_cd = 0.5 * (pontos[2][1] + pontos[3][1])
+        if y_cd < y_ab:
+            # Modelo antigo (D em Y negativo). Na bancada com $3=1, Y+ vai
+            # de A para D; usar esse arquivo mandaria o cabecote para fora.
+            registrar_log(
+                "Calibracao salva IGNORADA: usa o modelo antigo com Y negativo "
+                f"(Y de C/D={y_cd:.1f}). Usando A=(0,0), B=(297,0), "
+                "C=(297,297), D=(0,297). Execute o Home automatico.", "aviso"
+            )
             return False
         origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
         sx = -1.0 if float(dados.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
@@ -1163,6 +1176,22 @@ class PortaSimulada:
             131: ("297.000", "Y-axis maximum travel, millimeters"),
             132: ("50.000", "Z-axis maximum travel, millimeters"),
         }
+
+    def configurar_chaves_bancada(self, recuo=5.0, extensao_y=297.0):
+        """Chaves virtuais iguais a bancada: X e Y no canto A (lado negativo)
+        e chave 2 de Y na borda C/D (lado positivo). Somente simulador.
+        Copia tambem a configuracao da placa: $3=1, $20=$21=$22=0."""
+        for numero, valor in ((3, "1"), (20, "0"), (21, "0"), (22, "0")):
+            self.settings[numero] = (valor, self.settings[numero][1])
+        self.home_simulado_x = float(self.mpos[0]) - 3.0
+        self.home_simulado_y = float(self.mpos[1]) - 3.0
+        self.home_simulado_y_sentido = -1
+        # A fica 'recuo' mm depois do ponto onde a busca parou (ate um trecho
+        # alem da chave 1). A chave 2 comuta alguns mm antes do Y nominal de
+        # C/D para a sonda encontra-la dentro do limite.
+        self.home_simulado_y_oposto = (
+            self.home_simulado_y + float(recuo) + float(extensao_y) - 6.0
+        )
 
     def write(self, dados):
         agora = time.perf_counter()
@@ -4406,7 +4435,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY</button>
+    <button class="nav-btn" onclick="homeAutomatico()">⌂ Home automático (A→B→C→D)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⚙ Home XY avançado</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -4487,15 +4517,15 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
         <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
-        <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,-297) - X">
-        <input type="number" id="inp-yc" value="-297.000" step="0.5" title="Ponto C (297,-297) - Y">
+        <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,297) - X">
+        <input type="number" id="inp-yc" value="297.000" step="0.5" title="Ponto C (297,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
         <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
-        <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,-297) - X">
-        <input type="number" id="inp-yd" value="-297.000" step="0.5" title="Ponto D (0,-297) - Y">
+        <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,297) - X">
+        <input type="number" id="inp-yd" value="297.000" step="0.5" title="Ponto D (0,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_d')">📍D</button>
       </div>
@@ -4504,7 +4534,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       </div>
       <div id="lbl-avisos" style="display:none;white-space:pre-wrap;font-size:10px;color:#fbbf24;background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:5px;padding:5px;margin-top:4px;"></div>
       <div class="row" style="justify-content:space-between;font-size:10.5px;margin-top:4px;">
-        <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=258.00, Y=-39.50</span>
+        <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=148.50, Y=148.50</span>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
       <div style="font-size:10px;color:var(--muted);margin:5px 0;">
@@ -4558,7 +4588,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
       <div class="grid-3">
-        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY</button>
+        <button class="btn btn-purple" onclick="homeAutomatico()" title="Chaves X/Y no canto A, depois A→B, chave 2 em C, C→D→A">⌂ Home</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -4782,8 +4812,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         O recuo de X/Y apos contato e configurado separadamente.
         Antes de aumentar a busca, confira a distancia
         fisica livre, pois os hard limits estao desativados neste modo.<br>
-        A direcao inicial do Y foi sugerida como negativa porque o sentido fisico
-        relatado estava invertido; confirme com um movimento curto antes do Home.
+        Com $3=1, X+ vai de A para B e Y+ vai de A para D; por isso o padrao
+        e buscar X- e Y- (chaves no canto A). Para o uso normal prefira o
+        botao <strong>Home</strong>, que faz tudo sozinho.
         <strong>Exemplo: busca Y- implica recuo Y+; busca Y+ implica recuo Y-.</strong>
         Se o Y tocar a chave e nao afastar, confira o comando
         <code>HOME XY RECUO Y</code> nos logs, o valor atual de $3 e o estado
@@ -4803,10 +4834,10 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Direcao X no GRBL
             <select id="home-dir-x" style="width:95px;">
-              <option value="">Escolher</option><option value="-1">X negativo</option><option value="1">X positivo</option>
+              <option value="">Escolher</option><option value="-1" selected>X negativo</option><option value="1">X positivo</option>
             </select>
           </label>
-          <label>Direcao Y no GRBL (invertido na bancada)
+          <label>Direcao Y no GRBL (Y- vai para A)
             <select id="home-dir-y" style="width:110px;">
               <option value="-1" selected>Y negativo</option><option value="1">Y positivo</option>
             </select>
@@ -4933,8 +4964,8 @@ async function aplicarConfigCoordenadas() {
   const invJogX = document.getElementById('cfg-inv-jog-x').checked;
   const pa = [lerNumeroInput('inp-xa', 0.0), lerNumeroInput('inp-ya', 0.0)];
   const pb = [lerNumeroInput('inp-xb', 297.0), lerNumeroInput('inp-yb', 0.0)];
-  const pc = [lerNumeroInput('inp-xc', 297.0), lerNumeroInput('inp-yc', -297.0)];
-  const pd = [lerNumeroInput('inp-xd', 0.0), lerNumeroInput('inp-yd', -297.0)];
+  const pc = [lerNumeroInput('inp-xc', 297.0), lerNumeroInput('inp-yc', 297.0)];
+  const pd = [lerNumeroInput('inp-xd', 0.0), lerNumeroInput('inp-yd', 297.0)];
   const r = await apiPost('config_coordenadas', {
     inverter_jog_x: invJogX,
     ponto_a: pa,
@@ -4954,9 +4985,9 @@ async function resetarQuadrado297() {
   document.getElementById('inp-xb').value = trocados ? '0.000' : '297.000';
   document.getElementById('inp-yb').value = '0.000';
   document.getElementById('inp-xc').value = trocados ? '0.000' : '297.000';
-  document.getElementById('inp-yc').value = '-297.000';
+  document.getElementById('inp-yc').value = '297.000';
   document.getElementById('inp-xd').value = trocados ? '297.000' : '0.000';
-  document.getElementById('inp-yd').value = '-297.000';
+  document.getElementById('inp-yd').value = '297.000';
   await aplicarConfigCoordenadas();
 }
 
@@ -5084,6 +5115,24 @@ async function acaoUGS(tipo) {
   }
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
+  atualizarStatus();
+}
+
+async function homeAutomatico() {
+  if (!confirm(
+    'HOME AUTOMÁTICO\n' +
+    '1) Busca as chaves X- e Y- e define o canto A = (0,0)\n' +
+    '2) Vai de A até B\n' +
+    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
+    '4) Vai até D e volta para A\n\n' +
+    'Z fica desligado. O botão Abortar continua disponível.\n' +
+    'Confirmo que existe parada de emergência física independente e área livre.'
+  )) return;
+  const resp = await apiPost('home_automatico', { seguranca_confirmada: true });
+  document.getElementById('info-progresso').textContent =
+    resp.ok ? (resp.mensagem || 'Home automático iniciado.')
+            : ('Home não iniciado: ' + (resp.erro || 'erro desconhecido'));
+  if (!resp.ok) alert(resp.erro || 'Home automático não iniciado.');
   atualizarStatus();
 }
 
@@ -5368,8 +5417,8 @@ function desenharMatriz() {
     } else {
       const pa = configCoord.ponto_a || [0, 0];
       const pb = configCoord.ponto_b || [297, 0];
-      const pc = configCoord.ponto_c || [297, -297];
-      const pd = configCoord.ponto_d || [0, -297];
+      const pc = configCoord.ponto_c || [297, 297];
+      const pd = configCoord.ponto_d || [0, 297];
       const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
       const supEsq = trocados ? ['C', pc] : ['D', pd];
       const supDir = trocados ? ['D', pd] : ['C', pc];
@@ -5559,7 +5608,8 @@ async function atualizarStatus() {
       }
     }
     if (st.sonda_y2 && st.sonda_y2.ativo) {
-      document.getElementById('info-progresso').textContent = 'Sonda Y2 / perímetro: ' + st.sonda_y2.fase;
+      document.getElementById('info-progresso').textContent = st.sonda_y2.fase +
+        (st.home_xy && st.home_xy.ativo ? ' · ' + st.home_xy.fase : '');
     } else if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
     } else if (st.job && st.job.ativo) {
@@ -5946,6 +5996,167 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
     )
 
 
+# -----------------------------------------------------------------------------
+# Home automatico em um clique: chaves X/Y -> A, A -> B, B -> chave 2 (C),
+# C -> D -> A. Parametros fixos da bancada ($3=1: X+ de A para B, Y+ de A
+# para D). O modal Home XY continua disponivel para ajustes avancados.
+# -----------------------------------------------------------------------------
+HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
+HOME_AUTO_FEED = 500.0
+HOME_AUTO_TRECHO_MM = 5.0
+HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_FEED_PERIMETRO = 250.0
+
+
+def validar_layout_home_automatico():
+    """O Home automatico busca X- e Y-; so faz sentido com A no menor X/Y."""
+    if CANTO_HOME_XY != "A" or CANTOS_X_CORRIGIDOS_FISICAMENTE:
+        return (
+            "Home automatico exige Home no canto A. Os rotulos A/B foram "
+            "trocados nesta calibracao; clique em 'Padrao 297x297'."
+        )
+    a, b, c, d = PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    if not (b[0] - a[0] > 250.0 and c[0] - d[0] > 250.0 and
+            d[1] - a[1] > 250.0 and c[1] - b[1] > 250.0):
+        return (
+            "Home automatico espera X+ de A para B e Y+ de A para D "
+            f"(A={a}, B={b}, C={c}, D={d}). Clique em 'Padrao 297x297'."
+        )
+    return ""
+
+
+def iniciar_home_automatico(grbl):
+    """Reserva a CNC e executa Home + chave 2 + perimetro numa unica thread."""
+    global _operacao_manual, _job_abortar, _job_pausado
+    erro_layout = validar_layout_home_automatico()
+    if erro_layout:
+        return False, erro_layout
+    if not grbl.ser or (not grbl.modo_simulacao and not grbl.conexao_real):
+        return False, "Conecte o GRBL (fisico ou SIMULADO) antes do Home."
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False, "Maquina ocupada com outro movimento."
+        _operacao_manual = True
+        _job_abortar = False
+        _job_pausado = False
+        abortar_job_evento.clear()
+        _estado_sonda_y2.update({
+            "ativo": True, "concluido": False, "erro": "",
+            "fase": "Home 1/4: preparando", "medicao": None,
+            "perimetro": True,
+        })
+
+    def _fase(texto):
+        _estado_sonda_y2["fase"] = texto
+        registrar_log("HOME AUTOMATICO: " + texto, "info")
+
+    def _abortado():
+        return _job_abortar or abortar_job_evento.is_set()
+
+    def _mover(nome, ponto):
+        if _abortado():
+            raise RuntimeError("Home automatico abortado pelo operador.")
+        ok, info = grbl.mover_xy_sincrono(
+            ponto[0], ponto[1], feed=min(FEED_RATE, HOME_AUTO_FEED_PERIMETRO)
+        )
+        if not ok:
+            raise RuntimeError(f"Movimento ate {nome} falhou: {info}.")
+
+    def _worker():
+        global _operacao_manual
+        try:
+            bloquear_z_fisico("Home automatico: somente XY")
+            # A busca da chave 2 nunca passa do Y nominal de C/D. Uma medicao
+            # anterior (C/D recuados) encurtaria a busca; volta ao nominal.
+            y_nominal = float(PONTO_A[1]) + EXTENSAO_UTIL_MALHA_MM
+            if any(abs(float(p[1]) - y_nominal) > 1e-6 for p in (PONTO_C, PONTO_D)):
+                configurar_sistema_coordenadas(
+                    ponto_c=[float(PONTO_C[0]), y_nominal],
+                    ponto_d=[float(PONTO_D[0]), y_nominal],
+                )
+            if isinstance(grbl.ser, PortaSimulada):
+                grbl.ser.configurar_chaves_bancada(
+                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                )
+
+            # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
+            # acionada, nao ha como saber qual delas e para onde recuar.
+            estado_inicial = grbl._status_home_xy()
+            if "Y" in pinos_ativos(estado_inicial):
+                raise RuntimeError(
+                    "Pn:Y ja acionado antes do Home: nao da para saber se e a "
+                    "chave 1 (lado A) ou a chave 2 (lado C/D). Use o Jog Y de "
+                    "1 mm para soltar a chave e tente de novo."
+                )
+
+            _fase("Home 1/4: buscando chaves X- e Y- (canto A)")
+            ok, msg = grbl.executar_home_xy_chaves(
+                direcao_x=-1, direcao_y=-1,
+                curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
+                coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
+                passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
+                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                seguranca_confirmada=True,
+            )
+            if not ok:
+                raise RuntimeError("Home nas chaves X/Y falhou: " + msg)
+
+            _fase(f"Home 2/4: A -> B (X={PONTO_B[0]:.1f}, Y={PONTO_B[1]:.1f})")
+            _mover("B", list(PONTO_B))
+
+            _fase("Home 3/4: B -> C procurando a chave 2 de Y")
+            medicao = grbl.sondar_chave_y_oposta(
+                curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
+                progresso=lambda t: _fase("Home 3/4: " + t),
+            )
+            configurar_sistema_coordenadas(
+                ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],
+                medicao_chave_y_oposta=True,
+            )
+            _estado_sonda_y2["medicao"] = medicao
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            if not grbl.home_xy_referenciado:
+                raise RuntimeError("Home perdido depois da chave 2.")
+
+            _fase(f"Home 4/4: C -> D (Y={medicao['y_cd']:.2f}) -> A")
+            _mover("D", list(PONTO_D))
+            _mover("A", list(PONTO_A))
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": True, "erro": "",
+                "fase": (
+                    "Home concluido: A=(0,0), chave 2 em "
+                    f"Y={medicao['y_contato']:.2f}, C/D em Y={medicao['y_cd']:.2f}; "
+                    "perimetro A-B-C-D-A percorrido."
+                ),
+            })
+            registrar_log(_estado_sonda_y2["fase"], "ok")
+        except Exception as exc:
+            motivo = str(exc) or type(exc).__name__
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": False, "erro": motivo,
+                "fase": "Home automatico interrompido",
+            })
+            registrar_log("HOME AUTOMATICO NAO CONCLUIDO: " + motivo, "erro")
+        finally:
+            with _job_lock:
+                _operacao_manual = False
+
+    try:
+        threading.Thread(
+            target=_worker, daemon=True, name="home-automatico"
+        ).start()
+    except Exception as exc:
+        with _job_lock:
+            _operacao_manual = False
+        _estado_sonda_y2.update({
+            "ativo": False, "concluido": False, "erro": str(exc),
+            "fase": "Falha ao iniciar thread",
+        })
+        return False, f"Nao foi possivel iniciar o Home automatico: {exc}"
+    return True, "Home automatico iniciado: A -> B -> chave 2 (C) -> D -> A."
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -6034,7 +6245,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         acao = dados.get("action", "")
         # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
         # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
-        simultanea = acao in ("iniciar_job", "iniciar_home_xy", "calibrar_y_oposto") or (
+        simultanea = acao in ("iniciar_job", "iniciar_home_xy", "home_automatico", "calibrar_y_oposto") or (
             acao == "calibrar_caixa_fisica" and dados.get("etapa") == "testar_perimetro"
         ) or (
             acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
@@ -6293,6 +6504,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             feed = float(dados.get("feed", FEED_RATE))
             ok, _ = _grbl_global.executar_jog_ugs(dx=dx, dy=dy, feed=feed)
             self._enviar_json({"ok": ok})
+            return
+
+        if acao == "home_automatico":
+            if dados.get("seguranca_confirmada") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirme a parada de emergencia fisica independente."}, 400)
+                return
+            ok, mensagem = iniciar_home_automatico(_grbl_global)
+            self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
+                              200 if ok else 409)
             return
 
         if acao == "iniciar_home_xy":

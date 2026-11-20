@@ -353,6 +353,167 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
     )
 
 
+# -----------------------------------------------------------------------------
+# Home automatico em um clique: chaves X/Y -> A, A -> B, B -> chave 2 (C),
+# C -> D -> A. Parametros fixos da bancada ($3=1: X+ de A para B, Y+ de A
+# para D). O modal Home XY continua disponivel para ajustes avancados.
+# -----------------------------------------------------------------------------
+HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
+HOME_AUTO_FEED = 500.0
+HOME_AUTO_TRECHO_MM = 5.0
+HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_FEED_PERIMETRO = 250.0
+
+
+def validar_layout_home_automatico():
+    """O Home automatico busca X- e Y-; so faz sentido com A no menor X/Y."""
+    if CANTO_HOME_XY != "A" or CANTOS_X_CORRIGIDOS_FISICAMENTE:
+        return (
+            "Home automatico exige Home no canto A. Os rotulos A/B foram "
+            "trocados nesta calibracao; clique em 'Padrao 297x297'."
+        )
+    a, b, c, d = PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    if not (b[0] - a[0] > 250.0 and c[0] - d[0] > 250.0 and
+            d[1] - a[1] > 250.0 and c[1] - b[1] > 250.0):
+        return (
+            "Home automatico espera X+ de A para B e Y+ de A para D "
+            f"(A={a}, B={b}, C={c}, D={d}). Clique em 'Padrao 297x297'."
+        )
+    return ""
+
+
+def iniciar_home_automatico(grbl):
+    """Reserva a CNC e executa Home + chave 2 + perimetro numa unica thread."""
+    global _operacao_manual, _job_abortar, _job_pausado
+    erro_layout = validar_layout_home_automatico()
+    if erro_layout:
+        return False, erro_layout
+    if not grbl.ser or (not grbl.modo_simulacao and not grbl.conexao_real):
+        return False, "Conecte o GRBL (fisico ou SIMULADO) antes do Home."
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False, "Maquina ocupada com outro movimento."
+        _operacao_manual = True
+        _job_abortar = False
+        _job_pausado = False
+        abortar_job_evento.clear()
+        _estado_sonda_y2.update({
+            "ativo": True, "concluido": False, "erro": "",
+            "fase": "Home 1/4: preparando", "medicao": None,
+            "perimetro": True,
+        })
+
+    def _fase(texto):
+        _estado_sonda_y2["fase"] = texto
+        registrar_log("HOME AUTOMATICO: " + texto, "info")
+
+    def _abortado():
+        return _job_abortar or abortar_job_evento.is_set()
+
+    def _mover(nome, ponto):
+        if _abortado():
+            raise RuntimeError("Home automatico abortado pelo operador.")
+        ok, info = grbl.mover_xy_sincrono(
+            ponto[0], ponto[1], feed=min(FEED_RATE, HOME_AUTO_FEED_PERIMETRO)
+        )
+        if not ok:
+            raise RuntimeError(f"Movimento ate {nome} falhou: {info}.")
+
+    def _worker():
+        global _operacao_manual
+        try:
+            bloquear_z_fisico("Home automatico: somente XY")
+            # A busca da chave 2 nunca passa do Y nominal de C/D. Uma medicao
+            # anterior (C/D recuados) encurtaria a busca; volta ao nominal.
+            y_nominal = float(PONTO_A[1]) + EXTENSAO_UTIL_MALHA_MM
+            if any(abs(float(p[1]) - y_nominal) > 1e-6 for p in (PONTO_C, PONTO_D)):
+                configurar_sistema_coordenadas(
+                    ponto_c=[float(PONTO_C[0]), y_nominal],
+                    ponto_d=[float(PONTO_D[0]), y_nominal],
+                )
+            if isinstance(grbl.ser, PortaSimulada):
+                grbl.ser.configurar_chaves_bancada(
+                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                )
+
+            # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
+            # acionada, nao ha como saber qual delas e para onde recuar.
+            estado_inicial = grbl._status_home_xy()
+            if "Y" in pinos_ativos(estado_inicial):
+                raise RuntimeError(
+                    "Pn:Y ja acionado antes do Home: nao da para saber se e a "
+                    "chave 1 (lado A) ou a chave 2 (lado C/D). Use o Jog Y de "
+                    "1 mm para soltar a chave e tente de novo."
+                )
+
+            _fase("Home 1/4: buscando chaves X- e Y- (canto A)")
+            ok, msg = grbl.executar_home_xy_chaves(
+                direcao_x=-1, direcao_y=-1,
+                curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
+                coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
+                passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
+                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                seguranca_confirmada=True,
+            )
+            if not ok:
+                raise RuntimeError("Home nas chaves X/Y falhou: " + msg)
+
+            _fase(f"Home 2/4: A -> B (X={PONTO_B[0]:.1f}, Y={PONTO_B[1]:.1f})")
+            _mover("B", list(PONTO_B))
+
+            _fase("Home 3/4: B -> C procurando a chave 2 de Y")
+            medicao = grbl.sondar_chave_y_oposta(
+                curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
+                progresso=lambda t: _fase("Home 3/4: " + t),
+            )
+            configurar_sistema_coordenadas(
+                ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],
+                medicao_chave_y_oposta=True,
+            )
+            _estado_sonda_y2["medicao"] = medicao
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            if not grbl.home_xy_referenciado:
+                raise RuntimeError("Home perdido depois da chave 2.")
+
+            _fase(f"Home 4/4: C -> D (Y={medicao['y_cd']:.2f}) -> A")
+            _mover("D", list(PONTO_D))
+            _mover("A", list(PONTO_A))
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": True, "erro": "",
+                "fase": (
+                    "Home concluido: A=(0,0), chave 2 em "
+                    f"Y={medicao['y_contato']:.2f}, C/D em Y={medicao['y_cd']:.2f}; "
+                    "perimetro A-B-C-D-A percorrido."
+                ),
+            })
+            registrar_log(_estado_sonda_y2["fase"], "ok")
+        except Exception as exc:
+            motivo = str(exc) or type(exc).__name__
+            _estado_sonda_y2.update({
+                "ativo": False, "concluido": False, "erro": motivo,
+                "fase": "Home automatico interrompido",
+            })
+            registrar_log("HOME AUTOMATICO NAO CONCLUIDO: " + motivo, "erro")
+        finally:
+            with _job_lock:
+                _operacao_manual = False
+
+    try:
+        threading.Thread(
+            target=_worker, daemon=True, name="home-automatico"
+        ).start()
+    except Exception as exc:
+        with _job_lock:
+            _operacao_manual = False
+        _estado_sonda_y2.update({
+            "ativo": False, "concluido": False, "erro": str(exc),
+            "fase": "Falha ao iniciar thread",
+        })
+        return False, f"Nao foi possivel iniciar o Home automatico: {exc}"
+    return True, "Home automatico iniciado: A -> B -> chave 2 (C) -> D -> A."
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -441,7 +602,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         acao = dados.get("action", "")
         # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
         # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
-        simultanea = acao in ("iniciar_job", "iniciar_home_xy", "calibrar_y_oposto") or (
+        simultanea = acao in ("iniciar_job", "iniciar_home_xy", "home_automatico", "calibrar_y_oposto") or (
             acao == "calibrar_caixa_fisica" and dados.get("etapa") == "testar_perimetro"
         ) or (
             acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
@@ -700,6 +861,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             feed = float(dados.get("feed", FEED_RATE))
             ok, _ = _grbl_global.executar_jog_ugs(dx=dx, dy=dy, feed=feed)
             self._enviar_json({"ok": ok})
+            return
+
+        if acao == "home_automatico":
+            if dados.get("seguranca_confirmada") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirme a parada de emergencia fisica independente."}, 400)
+                return
+            ok, mensagem = iniciar_home_automatico(_grbl_global)
+            self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
+                              200 if ok else 409)
             return
 
         if acao == "iniciar_home_xy":

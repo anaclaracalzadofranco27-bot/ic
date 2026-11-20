@@ -17,9 +17,9 @@ class GRBLParaJob:
     def __init__(self):
         self.modo_simulacao = True
         self.home_xy_referenciado = False
-        self.wpos = [0.0, -297.0, 0.0]
+        self.wpos = [0.0, 297.0, 0.0]
     def preparar_grbl(self):
-        return "<Idle|MPos:0,-297,0>"
+        return "<Idle|MPos:0,297,0>"
 
 
 class ThreadAdiada:
@@ -76,7 +76,7 @@ class EstadosIsolados(unittest.TestCase):
 
     def importar(self, nome="programa_01.gcode", arquivo=False):
         return mod.carregar_gcode_importado(
-            "G21\nG90\nG54\nG1 X3 Y-297 F700\nZ4",
+            "G21\nG90\nG54\nG1 X3 Y297 F700\nZ4",
             nome, usar_parametros_arquivo=arquivo,
         )
 
@@ -203,11 +203,11 @@ class EstadosIsolados(unittest.TestCase):
         handler.do_GET()
         self.assertTrue(saidas[0]["gcode_importado"])
         self.assertEqual(saidas[0]["fontes_job"]["nome_gcode"], "arquivo_preview.gcode")
-        self.assertIn("G1 X3 Y-297 F700", saidas[0]["gcode"])
+        self.assertIn("G1 X3 Y297 F700", saidas[0]["gcode"])
         mod.selecionar_fonte_job("matriz")
         saidas.clear()
         handler.do_GET()
-        self.assertNotIn("G1 X3 Y-297 F700", saidas[0]["gcode"])
+        self.assertNotIn("G1 X3 Y297 F700", saidas[0]["gcode"])
         self.assertTrue(saidas[0]["gcode_importado"])
 
     def test_importacao_gcode_desenha_pino_em_malha_sem_substituir_matriz(self):
@@ -229,7 +229,7 @@ class EstadosIsolados(unittest.TestCase):
 
     def test_previa_gcode_espelha_x_se_malha_estiver_invertida(self):
         programa = mod.analisar_gcode_hibrido(
-            "G1 X297 Y0\nZ8\nG1 X0 Y-297\nZ3"
+            "G1 X297 Y0\nZ8\nG1 X0 Y297\nZ3"
         )
         with patch.object(mod, "ORIGEM_X_NA_DIREITA", True):
             previa = mod.gerar_preview_gcode_malha(programa)
@@ -238,7 +238,7 @@ class EstadosIsolados(unittest.TestCase):
 
     def test_gcode_sem_z_mostra_trajetoria_mas_nenhum_pino_ativo(self):
         programa = mod.analisar_gcode_hibrido(
-            "G0 X0 Y-297\nG1 X3 Y-297 F500\nG1 X6 Y-297"
+            "G0 X0 Y297\nG1 X3 Y297 F500\nG1 X6 Y297"
         )
         previa = mod.gerar_preview_gcode_malha(programa)
         self.assertEqual(previa["pinos_ativos"], 0)
@@ -248,7 +248,7 @@ class EstadosIsolados(unittest.TestCase):
 
     def test_gcode_z_fora_do_centro_nao_e_apresentado_como_pino_valido(self):
         programa = mod.analisar_gcode_hibrido(
-            "G1 X4 Y-297\nZ4"
+            "G1 X4 Y297\nZ4"
         )
         previa = mod.gerar_preview_gcode_malha(programa)
         self.assertEqual(previa["pinos_ativos"], 0)
@@ -273,7 +273,7 @@ class EstadosIsolados(unittest.TestCase):
         self.assertEqual(saidas[-1]["matriz"][0][1], 4)
 
     def test_job_copia_profunda_programa_antes_da_thread(self):
-        programa = mod.analisar_gcode_hibrido("G1 X3 Y-297 F700")
+        programa = mod.analisar_gcode_hibrido("G1 X3 Y297 F700")
         threads = []
         obs = []
         with patch.object(mod.threading, "Thread", side_effect=lambda target,daemon: (threads.append(ThreadAdiada(target,daemon)) or threads[-1])), \
@@ -294,7 +294,7 @@ class EstadosIsolados(unittest.TestCase):
         cfg = mod.capturar_snapshot_parametros_job()
         nivel = 4
         bloco = {"tipo": "z", "nivel": nivel, "pulsos": 12, "on_ms": 20, "off_ms": 0}
-        contexto = {"posicao_xy": (3.0, -297.0), "usar_parametros_arquivo": False,
+        contexto = {"posicao_xy": (3.0, 297.0), "usar_parametros_arquivo": False,
                     "config_job": cfg}
         fake = GRBLParaJob()
         fake.aguardar_grbl_idle = lambda timeout=None: (True, "")
@@ -315,7 +315,7 @@ class EstadosIsolados(unittest.TestCase):
         bloco = {"tipo": "z", "nivel": 4, "pulsos": 12, "on_ms": 20, "off_ms": 0}
         fake = GRBLParaJob()
         fake.aguardar_grbl_idle = lambda timeout=None: (True, "")
-        contexto = {"posicao_xy": (3.0, -297.0), "usar_parametros_arquivo": True, "config_job": cfg}
+        contexto = {"posicao_xy": (3.0, 297.0), "usar_parametros_arquivo": True, "config_job": cfg}
         with patch.object(mod, "acionar_eixo_z", return_value=(True, {"pino_gpio": 27, "pulsos": 12})) as z, \
              patch.object(mod.time,"sleep"):
             mod.executar_bloco_hibrido(fake, bloco, contexto)
@@ -330,7 +330,7 @@ class EstadosIsolados(unittest.TestCase):
                 mod.validar_snapshot_geometria_job(cfg)
 
     def test_gpio_embutido_no_gcode_revalidado_no_inicio(self):
-        arquivo = "G1 X3 Y-297 F900\nM42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=7"
+        arquivo = "G1 X3 Y297 F900\nM42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=7"
         programa = mod.analisar_gcode_hibrido(arquivo)
         ctrl = GRBLParaJob()
         # O arquivo foi analisado quando Z4 era GPIO27. Uma reconfiguracao

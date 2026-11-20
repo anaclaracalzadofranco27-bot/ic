@@ -56,7 +56,9 @@ G-code importado ─────────────────────
 
 Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, −297) e D = (0, −297). Essas posições precisam corresponder à **bancada real**.
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. A imagem é plotada dentro do retângulo A-B-C-D. Essas posições precisam corresponder à **bancada real**.
+
+Um `calibracao_matriz.json` antigo, com C/D em Y negativo, é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
 
 ---
 
@@ -157,10 +159,23 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 
 **Aviso de segurança:** `$21=0` desabilita os limites rígidos do GRBL. Quando essa configuração é usada, as chaves X/Y **não protegem automaticamente contra ultrapassagem de curso**. O Home por USB/Linux não é uma função de segurança. **Não execute com motores energizados sem proteção mecânica e parada elétrica independente.** O programa não altera esses parâmetros automaticamente.
 
-### Etapa C — Fazer o Home XY pelas chaves
+### Etapa C — Home automático (um clique)
 
-1. Clique no único acesso **Home XY**, na barra de navegação.
-2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada. O novo padrão de Y é **Y− (sugerido)** porque o sentido físico foi relatado invertido; confirme-o com um jog curto, pois o ajuste do firmware $3 pode alterar o sentido real.
+Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emergência. O programa faz sozinho, sem mover nada com a mão:
+
+1. Busca as chaves **X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua 5 mm de cada uma e grava esse ponto como **A = (0, 0)** no G54.
+2. Vai de **A até B** (X = 297).
+3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
+4. Vai até **D** e volta para **A**.
+
+O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa e `Pn:Y` livre no início (as duas chaves Y usam a mesma entrada, então com `Pn:Y` acionado o programa não sabe para onde recuar e pede um Jog Y curto). A busca da chave 2 **não passa do Y nominal de 297 mm**: se a chave estiver além disso, o Home para com a mensagem "Segunda chave Y nao encontrada" e os cantos não mudam.
+
+No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
+
+### Etapa C2 — Home XY avançado (parâmetros manuais)
+
+1. Clique em **⚙ Home XY avançado**, na barra de navegação.
+2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada. O padrão é **X− e Y−**, porque com `$3=1` as duas chaves ficam no canto A.
 3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
 4. Escolha o passo de busca (**0,1 a 10 mm**) e o avanço (**20 a 600 mm/min**, padrão **500 mm/min**). O curso máximo de busca pode chegar a **300 mm por eixo**, mas inicia em **30 mm** para evitar percursos longos antes de verificar fisicamente a bancada.
 5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
@@ -218,7 +233,8 @@ Esse modo é destinado ao comissionamento dos motores; trabalhos que contenham a
 | **Portas USB → Conectar** | Seleciona o GRBL e o Arduino de reset | Ao iniciar ou reconectar dispositivos |
 | **Visor WPos / MPos** | Mostra posição de trabalho / máquina | Antes e durante movimentos |
 | **Terminal UGS** | Consulta estado, alarmes e parâmetros do GRBL | Diagnóstico e configuração |
-| **Home XY (chaves)** | Busca X/Y e recua 5 mm em cada eixo | Antes de movimentação automática real |
+| **⌂ Home** | Chaves X−/Y− → A, A → B, chave 2 → C/D, D → A | Ao ligar a máquina, antes de plotar |
+| **⚙ Home XY avançado** | Busca X/Y com sentidos, cursos e recuos escolhidos | Diagnóstico ou bancada diferente |
 | **Jog Manual** | Move X/Y em pequenos incrementos | Verificar sentidos e calibração |
 | **Somente XY (bloquear Z)** | Proíbe pulsos nos GPIOs Z | Testes de movimento |
 | **Habilitar Z físico** | Autoriza o cabeçote real com validações | Somente após comissionamento e Home |
@@ -241,9 +257,9 @@ Exemplo didático com uma posição central válida na calibração padrão:
 G21
 G90
 G54
-G1 X3 Y-297 F120
+G1 X3 Y297 F120
 Z4
-G1 X6 Y-297 F120
+G1 X6 Y297 F120
 M42 P1 ; Z_LEVEL=2 GPIO=6 PULSOS=2 ON_MS=10 OFF_MS=10
 ```
 
@@ -366,7 +382,7 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 
 **Atenção ao limite de 300 mm:** ele se refere à **busca da chave**, não ao recuo. O recuo depois do acionamento continua em 5 mm. Como o curso nominal da bancada é aproximadamente 299 mm, confira fisicamente se 300 mm são seguros e não aumente a busca antes dessa verificação. Com hard limits desabilitados ($21=0), o software não substitui uma parada elétrica independente.
 
-**Direção física do Y:** a interface sugere Y negativo no Home. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
+**Direção física do Y:** com `$3=1`, Y+ vai de A para D e o Home busca Y−. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
 
 ### Modo de bancada: ajustes de interface sem bypass de seguranca
 

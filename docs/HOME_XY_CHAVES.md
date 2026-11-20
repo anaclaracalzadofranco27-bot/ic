@@ -118,3 +118,18 @@ A sonda de Y2 foi ampliada para aceitar inicio em **A ou B**, desde que Home XY 
 O botao de perimetro agora inicia a medicao automaticamente quando Y2 ainda nao esta calibrada, e percorre **A-B-C-D-A** apenas apos atualizar os cantos. O Home G54 permanece valido quando a sonda atualiza somente C/D; Z continua desabilitado. O HTTP retorna imediatamente e o painel mostra fases e erros pela telemetria; Abortar continua disponivel. Se o Home nao for valido, se GRBL estiver em Alarm, se Pn:Y estiver pressionado ou se o contato nao vier ate o limite esperado, a medicao falha sem alterar os cantos.
 
 **Risco residual:** Pn:Y e monitorado pelo software na USB enquanto $21=0. Se houver falha de sensor, porta serial ou controladora, apenas a protecao mecanica e a parada eletrica externa podem evitar colisao. Verifique essas protecoes antes de executar o caminho automatico completo.
+
+## Home automático em um clique (A → B → C → D → A)
+
+O botão **⌂ Home** junta Home XY, sonda da chave 2 e perímetro, com parâmetros fixos da bancada (`$3=1`: X+ de A para B, Y+ de A para D):
+
+1. Exige confirmação da parada elétrica independente, GRBL conectado e `Pn:Y` livre no início. As duas chaves Y usam a mesma entrada; com `Pn:Y` já acionado não há como saber qual delas está pressionada, então a rotina para e pede um Jog Y curto.
+2. Volta C/D ao Y nominal (297 mm) antes de medir, para que uma medição anterior não encurte a busca.
+3. Home XY por software: busca X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de 5 mm em cada eixo, e grava G54 = A = (0, 0).
+4. Vai de A até B (F250).
+5. Sonda a chave 2 a partir de B em Y+ (mesma rotina `sondar_chave_y_oposta`: aproximação F200 até 25 mm antes do nominal, busca final F120, recuo 4 mm) e grava o Y medido em C e D, preservando o Home.
+6. Vai até D e volta para A.
+
+Qualquer erro interrompe a sequência, registra o motivo no log e na barra de progresso, e não altera os cantos além do que já foi medido com sucesso. Abortar continua disponível durante toda a rotina. O modal **⚙ Home XY avançado** continua disponível para escolher sentidos, cursos e recuos manualmente.
+
+No simulador, a rotina posiciona chaves virtuais iguais às da bancada (X e Y no canto A, chave 2 alguns milímetros antes do Y nominal de C/D) e ajusta `$3=1`, `$20=$21=$22=0` apenas no GRBL virtual.
