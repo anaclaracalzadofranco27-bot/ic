@@ -1209,10 +1209,19 @@ class ControladorGRBL:
             contatos, estado = self._jog_passo_xy_home(
                 deslocamentos, feed, passo_max=passo
             )
+            deltas = {}
             for eixo in pendentes:
                 posicao = self.mpos[0 if eixo == "X" else 1]
-                delta = abs(posicao - antes[eixo])
-                percorrido[eixo] += min(abs(deslocamentos[eixo]), delta)
+                delta = posicao - antes[eixo]
+                deltas[eixo] = delta
+                percorrido[eixo] += min(abs(deslocamentos[eixo]), abs(delta))
+            if len(pendentes) == 2 and not getattr(self, "_home_duplo_mov_registrado", False):
+                registrar_log(
+                    "HOME XY MPos do primeiro jog conjunto: " +
+                    ", ".join(f"{e}={deltas[e]:+.3f} mm" for e in pendentes) +
+                    ". MPos nao mede deslocamento fisico dos motores.", "info"
+                )
+                self._home_duplo_mov_registrado = True
             if contatos:
                 estado = self._status_home_xy()
                 for eixo in sorted(contatos):
@@ -1242,6 +1251,7 @@ class ControladorGRBL:
         bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
         self._home_duplo_registrado = False
+        self._home_duplo_mov_registrado = False
         self.home_xy_estado.update({
             "ativo": True, "concluido": False, "erro": "",
             "fase": "Validando configuracao GRBL", "eixo": "", "passos": 0,
