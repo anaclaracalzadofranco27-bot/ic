@@ -115,6 +115,13 @@ PONTO_D = [0.000, -297.000]     # Topo-Esquerda da matriz (col 0,  lin 0)
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
 BORDA_Y_OPOSTA_CALIBRADA = False
+# Correcao opt-in dos rotulos fisicos A/B (tambem C/D), sem modificar $3.
+CANTOS_X_CORRIGIDOS_FISICAMENTE = False
+CANTO_HOME_XY = "A"  # O Home permanece na mesma extremidade depois da troca.
+
+def ponto_home_xy():
+    """Coordenada G54 do local fisico da referencia Home XY."""
+    return PONTO_B if CANTO_HOME_XY == "B" else PONTO_A
 
 X_INICIO_FISICO = 0.000
 Y_INICIO_FISICO = 0.000
@@ -259,6 +266,8 @@ def salvar_calibracao_matriz():
         "ponto_c": PONTO_C,
         "ponto_d": PONTO_D,
         "borda_y_oposta_calibrada": BORDA_Y_OPOSTA_CALIBRADA,
+        "cantos_x_corrigidos_fisicamente": CANTOS_X_CORRIGIDOS_FISICAMENTE,
+        "canto_home_xy": CANTO_HOME_XY,
         "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
         "inverter_jog_x": INVERTER_JOG_X,
         "inverter_jog_y": INVERTER_JOG_Y,
@@ -281,7 +290,7 @@ def carregar_calibracao_matriz():
     """
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
     global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
-    global BORDA_Y_OPOSTA_CALIBRADA
+    global BORDA_Y_OPOSTA_CALIBRADA, CANTOS_X_CORRIGIDOS_FISICAMENTE, CANTO_HOME_XY
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
@@ -298,6 +307,8 @@ def carregar_calibracao_matriz():
         sy = -1.0 if float(dados.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
         PONTO_A, PONTO_B, PONTO_C, PONTO_D = pontos
         BORDA_Y_OPOSTA_CALIBRADA = dados.get("borda_y_oposta_calibrada") is True
+        CANTOS_X_CORRIGIDOS_FISICAMENTE = dados.get("cantos_x_corrigidos_fisicamente") is True
+        CANTO_HOME_XY = "B" if dados.get("canto_home_xy") == "B" else "A"
         USAR_CALIBRACAO_4_PONTOS = True
         ORIGEM_X_NA_DIREITA = origem_direita
         INVERTER_JOG_X = bool(dados.get("inverter_jog_x", INVERTER_JOG_X))
@@ -435,6 +446,9 @@ def obter_estado_coordenadas():
         "ponto_c": [round(float(PONTO_C[0]), 3), round(float(PONTO_C[1]), 3)],
         "ponto_d": [round(float(PONTO_D[0]), 3), round(float(PONTO_D[1]), 3)],
         "borda_y_oposta_calibrada": BORDA_Y_OPOSTA_CALIBRADA,
+        "cantos_x_corrigidos_fisicamente": CANTOS_X_CORRIGIDOS_FISICAMENTE,
+        "canto_home_xy": CANTO_HOME_XY,
+        "ponto_home_xy": [round(float(v), 3) for v in ponto_home_xy()],
         "x_meio_fisico": round(float(x_meio), 3),
         "y_meio_fisico": round(float(y_meio), 3),
         "curso_x_grbl": round(float(curso_x), 3),
@@ -1068,8 +1082,8 @@ def validar_cantos(tol_mm=3.0):
     checks = [
         ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
         ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
-        ("X de A e D (borda esquerda)", PONTO_A[0], PONTO_D[0]),
-        ("X de B e C (borda direita)", PONTO_B[0], PONTO_C[0]),
+        ("X de A e D (lateral A/D)", PONTO_A[0], PONTO_D[0]),
+        ("X de B e C (lateral B/C)", PONTO_B[0], PONTO_C[0]),
     ]
     for nome, v1, v2 in checks:
         dif = abs(v1 - v2)
@@ -1940,8 +1954,8 @@ class ControladorGRBL:
         return ok, status
 
     def voltar_origem(self, pos=None):
-        # Retorna ao Ponto A (origem da matriz: 0.000, 0.000).
-        alvo_x, alvo_y = float(PONTO_A[0]), float(PONTO_A[1])
+        # Retorna ao local fisico de Home/G54; depois de relabel, passa a ser B.
+        alvo_x, alvo_y = (float(v) for v in ponto_home_xy())
         pos_ref = pos or (self.wpos[0], self.wpos[1])
         dist = math.hypot(alvo_x - pos_ref[0], alvo_y - pos_ref[1])
         timeout = max(TIMEOUT_IDLE_GRBL, dist / FEED_RATE * 60.0 * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
@@ -2712,6 +2726,49 @@ def configurar_sistema_coordenadas(
     return est
 
 
+
+def corrigir_identificacao_fisica_ab_cd():
+    """Troca A/B e C/D SEM mover a CNC ou alterar direcao dos motores.
+
+    Preserva o ponto fisico de Home (A antigo torna-se B novo), a posicao
+    cartesiana dos centros dos pinos (troca tambem ORIGEM_X_NA_DIREITA)
+    e a medicao da borda Y oposta quando ela ja foi confirmada.
+    """
+    global CANTOS_X_CORRIGIDOS_FISICAMENTE, CANTO_HOME_XY
+    if CANTOS_X_CORRIGIDOS_FISICAMENTE:
+        raise ValueError(
+            "A/B e C/D ja foram corrigidos nesta calibracao. "
+            "Nao executar a troca uma segunda vez."
+        )
+    orig_a, orig_b = list(PONTO_A), list(PONTO_B)
+    orig_c, orig_d = list(PONTO_C), list(PONTO_D)
+    nova_orientacao = not ORIGEM_X_NA_DIREITA
+    preservar_y = bool(BORDA_Y_OPOSTA_CALIBRADA)
+    ok, motivo = validar_calibracao_cantos(
+        [orig_b, orig_a, orig_d, orig_c]
+    )
+    if not ok:
+        raise ValueError("Nao e possivel inverter a identificacao: " + motivo)
+
+    # A antiga origem mecanica continua no mesmo local e passa a chamar-se B.
+    configurar_sistema_coordenadas(
+        ponto_a=orig_b, ponto_b=orig_a,
+        ponto_c=orig_d, ponto_d=orig_c,
+        origem_x_na_direita=nova_orientacao,
+        medicao_chave_y_oposta=preservar_y,
+    )
+    CANTO_HOME_XY = "B"
+    CANTOS_X_CORRIGIDOS_FISICAMENTE = True
+    salvar_calibracao_matriz()
+    registrar_log(
+        "Identificacao fisica corrigida: A/B e C/D trocados, "
+        "Home G54 preservado no mesmo lugar (agora B), "
+        "orientacao da imagem mantida. Nenhum motor foi movido; "
+        "refaca Home XY antes de utilizar percursos.", "aviso"
+    )
+    return obter_estado_coordenadas()
+
+
 def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
     cmd = (texto_cmd or "").strip()
     if not cmd:
@@ -3397,7 +3454,8 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         })
 
     if VOLTAR_ORIGEM and pontos:
-        linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A")
+        inicio_home = ponto_home_xy()
+        linhas_gcode.append(f"G0 X{inicio_home[0]:.3f} Y{inicio_home[1]:.3f} ; retorna ao local Home G54 ({CANTO_HOME_XY})")
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     ESTADO_ESTUDIO["matriz"] = matriz.tolist()
@@ -5712,6 +5770,26 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": True, "fontes_job": estado})
             return
 
+        if acao == "corrigir_rotulos_fisicos_ab":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Confirme a troca A/B e C/D e a necessidade de refazer Home."
+                }, 400)
+                return
+            estado = corrigir_identificacao_fisica_ab_cd()
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({
+                "ok": True, "coord": estado,
+                "mensagem": (
+                    "A/B e C/D trocados apenas na calibracao. "
+                    "Home permanece na mesma extremidade fisica, agora canto B. "
+                    "Refaca Home XY antes do perimetro ou plotagem."
+                )
+            })
+            return
+
         if acao == "config_coordenadas":
             estado = configurar_sistema_coordenadas(
                 origem_x_na_direita=dados.get("origem_x_na_direita"),
@@ -5937,8 +6015,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
             recuo_y = float(dados.get("recuo_y", 5.0))
-            coord_x = float(dados.get("coord_x", PONTO_A[0]))
-            coord_y = float(dados.get("coord_y", PONTO_A[1]))
+            coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
+            coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
