@@ -19,6 +19,7 @@ Plataforma CNC Tátil, IA Embarcada, Calibração de Home, Console UGS & Reset M
 
 import argparse
 import base64
+import copy
 import csv
 import http.server
 import io
@@ -2235,7 +2236,7 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
             "  [ORIGEM 0,0]  ORIGEM_DIREITA (Define ponto 0,0 na extremidade direita da matriz)\n"
             "                ORIGEM_ESQUERDA (Define ponto 0,0 na extremidade esquerda da matriz)\n"
             "                SINAL_X=-1 ou SINAL_X=1 (Define se para ir para a esquerda o GRBL usa X- ou X+)\n"
-            "                HOME_CAL (Apenas origem manual; NAO referencia sensores nem libera jobs)\n"
+            "                HOME_CAL (Desativado: use Home XY automatico)\n"
             "  [PINOS Z]     PINOS (Mostra sequencia GPIO [5, 6, 16, 27, 23, 17, 24, 25] e pulsos)\n"
             "                Z1 a Z8 (Dispara nivel Z) | TESTE_Z (Testa reles 1 a 8) | SEQ_Z (Sequencia 1..8)\n"
             "                MS=10 ou MS=15,10,10 (Configura duracao do pulso ON, OFF e Pausa em ms)\n"
@@ -2328,19 +2329,19 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         off_ms = partes[1] if len(partes) >= 2 else on_ms
         pausa_ms = partes[2] if len(partes) >= 3 else None
         cfg = configurar_parametros_pulsos_z(on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms)
-        return {"ok": True, "resposta": "Tempo de pulso (ms) atualizado.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tempo de pulso (ms) atualizado.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("OFF_MS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         off_ms = float(cmd.split("=", 1)[1].strip())
         cfg = configurar_parametros_pulsos_z(off_ms=off_ms)
-        return {"ok": True, "resposta": "Tempo OFF (ms) atualizado.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tempo OFF (ms) atualizado.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PAUSA_MS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         pausa_ms = float(cmd.split("=", 1)[1].strip())
         cfg = configurar_parametros_pulsos_z(pausa_ms=pausa_ms)
-        return {"ok": True, "resposta": "Pausa antes de Z (ms) atualizada.", "config_z": cfg}
+        return {"ok": True, "resposta": "Pausa antes de Z (ms) atualizada.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PULSOS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
@@ -2348,13 +2349,13 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         cfg = configurar_parametros_pulsos_z(
             num_pulsos_fixo=n_p, pulsos_por_nivel=[n_p] * NIVEIS_MAX, usar_fixo=True
         )
-        return {"ok": True, "resposta": f"Pulsos configurados para {n_p} em todos os niveis.", "config_z": cfg}
+        return {"ok": True, "resposta": f"Pulsos configurados para {n_p} em todos os niveis.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PULSOS_NIVEL="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         lista_str = cmd.split("=", 1)[1].strip()
         cfg = configurar_parametros_pulsos_z(pulsos_por_nivel=lista_str, usar_fixo=False)
-        return {"ok": True, "resposta": "Tabela de pulsos por nivel atualizada.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tabela de pulsos por nivel atualizada.", "config_z": cfg, "atualizar_matriz": True}
 
     if up == "HOME_CAL":
         registrar_terminal("TX", ">>> HOME_CAL", "cmd")
@@ -2968,8 +2969,11 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
         registrar_log("Matriz vazia: nao ha pontos para plotar.", "erro")
         return False
     try:
-        linhas, _, _ = compilar_matriz_para_estudio(matriz)
-        programa = analisar_gcode_hibrido("\n".join(linhas))
+        with _estado_projeto_lock:
+            matriz_copia = np.array(matriz, dtype=np.uint8, copy=True)
+            linhas, _, _ = compilar_matriz_para_estudio(matriz_copia)
+            config_job = capturar_snapshot_parametros_job()
+            programa = analisar_gcode_hibrido("\n".join(linhas))
         # Bloqueia todas as coordenadas antes de criar a thread.
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:
@@ -2977,7 +2981,8 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
         return False
     return executar_job_gcode_em_background(
         grbl, programa, reset_ctrl=reset_ctrl,
-        origem="matriz", usar_parametros_arquivo=True,
+        origem="matriz", usar_parametros_arquivo=False,
+        parametros_job=config_job, nome_programa="Matriz 100x100",
     )
 # ==============================================================================
 # SMARTV42: Interpretador hibrido G-code XY (GRBL) + Z discreto (GPIO)
@@ -3108,6 +3113,11 @@ def validar_programa_antes_movimento(grbl, programa):
                 raise ValueError(f"Linha {bloco['linha']}: XY fora dos cantos calibrados ({wx}, {wy}).")
             posicao = (wx, wy)
         elif bloco["tipo"] == "z":
+            if "gpio" in bloco and bloco["gpio"] != PINOS_GPIO_Z[int(bloco["nivel"]) - 1]:
+                raise ValueError(
+                    f"Linha {bloco['linha']}: GPIO de Z{bloco['nivel']} nao corresponde ao mapa atual. "
+                    "Reimporte o G-code ou restaure o mapa dos pinos."
+                )
             if posicao is None:
                 raise ValueError(f"Linha {bloco['linha']}: acionamento Z sem deslocamento XY anterior.")
             x, y = posicao
@@ -3121,9 +3131,42 @@ def validar_programa_antes_movimento(grbl, programa):
     return True
 
 
+
+def assinatura_geometria_execucao():
+    """Assinatura da geometria, janela e GPIO usada durante um job."""
+    return (
+        tuple(tuple(float(v) for v in p) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)),
+        bool(ORIGEM_X_NA_DIREITA), bool(USAR_JANELA_PLOTAGEM),
+        float(PLOT_X_MIN), float(PLOT_X_MAX), float(PLOT_Y_MIN), float(PLOT_Y_MAX),
+        tuple(PINOS_GPIO_Z),
+    )
+
+
+def capturar_snapshot_parametros_job():
+    """Fotografia dos parametros da UI ao iniciar, usada ate terminar ou abortar."""
+    z = obter_estado_config_z()
+    return {
+        "feed_rate": float(FEED_RATE),
+        "pulsos_por_nivel": tuple(int(v) for v in z["pulsos_por_nivel"]),
+        "on_ms": float(z["z_on_ms"]), "off_ms": float(z["z_off_ms"]),
+        "pausa_ms": float(z["pausa_z_ms"]),
+        "auto_reset_apos_plot": bool(AUTO_RESET_APOS_PLOT),
+        "assinatura_geometria": assinatura_geometria_execucao(),
+    }
+
+
+def validar_snapshot_geometria_job(snapshot):
+    if assinatura_geometria_execucao() != snapshot["assinatura_geometria"]:
+        raise RuntimeError("Geometria, janela ou pinos GPIO alterados apos preparar o trabalho. Execucao interrompida.")
+
+
 def executar_bloco_hibrido(grbl, bloco, contexto):
     """Executa instrucoes validadas, sem encaminhar Z/M42 ao GRBL."""
     tipo = bloco["tipo"]
+    cfg_job = contexto.get("config_job")
+    if cfg_job is None:
+        cfg_job = capturar_snapshot_parametros_job()  # chamadas legadas fora do job
+    validar_snapshot_geometria_job(cfg_job)
     if tipo == "config":
         ok, resp = grbl.enviar_comando(bloco["comando"], logar=False)
         if not ok:
@@ -3134,7 +3177,7 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
     if tipo == "xy":
         x = grbl.wpos[0] if bloco["x"] is None else bloco["x"]
         y = grbl.wpos[1] if bloco["y"] is None else bloco["y"]
-        feed = FEED_RATE if bloco["feed"] is None else bloco["feed"]
+        feed = cfg_job["feed_rate"] if bloco["feed"] is None else bloco["feed"]
         ok, estado, detalhe = grbl.mover_xy_e_aguardar(x, y, feed=feed)
         if not ok:
             raise RuntimeError(f"GRBL rejeitou XY: {estado}; {detalhe}")
@@ -3160,16 +3203,20 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
             raise RuntimeError("Z interrompido pelo operador.")
         if not aguardar_liberacao_z():
             raise RuntimeError("Z bloqueado por pausa/abortamento.")
-        if PAUSA_ANTES_Z_S > 0:
-            time.sleep(PAUSA_ANTES_Z_S)
+        if cfg_job["pausa_ms"] > 0:
+            time.sleep(cfg_job["pausa_ms"] / 1000.0)
         if not aguardar_liberacao_z():
             raise RuntimeError("Z bloqueado por pausa/abortamento.")
         arquivo_prevalece = bool(contexto.get("usar_parametros_arquivo", False))
+        nivel = int(bloco["nivel"])
+        pulsos = bloco.get("pulsos") if arquivo_prevalece else None
+        on_ms = bloco.get("on_ms") if arquivo_prevalece else None
+        off_ms = bloco.get("off_ms") if arquivo_prevalece else None
         ok, info = acionar_eixo_z(
-            bloco["nivel"],
-            pulsos_override=bloco.get("pulsos") if arquivo_prevalece else None,
-            on_ms_override=bloco.get("on_ms") if arquivo_prevalece else None,
-            off_ms_override=bloco.get("off_ms") if arquivo_prevalece else None,
+            nivel,
+            pulsos_override=pulsos if pulsos is not None else cfg_job["pulsos_por_nivel"][nivel-1],
+            on_ms_override=on_ms if on_ms is not None else cfg_job["on_ms"],
+            off_ms_override=off_ms if off_ms is not None else cfg_job["off_ms"],
         )
         if not ok:
             raise RuntimeError("Falha no mecanismo Z: " + str(info.get("erro", "erro desconhecido")))
@@ -3181,15 +3228,25 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
 
 
 def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
-                                      usar_parametros_arquivo=False):
+                                      usar_parametros_arquivo=False, parametros_job=None,
+                                      nome_programa=None):
     """Motor UNICO de comandos XY/Z, usado por matriz e G-code externo."""
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
+    # Protege contra edicoes simultaneas do arquivo em memoria apos o inicio.
+    programa = copy.deepcopy(list(programa))
+    config_job = copy.deepcopy(parametros_job if parametros_job is not None
+                               else capturar_snapshot_parametros_job())
+    try:
+        validar_snapshot_geometria_job(config_job)
+    except RuntimeError as exc:
+        registrar_log(str(exc), "erro")
+        return False
     if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
         registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
         return False
-    if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
+    if config_job["auto_reset_apos_plot"] and origem == "matriz" and reset_ctrl is not None:
         if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
             registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
             return False
@@ -3217,19 +3274,30 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
         _job_progresso.update({
             "ativo": True, "pausado": False, "atual": 0, "total": len(programa),
             "inicio_ts": time.monotonic(), "nivel_z": 0,
-            "origem": origem, "erro": "", "concluido": False,
+            "origem": origem, "nome_programa": nome_programa or origem,
+            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+            "parametros_job": {
+                "feed_rate": config_job["feed_rate"], "on_ms": config_job["on_ms"],
+                "off_ms": config_job["off_ms"], "pausa_ms": config_job["pausa_ms"],
+                "pulsos_por_nivel": list(config_job["pulsos_por_nivel"]),
+                "auto_reset_apos_plot": config_job["auto_reset_apos_plot"],
+            },
+            "erro": "", "concluido": False,
         })
         try:
             ok_cal, erro_cal = validar_janela_calibrada()
             if not ok_cal:
                 raise RuntimeError(erro_cal)
+            validar_snapshot_geometria_job(config_job)
             if any(bloco.get("tipo") == "z" for bloco in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
                 raise RuntimeError("Modo Z alterado antes do job; relés Z bloqueados.")
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
             # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
             validar_programa_antes_movimento(grbl, programa)
-            contexto = {"usar_parametros_arquivo": usar_parametros_arquivo}
+            validar_snapshot_geometria_job(config_job)
+            contexto = {"usar_parametros_arquivo": bool(usar_parametros_arquivo),
+                        "config_job": config_job}
             for pos, bloco in enumerate(programa, 1):
                 if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
                     raise RuntimeError("Execucao interrompida pelo operador.")
@@ -3244,7 +3312,7 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
                     executar_bloco_hibrido(grbl, bloco, contexto)
                 except Exception as exc:
                     raise RuntimeError(f"Linha {bloco['linha']}: {exc}") from exc
-            if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
+            if config_job["auto_reset_apos_plot"] and origem == "matriz" and reset_ctrl is not None:
                 if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
                     raise RuntimeError("Reset mecanico cancelado: modo GRBL e Arduino reset diferentes.")
                 ok_reset, detalhe_reset = reset_ctrl.ciclo_completo_reset()
@@ -3756,7 +3824,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <input type="file" id="inp-file-gcode" accept=".gcode,.nc,.tap,.txt" style="display:none;" onchange="importarGcodeHibrido(this)">
         </label>
         <label style="display:flex;gap:5px;align-items:center;font-size:10px;" title="Desmarcado usa a configuracao Z atual; marcado usa ON/OFF/PULSOS do arquivo.">
-          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;"> Z do arquivo
+          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;" onchange="alterarPreferenciaGcode()"> Z do arquivo
         </label>
         <select id="sel-profundidade" style="width:125px;" onchange="reprocessarProfundidade()">
           <option value="distancia">Prof: Distancia EDT</option>
@@ -3764,6 +3832,13 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <option value="binario">Prof: Binario (Z8)</option>
         </select>
       </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;border:1px solid rgba(148,163,184,.32);border-radius:6px;margin-bottom:6px;">
+      <strong style="font-size:11px;">Fonte da próxima plotagem:</strong>
+      <button id="bot-fonte-matriz" class="btn btn-sky" onclick="selecionarFonteJob('matriz')">Matriz 100 × 100</button>
+      <button id="bot-fonte-gcode" class="btn" onclick="selecionarFonteJob('gcode')">G-code importado</button>
+      <span id="fonte-job-info" style="font-size:11px;flex:1;min-width:150px;" title="O G-code importado fica salvo na memoria ate ser removido ou o servidor reiniciar.">Matriz selecionada</span>
+      <button id="bot-remover-gcode" class="btn btn-rose" onclick="removerGcodeSelecionado()">Remover G-code</button>
     </div>
 
     <div class="viz-split">
@@ -3911,6 +3986,9 @@ let estadoMatriz = [];
 let modoVista3D = false;
 let posCabecote = { x_mm: 0, y_mm: 0, x_idx: 99, y_idx: 0, nivel_z: 0 };
 let configCoord = { origem_x_na_direita: true, sinal_eixo_x: 1.0, inverter_jog_x: false };
+let fonteJobAtiva = 'matriz';
+let revisaoProjeto = null;
+let nomeGcodeCarregado = null;
 
 function abrirModal(id) {
   document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
@@ -4075,9 +4153,38 @@ async function salvarConfigCabecote() {
 }
 
 async function iniciarJob() {
-  const resposta = await apiPost('iniciar_job');
-  if (!resposta.ok) alert(resposta.erro || 'Job nao iniciado; consulte os logs.');
+  if (revisaoProjeto === null) { alert('Atualize o estado antes de iniciar uma plotagem.'); return; }
+  const descricao = fonteJobAtiva === 'gcode' ? (nomeGcodeCarregado || 'G-code importado') : 'matriz 100 × 100';
+  if (!confirm('Iniciar plotagem usando: ' + descricao + '?\nA fonte e os parametros serao congelados ate o fim do job.')) return;
+  const resposta = await apiPost('iniciar_job', {
+    fonte_esperada: fonteJobAtiva, revisao_esperada: revisaoProjeto
+  });
+  if (!resposta.ok) {
+    alert(resposta.erro || 'Job nao iniciado; consulte os logs.');
+    await carregarEstadoInicial();
+  }
   atualizarStatus();
+}
+
+async function selecionarFonteJob(fonte) {
+  const resposta = await apiPost('selecionar_fonte_job', { fonte });
+  if (!resposta.ok) { alert(resposta.erro || 'Fonte nao selecionada.'); return; }
+  await carregarEstadoInicial();
+}
+
+async function removerGcodeSelecionado() {
+  if (!confirm('Remover o G-code importado da memoria? A matriz sera mantida.')) return;
+  const resposta = await apiPost('remover_gcode_importado', { confirmado: true });
+  if (!resposta.ok) { alert(resposta.erro || 'Nao foi possivel remover o G-code.'); return; }
+  await carregarEstadoInicial();
+}
+
+async function alterarPreferenciaGcode() {
+  if (!nomeGcodeCarregado) return; // antes de importar: a caixa escolhe a preferencia do novo arquivo
+  const escolha = !!document.getElementById('usar-parametros-gcode').checked;
+  const resposta = await apiPost('definir_parametros_gcode', { usar_parametros_arquivo: escolha });
+  if (!resposta.ok) alert(resposta.erro || 'Preferencia de parametros nao alterada.');
+  await carregarEstadoInicial();
 }
 
 async function executarResetCompleto() {
@@ -4092,7 +4199,8 @@ async function acaoReset(subcmd) {
 }
 
 async function carregarPadrao(padrao) {
-  await apiPost('gerar_padrao', { padrao });
+  const resposta = await apiPost('gerar_padrao', { padrao });
+  if (!resposta.ok) { alert(resposta.erro || 'Padrao nao gerado.'); return; }
   await carregarEstadoInicial();
 }
 
@@ -4262,6 +4370,20 @@ async function carregarEstadoInicial() {
   const res = await fetch('/api/matrix');
   const d = await res.json();
   estadoMatriz = d.matriz || [];
+  if (d.fontes_job) {
+    const f = d.fontes_job;
+    fonteJobAtiva = f.fonte_ativa;
+    revisaoProjeto = f.revisao;
+    nomeGcodeCarregado = f.nome_gcode;
+    const nome = f.nome_gcode || '(nenhum arquivo importado)';
+    document.getElementById('fonte-job-info').textContent = fonteJobAtiva === 'gcode'
+      ? 'Selecionado: ' + nome + ' · Z: ' + (f.usar_parametros_arquivo ? 'arquivo' : 'painel')
+      : 'Selecionado: matriz física · G-code guardado: ' + nome;
+    document.getElementById('bot-fonte-gcode').disabled = !f.gcode_importado;
+    document.getElementById('bot-remover-gcode').disabled = !f.gcode_importado;
+    document.getElementById('bot-fonte-matriz').style.opacity = fonteJobAtiva === 'matriz' ? '1' : '.6';
+    document.getElementById('bot-fonte-gcode').style.opacity = fonteJobAtiva === 'gcode' ? '1' : '.6';
+  }
   if (d.coord) {
     configCoord = d.coord;
     document.getElementById('cfg-inv-jog-x').checked = !!d.coord.inverter_jog_x;
@@ -4339,7 +4461,7 @@ async function atualizarStatus() {
     if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
     } else if (st.job && st.job.ativo) {
-      document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
+      document.getElementById('info-progresso').textContent = `${st.job.nome_programa || 'Job'}: ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
       document.getElementById('info-progresso').textContent =
         st.job.erro ? 'Falha: ' + st.job.erro : (st.job.concluido ? 'Concluido' : 'Pronto');
@@ -4378,14 +4500,142 @@ _gcode_atual = []
 _trajetoria_atual = []
 estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
 _imagem_origem = None
+# A edicao da matriz, o G-code externo e a fonte selecionada sao estados distintos.
+# Nenhum recálculo da matriz elimina o arquivo importado; a remocao e explicita.
+_estado_projeto_lock = threading.RLock()
+_fonte_job_ativa = "matriz"
+_revisao_estado_projeto = 0
+
+
+def obter_fonte_job_ativa():
+    with _estado_projeto_lock:
+        return _fonte_job_ativa
+
+
+def obter_estado_fontes_job():
+    with _estado_projeto_lock:
+        importado = estado_importacao_gcode["programa"] is not None
+        return {
+            "fonte_ativa": _fonte_job_ativa,
+            "revisao": _revisao_estado_projeto,
+            "gcode_importado": importado,
+            "nome_gcode": estado_importacao_gcode.get("nome") if importado else None,
+            "blocos_gcode": len(estado_importacao_gcode["programa"] or []),
+            "usar_parametros_arquivo": bool(estado_importacao_gcode.get("usar_parametros_arquivo", False)),
+            "matriz_disponivel": _matriz_atual is not None,
+        }
+
+
+def selecionar_fonte_job(fonte):
+    global _fonte_job_ativa, _revisao_estado_projeto
+    if fonte not in ("matriz", "gcode"):
+        raise ValueError("Fonte deve ser matriz ou gcode.")
+    with _estado_projeto_lock:
+        if fonte == "gcode" and estado_importacao_gcode["programa"] is None:
+            raise ValueError("Nenhum G-code importado selecionavel.")
+        if fonte == "matriz" and _matriz_atual is None:
+            raise ValueError("Nenhuma matriz disponivel.")
+        if fonte != _fonte_job_ativa:
+            _fonte_job_ativa = fonte
+            _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+def remover_gcode_importado():
+    global _fonte_job_ativa, _revisao_estado_projeto
+    with _estado_projeto_lock:
+        estado_importacao_gcode.update({
+            "linhas": None, "programa": None, "nome": None,
+            "usar_parametros_arquivo": False,
+        })
+        _fonte_job_ativa = "matriz"
+        _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
 
 
 def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
-    global _matriz_atual, _gcode_atual, _trajetoria_atual
-    if descartar_importacao:
-        estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False})
-    _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
-    _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
+    """Compila uma COPIA e publica matriz + preview atomicamente.
+
+    descartar_importacao e um nome legado: passa a significar apenas selecionar
+    a matriz como fonte. O G-code importado so sai por remover_gcode_importado().
+    """
+    global _matriz_atual, _gcode_atual, _trajetoria_atual, _fonte_job_ativa, _revisao_estado_projeto
+    nova = np.array(nova_matriz, dtype=np.uint8, copy=True)
+    if nova.shape != TAMANHO_MATRIZ:
+        raise ValueError(f"Matriz deve ter dimensoes {TAMANHO_MATRIZ}.")
+    with _estado_projeto_lock:
+        linhas, trajetoria, _ = compilar_matriz_para_estudio(nova, modo_operacao)
+        _matriz_atual = nova
+        _gcode_atual = list(linhas)
+        _trajetoria_atual = list(trajetoria)
+        if descartar_importacao:
+            _fonte_job_ativa = "matriz"
+        _revisao_estado_projeto += 1
+
+
+def carregar_gcode_importado(conteudo, nome, usar_parametros_arquivo=False):
+    """Substitui importacao apenas DEPOIS de analisar arquivo completo."""
+    global _fonte_job_ativa, _revisao_estado_projeto
+    with _estado_projeto_lock:
+        programa = analisar_gcode_hibrido(conteudo)
+        linhas = tuple(conteudo.splitlines())
+        estado_importacao_gcode.update({
+            "linhas": linhas,
+            "programa": tuple(copy.deepcopy(programa)),
+            "nome": str(nome or "arquivo.gcode")[:120],
+            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+        })
+        _fonte_job_ativa = "gcode"
+        _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+def definir_preferencia_parametros_gcode(valor):
+    global _revisao_estado_projeto
+    if not isinstance(valor, bool):
+        raise ValueError("A preferencia deve ser um booleano.")
+    with _estado_projeto_lock:
+        if estado_importacao_gcode["programa"] is None:
+            raise ValueError("Importe um G-code antes de definir seus parametros.")
+        if estado_importacao_gcode["usar_parametros_arquivo"] != valor:
+            estado_importacao_gcode["usar_parametros_arquivo"] = valor
+            _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+
+def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esperada=None):
+    """Prepara programa e configuracao no mesmo instante, sem alterar fonte ativa."""
+    with _estado_projeto_lock:
+        fonte = _fonte_job_ativa
+        if fonte_esperada is not None and fonte_esperada != fonte:
+            return False, "Fonte alterada na interface. Atualize o painel antes de iniciar."
+        if revisao_esperada is not None and int(revisao_esperada) != _revisao_estado_projeto:
+            return False, "O projeto foi modificado depois da ultima visualizacao. Confira programa e parametros."
+        if fonte == "gcode":
+            programa_fonte = estado_importacao_gcode["programa"]
+            if not programa_fonte:
+                return False, "Arquivo G-code selecionado nao esta disponivel."
+            programa = copy.deepcopy(list(programa_fonte))
+            nome = estado_importacao_gcode.get("nome") or "arquivo.gcode"
+            usar_arquivo = bool(estado_importacao_gcode["usar_parametros_arquivo"])
+            reset = None
+        else:
+            if _matriz_atual is None or not np.any(_matriz_atual):
+                return False, "Matriz vazia ou indisponivel."
+            if not _gcode_atual:
+                return False, "G-code da matriz ainda nao foi compilado."
+            programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
+            nome, usar_arquivo, reset = "Matriz 100x100", False, reset_ctrl
+        snapshot = capturar_snapshot_parametros_job()
+        ok = executar_job_gcode_em_background(
+            grbl, programa, reset_ctrl=reset, origem=fonte,
+            usar_parametros_arquivo=usar_arquivo,
+            parametros_job=snapshot, nome_programa=nome,
+        )
+        if not ok:
+            return False, "Job nao iniciado: maquina ocupada, nao referenciada ou validacao falhou."
+        return True, f"Job iniciado com snapshot do programa {nome} ({fonte})."
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -4412,15 +4662,19 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/matrix":
-            pinos_ativos = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+            with _estado_projeto_lock:
+                fonte = obter_estado_fontes_job()
+                matriz = _matriz_atual.tolist() if _matriz_atual is not None else []
+                gcode = (list(estado_importacao_gcode["linhas"] or []) if _fonte_job_ativa == "gcode"
+                         else list(_gcode_atual))
+                pins = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+                linhas_importadas = len(estado_importacao_gcode["linhas"] or [])
+                coord = obter_estado_coordenadas()
             self._enviar_json({
-                "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
-                "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
-                "gcode_importado": estado_importacao_gcode["linhas"] is not None,
-                "usar_parametros_arquivo": estado_importacao_gcode["usar_parametros_arquivo"],
-                "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
-                "pinos_ativos": pinos_ativos,
-                "coord": obter_estado_coordenadas(),
+                "matriz": matriz, "gcode": gcode, "gcode_importado": fonte["gcode_importado"],
+                "usar_parametros_arquivo": fonte["usar_parametros_arquivo"],
+                "linhas_importadas": linhas_importadas,
+                "pinos_ativos": pins, "coord": coord, "fontes_job": fonte,
             })
             return
 
@@ -4489,22 +4743,35 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE, _imagem_origem
 
         if acao == "carregar_gcode":
-            if _job_em_execucao:
-                self._enviar_json({"ok": False, "erro": "Conclua o job anterior antes de importar."})
+            conteudo = dados.get("conteudo", "")
+            estado = carregar_gcode_importado(
+                conteudo, dados.get("nome", "arquivo.gcode"),
+                usar_parametros_arquivo=dados.get("usar_parametros_arquivo", False),
+            )
+            registrar_log(
+                f"G-code importado e selecionado: {estado['nome_gcode']} "
+                f"({estado['blocos_gcode']} blocos), independente da matriz.",
+                "ok",
+            )
+            self._enviar_json({"ok": True, "blocos": estado["blocos_gcode"], "fontes_job": estado})
+            return
+
+        if acao == "selecionar_fonte_job":
+            estado = selecionar_fonte_job(dados.get("fonte"))
+            self._enviar_json({"ok": True, "fontes_job": estado})
+            return
+
+        if acao == "remover_gcode_importado":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirmacao explicita necessaria para remover o G-code."}, 400)
                 return
-            try:
-                conteudo = dados.get("conteudo", "")
-                programa = analisar_gcode_hibrido(conteudo)
-            except (ValueError, TypeError) as exc:
-                self._enviar_json({"ok": False, "erro": str(exc)})
-                return
-            estado_importacao_gcode.update({
-                "linhas": conteudo.splitlines(), "programa": programa,
-                "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
-                "usar_parametros_arquivo": bool(dados.get("usar_parametros_arquivo", False)),
-            })
-            registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
-            self._enviar_json({"ok": True, "blocos": len(programa)})
+            estado = remover_gcode_importado()
+            self._enviar_json({"ok": True, "fontes_job": estado})
+            return
+
+        if acao == "definir_parametros_gcode":
+            estado = definir_preferencia_parametros_gcode(dados.get("usar_parametros_arquivo"))
+            self._enviar_json({"ok": True, "fontes_job": estado})
             return
 
         if acao == "config_coordenadas":
@@ -4739,15 +5006,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if not _grbl_global.modo_simulacao and not _grbl_global.home_xy_referenciado:
                 self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
                 return
-            if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(
-                    _grbl_global, estado_importacao_gcode["programa"],
-                    origem="gcode",
-                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
-                )
-            else:
-                ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
-            self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
+            ok, mensagem = iniciar_job_selecionado(
+                _grbl_global, _reset_global,
+                fonte_esperada=dados.get("fonte_esperada"),
+                revisao_esperada=dados.get("revisao_esperada"),
+            )
+            self._enviar_json({"ok": ok, "mensagem": mensagem,
+                               "erro": None if ok else mensagem}, 200 if ok else 409)
             return
 
         if acao == "reset_mecanico":
@@ -4762,7 +5027,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
                 if ok_reset:
                     _imagem_origem = None
-                    atualizar_matriz_global(_matriz_atual, descartar_importacao=True)
+                    atualizar_matriz_global(_matriz_atual)
                 else:
                     self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
                     return
