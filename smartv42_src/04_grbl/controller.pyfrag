@@ -111,6 +111,7 @@ class PortaSimulada:
         # Chaves VIRTUAIS apenas no simulador: testes reproduziveis sem acionar hardware.
         self.home_simulado_x = -3.0
         self.home_simulado_y = 3.0
+        self.home_simulado_y_sentido = 1  # -1: chave virtual em Y negativo
         self.settings = {
             0: ("10", "Step pulse time, microseconds"),
             1: ("25", "Step idle delay, milliseconds"),
@@ -159,8 +160,14 @@ class PortaSimulada:
             wy = self.mpos[1] - self.wco[1]
             wz = self.mpos[2] - self.wco[2]
             fs = int(self.feed_atual * self.override_pct / 100.0) if self.estado in ("Run", "Jog") else 0
-            pn_simulado = ("X" if self.mpos[0] <= self.home_simulado_x else "") + (
-                "Y" if self.mpos[1] >= self.home_simulado_y else ""
+            y_chave_ativa = (
+                self.mpos[1] <= self.home_simulado_y
+                if self.home_simulado_y_sentido < 0
+                else self.mpos[1] >= self.home_simulado_y
+            )
+            pn_simulado = (
+                ("X" if self.mpos[0] <= self.home_simulado_x else "") +
+                ("Y" if y_chave_ativa else "")
             )
             campo_pn = f"|Pn:{pn_simulado}" if pn_simulado else ""
             status = (
