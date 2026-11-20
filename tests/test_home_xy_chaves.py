@@ -28,22 +28,22 @@ class HomeXYChavesTeste(unittest.TestCase):
     def executar_simulado(self, ctrl, **kwargs):
         dados = dict(
             direcao_x=-1, direcao_y=1, curso_x=6.0, curso_y=6.0,
-            passo=0.5, feed=120.0, recuo=2.0, coord_x=0.0, coord_y=0.0,
+            passo=0.5, feed=120.0, recuo=5.0, coord_x=0.0, coord_y=0.0,
             seguranca_confirmada=True,
         )
         dados.update(kwargs)
         with patch.object(mod, "SIMULADO", True):
             return ctrl.executar_home_xy_chaves(**dados)
 
-    def test_home_com_chaves_x_y_e_recuo_de_dois_mm(self):
+    def test_home_com_chaves_x_y_e_recuo_de_cinco_mm(self):
         ctrl = self.novo_controlador()
         self.assertTrue(ctrl.enviar_comando("$22=0")[0])
         ok, mensagem = self.executar_simulado(ctrl)
         self.assertTrue(ok, mensagem)
         self.assertTrue(ctrl.home_xy_referenciado)
         self.assertEqual(ctrl.home_xy_estado["fase"], "Home XY concluido")
-        self.assertAlmostEqual(ctrl.mpos[0], -1.0, places=2)
-        self.assertAlmostEqual(ctrl.mpos[1], 1.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -2.0, places=2)
         self.assertAlmostEqual(ctrl.wpos[0], 0.0, places=2)
         self.assertAlmostEqual(ctrl.wpos[1], 0.0, places=2)
         self.assertNotIn("X", ctrl.pinos_pn)
@@ -91,10 +91,10 @@ class HomeXYChavesTeste(unittest.TestCase):
         ctrl.ser.mpos[1] = 3.0
         ok, motivo = self.executar_simulado(ctrl)
         self.assertTrue(ok, motivo)
-        self.assertAlmostEqual(ctrl.mpos[0], -1.0, places=2)
-        self.assertAlmostEqual(ctrl.mpos[1], 1.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -2.0, places=2)
 
-    def test_chave_x_presa_apos_recuo_exibe_diagnostico_e_nao_inicia_y(self):
+    def test_chave_x_presa_apos_recuo_interrompe_home_sem_referencia(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
         ler_status_original = ctrl._status_home_xy
@@ -116,10 +116,58 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Chave X nao liberou", erro)
         self.assertIn("MPos informado", erro)
-        self.assertIn("Pn:X", erro)
-        self.assertIn("Y nao foi iniciado", erro)
-        self.assertEqual(ctrl.mpos[1], 0.0)
+        self.assertIn("Pn final:X", erro)
+        self.assertIn("Home XY interrompido", erro)
+        self.assertGreater(ctrl.mpos[1], 0.0)  # Y tambem participou da busca
         self.assertFalse(ctrl.home_xy_referenciado)
+
+    def test_busca_sincronizada_envia_x_e_y_no_mesmo_jog(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-0.500 Y0.500 " in c for c in comandos))
+        self.assertTrue(any("$J=G91 G21 X5.000 " in c for c in comandos))
+        self.assertTrue(any("$J=G91 G21 Y-5.000 " in c for c in comandos))
+
+    def test_y_chega_primeiro_x_continua_sem_mover_y(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_y = 1.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        indice_recuo_y = next(i for i, c in enumerate(comandos)
+                               if "$J=G91 G21 Y-5.000 " in c)
+        self.assertTrue(any("$J=G91 G21 X-0.500 " in c
+                            for c in comandos[indice_recuo_y + 1:]))
+        self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -4.0, places=2)
+
+    def test_recuo_diferente_de_cinco_mm_nao_e_aceito(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ok, mensagem = self.executar_simulado(ctrl, recuo=2.0)
+        self.assertFalse(ok)
+        self.assertIn("recuo fixo de 5.0 mm", mensagem)
+
+    def test_confirmacao_chave_requer_duas_leituras_livres_consecutivas(self):
+        ctrl = self.novo_controlador()
+        ativo = "<Idle|MPos:0,0,0|Pn:X>"
+        livre = "<Idle|MPos:0,0,0>"
+        with patch.object(ctrl, "_status_home_xy",
+                          side_effect=[ativo, livre, livre]):
+            ok, _, amostras = ctrl._confirmar_chave_liberada_home("X")
+        self.assertTrue(ok)
+        self.assertEqual(amostras, ["X", "livre", "livre"])
+        with patch.object(ctrl, "_status_home_xy",
+                          side_effect=[livre, ativo, livre, ativo]):
+            ok, _, amostras = ctrl._confirmar_chave_liberada_home("X")
+        self.assertFalse(ok)
+        self.assertEqual(amostras, ["livre", "X", "livre", "X"])
 
     def test_usb_reconectada_invalida_referencia(self):
         ctrl = self.novo_controlador()
