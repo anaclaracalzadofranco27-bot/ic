@@ -1096,6 +1096,10 @@ class ControladorGRBL:
         indice = 0 if eixo == "X" else 1
         posicao_antes = self.mpos[indice]
         deslocamento = -direcao * recuo
+        registrar_log(
+            f"HOME XY RECUO {eixo}: busca no sentido {direcao:+d}; "
+            f"afastamento comandado {eixo}{deslocamento:+.3f} mm, F{feed:.1f}.", "info"
+        )
         self._jog_passo_home_xy(eixo, deslocamento, feed, passo_max=recuo,
                                 detectar_contato=False)
         liberada, estado, amostras = self._confirmar_chave_liberada_home(eixo)
@@ -1178,6 +1182,119 @@ class ControladorGRBL:
             )
         registrar_log("Home XY: ambas as chaves liberadas apos recuo conjunto.", "ok")
 
+    def _buscar_xy_em_fluxo_home(self, pendentes, direcoes, cursos, percorrido, passo, feed):
+        """Jog com fila curta: GRBL planeja blocos sucessivos sem esperar Idle.
+
+        O GRBL 1.1 aceita comandos $J enquanto esta em Jog. A fila mantem
+        aproximadamente dois trechos de movimento, sempre sujeitos a Pn
+        e cancelamento imediato de toda a fila no primeiro contato.
+        """
+        pendentes = tuple(pendentes)
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL precisa estar Idle para iniciar fluxo Home XY.")
+        inicio = {e: self.mpos[0 if e == "X" else 1] for e in pendentes}
+        saldos = {e: cursos[e] - percorrido[e] for e in pendentes}
+        planejado = {e: 0.0 for e in pendentes}
+        if any(v <= 1e-6 for v in saldos.values()):
+            return set(), estado
+
+        limite_fila = 1.5 * passo
+        distancia_maxima = math.hypot(*(saldos[e] for e in pendentes))
+        prazo = time.monotonic() + max(
+            12.0, 3.0 * distancia_maxima * 60.0 / feed + 12.0
+        )
+        ultimo_log = 0.0
+        algum_jog = False
+
+        while time.monotonic() < prazo:
+            estado = self._status_home_xy()
+            contatos = set(pendentes).intersection(pinos_ativos(estado))
+            if contatos:
+                registrar_log(
+                    "HOME XY SENSOR EM MOVIMENTO: " + "/".join(sorted(contatos)) +
+                    "; cancelando fila de jogs antes do recuo.", "info"
+                )
+                if not self.enviar_byte_tempo_real(
+                    b"\x85", "Home XY: contato detectado, cancelar todos os jogs"
+                ):
+                    raise RuntimeError("Falha ao cancelar jog do Home no contato.")
+                limite_parada = time.monotonic() + 6.0
+                while time.monotonic() < limite_parada:
+                    estado = self._status_home_xy()
+                    if estado.startswith("<Idle"):
+                        break
+                    time.sleep(0.04)
+                else:
+                    raise RuntimeError("GRBL nao ficou Idle apos cancelar jog no sensor.")
+                confirmados = set(pendentes).intersection(pinos_ativos(estado))
+                if not contatos.issubset(confirmados):
+                    raise RuntimeError(
+                        "Contato de " + "/".join(sorted(contatos)) +
+                        " nao persistiu apos cancelar o jog. Verifique "
+                        "deceleracao, largura do acionador e leitura Pn."
+                    )
+                return confirmados, estado
+
+            progresso = {
+                e: max(0.0, direcoes[e] *
+                       (self.mpos[0 if e == "X" else 1] - inicio[e]))
+                for e in pendentes
+            }
+            pendencia = max(planejado[e] - progresso[e] for e in pendentes)
+            planejado_ate_limite = any(
+                saldos[e] - planejado[e] <= 1e-6 for e in pendentes
+            )
+            if planejado_ate_limite and estado.startswith("<Idle") and all(
+                progresso[e] >= planejado[e] - 0.06 for e in pendentes
+            ):
+                return set(), estado
+
+            if not planejado_ate_limite and pendencia <= limite_fila - passo * 0.5:
+                deslocamentos = {
+                    e: direcoes[e] * min(passo, saldos[e] - planejado[e])
+                    for e in pendentes
+                }
+                comando = "$J=G91 G21 " + " ".join(
+                    f"{e}{deslocamentos[e]:.3f}" for e in pendentes
+                ) + f" F{feed:.1f}"
+                if len(pendentes) == 2 and not getattr(self, "_home_duplo_registrado", False):
+                    registrar_log(
+                        "HOME XY FLUXO CONJUNTO: " + comando +
+                        " (X/Y juntos, sem esperar Idle a cada jog)", "info"
+                    )
+                    self._home_duplo_registrado = True
+                ok, resposta = self.enviar_comando(
+                    comando, timeout=5.0, logar=False
+                )
+                if not ok:
+                    raise RuntimeError(
+                        f"GRBL rejeitou fluxo de Jog Home XY: {resposta}"
+                    )
+                algum_jog = True
+                for e in pendentes:
+                    planejado[e] += abs(deslocamentos[e])
+                continue
+
+            if not algum_jog:
+                raise RuntimeError("Fluxo Home XY nao iniciou movimentacao.")
+            agora = time.monotonic()
+            if agora - ultimo_log > 1.5:
+                self._estado_home_xy(
+                    "Busca continua " + "/".join(pendentes) + ": " +
+                    ", ".join(
+                        f"{e}={percorrido[e] + progresso[e]:.1f}/{cursos[e]:.1f} mm"
+                        for e in pendentes
+                    ), "/".join(pendentes)
+                )
+                ultimo_log = agora
+            time.sleep(0.04)
+
+        self.enviar_byte_tempo_real(b"\x85", "Timeout do fluxo Home XY: cancelar jog")
+        raise RuntimeError(
+            "Timeout no fluxo Home XY: GRBL nao confirmou final/cancelamento."
+        )
+
     def _home_xy_busca_sincronizada(self, direcoes, cursos, passo, feed, recuos):
         """Busca X/Y juntos; ao achar uma chave, recua seu eixo e o retira da busca."""
         estado = self._status_home_xy()
@@ -1202,65 +1319,52 @@ class ControladorGRBL:
         encontrados = set()
         while len(encontrados) < 2:
             pendentes = tuple(e for e in ("X", "Y") if e not in encontrados)
-            deslocamentos = {}
             for eixo in pendentes:
-                restante = cursos[eixo] - percorrido[eixo]
-                if restante < 1e-6:
+                if cursos[eixo] - percorrido[eixo] < 1e-6:
                     raise RuntimeError(
                         f"Busca do eixo {eixo} encerrada por limite: "
                         f"{percorrido[eixo]:.1f}/{cursos[eixo]:.1f} mm percorridos "
                         f"sem detectar Pn:{eixo}. "
                         f"Eixos ja encontrados: {('/'.join(sorted(encontrados)) or 'nenhum')}. "
-                        f"Confira o campo 'Busca max {eixo}' no Home; "
-                        "o valor inicial na interface e 30 mm (o teto permitido e 300 mm). "
-                        "Somente aumente apos confirmar espaco mecanico livre, "
-                        "sentido correto e parada eletrica independente."
+                        f"Confira 'Busca max {eixo}' e o sentido fisico."
                     )
-                deslocamentos[eixo] = direcoes[eixo] * min(passo, restante)
             self._estado_home_xy(
-                "Busca sincronizada " + "/".join(pendentes) + ": " +
-                ", ".join(f"{e}={percorrido[e]:.1f}/{cursos[e]:.1f} mm"
-                          for e in pendentes),
+                "Iniciando busca continua " + "/".join(pendentes),
                 "/".join(pendentes),
             )
-            antes = dict(zip(("X", "Y"), self.mpos[:2]))
-            contatos, estado = self._jog_passo_xy_home(
-                deslocamentos, feed, passo_max=passo
+            antes = {e: self.mpos[0 if e == "X" else 1] for e in pendentes}
+            contatos, estado = self._buscar_xy_em_fluxo_home(
+                pendentes, direcoes, cursos, percorrido, passo, feed
             )
-            deltas = {}
             for eixo in pendentes:
-                posicao = self.mpos[0 if eixo == "X" else 1]
-                delta = posicao - antes[eixo]
-                deltas[eixo] = delta
-                percorrido[eixo] += min(abs(deslocamentos[eixo]), abs(delta))
-            if len(pendentes) == 2 and not getattr(self, "_home_duplo_mov_registrado", False):
-                registrar_log(
-                    "HOME XY MPos do primeiro jog conjunto: " +
-                    ", ".join(f"{e}={deltas[e]:+.3f} mm" for e in pendentes) +
-                    ". MPos nao mede deslocamento fisico dos motores.", "info"
+                delta = self.mpos[0 if eixo == "X" else 1] - antes[eixo]
+                percorrido[eixo] += min(
+                    cursos[eixo] - percorrido[eixo], abs(delta)
                 )
-                self._home_duplo_mov_registrado = True
-            if contatos:
-                estado = self._status_home_xy()
-                for eixo in sorted(contatos):
-                    if eixo not in pinos_ativos(estado):
-                        raise RuntimeError(
-                            f"Leitura da chave {eixo} instavel: contato nao "
-                            "persistiu apos a parada."
-                        )
-                self._recuar_chaves_home(
-                    contatos, direcoes, feed, recuos,
-                    "Recuando chaves detectadas",
+            if not contatos:
+                eixo = next(
+                    (e for e in pendentes if percorrido[e] >= cursos[e] - 0.1),
+                    pendentes[0],
                 )
-                encontrados.update(contatos)
-                registrar_log(
-                    "Home XY: referencia parcial " +
-                    "/".join(sorted(encontrados)) +
-                    "; pendentes " +
-                    ("/".join(e for e in ("X", "Y") if e not in encontrados)
-                     or "nenhum"),
-                    "info",
+                raise RuntimeError(
+                    f"Busca do eixo {eixo} encerrada por limite: "
+                    f"{percorrido[eixo]:.1f}/{cursos[eixo]:.1f} mm percorridos "
+                    f"sem detectar Pn:{eixo}. "
+                    f"Eixos ja encontrados: {('/'.join(sorted(encontrados)) or 'nenhum')}. "
+                    f"Confira 'Busca max {eixo}' e o sentido fisico."
                 )
+            self._recuar_chaves_home(
+                contatos, direcoes, feed, recuos,
+                "Recuando " + "/".join(sorted(contatos)) +
+                " apos cancelar e esvaziar a fila de jog",
+            )
+            encontrados.update(contatos)
+            registrar_log(
+                "HOME XY: chaves encontradas e liberadas " +
+                "/".join(sorted(encontrados)) + "; pendente(s): " +
+                ("/".join(e for e in ("X", "Y") if e not in encontrados) or "nenhum"),
+                "info",
+            )
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=5.0, feed=500.0,
