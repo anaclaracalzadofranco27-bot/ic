@@ -1986,7 +1986,7 @@ class ControladorGRBL:
             f"Ultimo status valido: {self.ultimo_status_raw or 'nenhum'}."
         )
 
-    def _jog_passo_xy_home(self, deslocamentos, feed, passo_max=0.5,
+    def _jog_passo_xy_home(self, deslocamentos, feed, passo_max=5.0,
                           detectar_contato=True):
         """Jog incremental XY; 0x85 cancela ambos os eixos em caso de contato."""
         if not deslocamentos or any(
@@ -2037,7 +2037,9 @@ class ControladorGRBL:
                 if detectar_contato:
                     contatos.update(set(deslocamentos).intersection(pinos_ativos(estado)))
                 return contatos, estado
-            time.sleep(0.15)
+            # Consultas mais frequentes durante o segmento longo reduzem a
+            # latencia ate o cancelamento por contato. Nao e um hard limit.
+            time.sleep(0.05)
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
         raise RuntimeError("Timeout esperando parar jog do Home XY.")
 
@@ -2253,7 +2255,7 @@ class ControladorGRBL:
                 )
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
-                               coord_x=0.0, coord_y=0.0, passo=0.5, feed=500.0,
+                               coord_x=0.0, coord_y=0.0, passo=5.0, feed=500.0,
                                recuo=5.0, seguranca_confirmada=False, recuo_y=None):
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
         bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
@@ -2278,8 +2280,8 @@ class ControladorGRBL:
                                 ("recuo X", recuo), ("recuo Y", recuo_y)):
                 if not math.isfinite(valor):
                     raise ValueError(f"{nome} deve ser finito.")
-            if not 0.1 <= passo <= 0.5 or not 20.0 <= feed <= 600.0:
-                raise ValueError("Home requer passo 0.1..0.5 mm e feed 20..600 mm/min.")
+            if not 0.1 <= passo <= 10.0 or not 20.0 <= feed <= 600.0:
+                raise ValueError("Home requer passo 0.1..10 mm e feed 20..600 mm/min.")
             if not 1.0 <= curso_x <= 300.0 or not 1.0 <= curso_y <= 300.0:
                 raise ValueError("Cursos MAXIMOS de BUSCA devem estar em 1..300 mm; recuo apos contato permanece 5 mm.")
             if not 2.0 <= recuo <= 10.0 or not 2.0 <= recuo_y <= 10.0:
@@ -2307,7 +2309,7 @@ class ControladorGRBL:
             registrar_log(
                 f"Home XY CONFIG: X {'+' if direcao_x > 0 else '-'}, "
                 f"Y {'+' if direcao_y > 0 else '-'}, "
-                f"F{feed:.1f} mm/min, busca max "
+                f"F{feed:.1f} mm/min, segmento={passo:.1f} mm por eixo, busca max "
                 f"X={curso_x:.1f} mm Y={curso_y:.1f} mm, "
                 f"recuo apos contato X={recuo:.1f}, Y={recuo_y:.1f} mm.", "info"
             )
@@ -4224,7 +4226,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="modal-body">
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
+        O SmartV42 busca X e Y simultaneamente em trechos coordenados de ate 10 mm
+        por eixo (padrao 5 mm, 10 vezes maior que antes). A leitura do sensor
+        continua ativa durante o movimento, para cancelar o jog ao detectar contato.
+        Trechos maiores exigem espaco livre e chave funcionando: a USB nao garante
+        parada instantanea no batente.
         Quando uma chave aciona, o Home interrompe o jog conjunto,
         confirma o contato, recua o eixo correspondente na distancia configurada
         e continua com o eixo pendente.
@@ -4265,7 +4271,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
-          <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
+          <label title="Distancia de cada segmento da busca, nao o recuo apos o contato. Padrao 5 mm; ate 10 mm se o curso livre for confirmado.">Trecho de busca (mm) <input id="home-passo" type="number" min="0.1" max="10" step="any" value="5" style="width:70px;"></label>
           <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
           <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
           <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
@@ -4481,9 +4487,12 @@ async function iniciarHomeXY() {
   const cursoX = Number(document.getElementById('home-curso-x').value);
   const cursoY = Number(document.getElementById('home-curso-y').value);
   const feedHome = Number(document.getElementById('home-feed').value);
+  const trechoBusca = Number(document.getElementById('home-passo').value);
   if (!(cursoX >= 1 && cursoX <= 300 && cursoY >= 1 && cursoY <= 300 &&
-        feedHome >= 20 && feedHome <= 600)) {
-    alert('Configure curso de busca entre 1 e 300 mm e feed entre 20 e 600 mm/min.');
+        feedHome >= 20 && feedHome <= 600 &&
+        trechoBusca >= 0.1 && trechoBusca <= 10)) {
+    document.getElementById('home-xy-status').textContent =
+      'Configure busca 1..300 mm, trecho 0,1..10 mm e feed 20..600 mm/min.';
     return;
   }
   const recuoX = Number(document.getElementById('home-recuo-x').value);
@@ -5420,7 +5429,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             curso_x = float(dados.get("curso_x", 30))
             curso_y = float(dados.get("curso_y", 30))
-            passo = float(dados.get("passo", 0.5))
+            passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
             recuo_y = float(dados.get("recuo_y", 5.0))
