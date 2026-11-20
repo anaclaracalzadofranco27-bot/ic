@@ -74,3 +74,11 @@ O seletor Y+ / Y- do Home altera o sinal da **busca da chave**, sem alterar o se
 A velocidade de **Home** foi alterada para 500 mm/min por padrao (faixa permitida 20..600 mm/min); nao altera automaticamente a velocidade de plotagem. O limite de busca configuravel foi ajustado para ate 300 mm por eixo. Como a matriz nominal tem 299 mm de deslocamento e 297 mm entre os centros extremos, **300 mm so pode ser escolhido se houver distancia mecanica real suficiente, margem de parada e protecao independente**. O formulario continua com padrao inicial de 30 mm; isso nao significa que o eixo so possa ir ate 30 mm. Com $21=0, se a chave falhar, o software nao garante evitar colisao.
 
 Quando as duas chaves sao detectadas no mesmo passo de busca, o sistema tenta recuar ambas juntas; quando apenas uma aciona, recua apenas essa e depois continua o eixo pendente. Logs `HOME XY COMANDO CONJUNTO`, `HOME XY MPos do primeiro jog conjunto` e `Home XY CONFIG` permitem confirmar os comandos enviados e o sentido configurado.
+
+## Recuo ajustavel sem eliminar referencia
+
+O modal agora permite **recuo X** e **recuo Y** separados entre **2 e 10 mm**, ambos iniciando em 5 mm. Isso atende ao caso em que X solta normalmente apos 5 mm mas Y precisa de afastamento maior. O valor maior NAO deve ser aplicado sem verificar mecanicamente a folga na direcao correta. Se ambas as chaves acionam no mesmo passo, o jog de recuo usa um unico comando XY com as distancias individuais; se so uma aciona, o recuo e apenas desse eixo. O GRBL precisa relatar as duas chaves liberadas antes que G54 seja gravado.
+
+O Home continua exigindo a confirmacao explicita da parada fisica, mas o segundo popup de confirmacao foi removido. A retirada de G-code importado em memoria tambem nao exibe confirmacao duplicada, e o aviso de importacao bem-sucedida aparece no painel. Alertas de falha e intertravamentos mecanicos permanecem.
+
+A referencia anexada `smartv42_2.py` foi analisada como exemplo de ergonomia, nao copiada integralmente: nao sao aplicados destravamento automatico `$X`, Z habilitado sem Home nem declaracao de referencia com chave presa. Uma execucao sem erro nao demonstra que os finais de curso e a parada funcionem em todos os casos.
