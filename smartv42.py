@@ -2050,15 +2050,16 @@ class ControladorGRBL:
         return eixo in contatos, estado
 
     def _confirmar_chave_liberada_home(self, eixo):
-        """Exige duas leituras Idle consecutivas livres, sem mover o carro.
+        """Confirma chave livre em duas leituras Idle consecutivas.
 
-        Um unico Pn ativo depois de um jog pode ser temporario (bounce ou
-        atraso de status). O Home nunca e validado por uma amostra livre isolada.
+        Aguarda ate ~2 segundos apenas consultando o GRBL, sem mover nenhum
+        motor. Isso tolera status serial atrasado ou bounce do contato, mas
+        nunca presume liberacao se Pn continuar ativo.
         """
         amostras = []
         livres_seguidas = 0
         estado = ""
-        for tentativa in range(4):
+        for tentativa in range(12):
             if tentativa:
                 time.sleep(0.15)
             estado = self._status_home_xy()
@@ -2196,8 +2197,14 @@ class ControladorGRBL:
                 restante = cursos[eixo] - percorrido[eixo]
                 if restante < 1e-6:
                     raise RuntimeError(
-                        f"Chave {eixo} nao encontrada no curso limitado de "
-                        f"{cursos[eixo]:.1f} mm."
+                        f"Busca do eixo {eixo} encerrada por limite: "
+                        f"{percorrido[eixo]:.1f}/{cursos[eixo]:.1f} mm percorridos "
+                        f"sem detectar Pn:{eixo}. "
+                        f"Eixos ja encontrados: {('/'.join(sorted(encontrados)) or 'nenhum')}. "
+                        f"Confira o campo 'Busca max {eixo}' no Home; "
+                        "o valor inicial na interface e 30 mm (o teto permitido e 300 mm). "
+                        "Somente aumente apos confirmar espaco mecanico livre, "
+                        "sentido correto e parada eletrica independente."
                     )
                 deslocamentos[eixo] = direcoes[eixo] * min(passo, restante)
             self._estado_home_xy(
@@ -4223,8 +4230,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         e continua com o eixo pendente.
         <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
         <strong>Recuo independente X e Y: 2 a 10 mm. Confira o espaco livre antes de aumentar.</strong><br>
-        O curso maximo de BUSCA pode chegar a 300 mm, mas inicia em 30 mm por seguranca:
-        nao e o recuo apos acionar a chave. Antes de aumentar, confira a distancia
+        <strong>ATENCAO: os campos Busca max X e Busca max Y iniciam em apenas 30 mm.</strong>
+        Se Y encontrar sua chave e X ainda estiver longe, X continuara ate atingir seu
+        proprio limite de busca e parara, mesmo que o teto permitido seja 300 mm.
+        O recuo de X/Y apos contato e configurado separadamente.
+        Antes de aumentar a busca, confira a distancia
         fisica livre, pois os hard limits estao desativados neste modo.<br>
         A direcao inicial do Y foi sugerida como negativa porque o sentido fisico
         relatado estava invertido; confirme com um movimento curto antes do Home.
@@ -4251,8 +4261,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
               <option value="-1" selected>Y negativo</option><option value="1">Y positivo</option>
             </select>
           </label>
-          <label>Busca max X (mm) <input id="home-curso-x" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
-          <label>Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
+          <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max X (mm) <input id="home-curso-x" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
+          <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
@@ -4845,9 +4855,13 @@ async function atualizarStatus() {
     if (st.home_xy) {
       const h = st.home_xy;
       const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
-          : h.referenciado ? 'Home XY referenciado (recuo 5 mm)'
+          : h.referenciado ? 'Home XY referenciado; ambos sensores liberados'
           : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
       document.getElementById('home-xy-status').textContent = resumo;
+      if (!h.ativo && h.erro) {
+        const painel = document.getElementById('info-progresso');
+        if (painel) painel.textContent = 'Home XY interrompido: ' + h.erro;
+      }
     }
     if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
