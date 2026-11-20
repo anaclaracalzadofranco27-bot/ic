@@ -68,8 +68,8 @@ def validar_cantos(tol_mm=3.0):
     checks = [
         ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
         ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
-        ("X de A e D (borda esquerda)", PONTO_A[0], PONTO_D[0]),
-        ("X de B e C (borda direita)", PONTO_B[0], PONTO_C[0]),
+        ("X de A e D (lateral A/D)", PONTO_A[0], PONTO_D[0]),
+        ("X de B e C (lateral B/C)", PONTO_B[0], PONTO_C[0]),
     ]
     for nome, v1, v2 in checks:
         dif = abs(v1 - v2)
@@ -940,8 +940,8 @@ class ControladorGRBL:
         return ok, status
 
     def voltar_origem(self, pos=None):
-        # Retorna ao Ponto A (origem da matriz: 0.000, 0.000).
-        alvo_x, alvo_y = float(PONTO_A[0]), float(PONTO_A[1])
+        # Retorna ao local fisico de Home/G54; depois de relabel, passa a ser B.
+        alvo_x, alvo_y = (float(v) for v in ponto_home_xy())
         pos_ref = pos or (self.wpos[0], self.wpos[1])
         dist = math.hypot(alvo_x - pos_ref[0], alvo_y - pos_ref[1])
         timeout = max(TIMEOUT_IDLE_GRBL, dist / FEED_RATE * 60.0 * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
@@ -1710,6 +1710,49 @@ def configurar_sistema_coordenadas(
         "ok",
     )
     return est
+
+
+
+def corrigir_identificacao_fisica_ab_cd():
+    """Troca A/B e C/D SEM mover a CNC ou alterar direcao dos motores.
+
+    Preserva o ponto fisico de Home (A antigo torna-se B novo), a posicao
+    cartesiana dos centros dos pinos (troca tambem ORIGEM_X_NA_DIREITA)
+    e a medicao da borda Y oposta quando ela ja foi confirmada.
+    """
+    global CANTOS_X_CORRIGIDOS_FISICAMENTE, CANTO_HOME_XY
+    if CANTOS_X_CORRIGIDOS_FISICAMENTE:
+        raise ValueError(
+            "A/B e C/D ja foram corrigidos nesta calibracao. "
+            "Nao executar a troca uma segunda vez."
+        )
+    orig_a, orig_b = list(PONTO_A), list(PONTO_B)
+    orig_c, orig_d = list(PONTO_C), list(PONTO_D)
+    nova_orientacao = not ORIGEM_X_NA_DIREITA
+    preservar_y = bool(BORDA_Y_OPOSTA_CALIBRADA)
+    ok, motivo = validar_calibracao_cantos(
+        [orig_b, orig_a, orig_d, orig_c]
+    )
+    if not ok:
+        raise ValueError("Nao e possivel inverter a identificacao: " + motivo)
+
+    # A antiga origem mecanica continua no mesmo local e passa a chamar-se B.
+    configurar_sistema_coordenadas(
+        ponto_a=orig_b, ponto_b=orig_a,
+        ponto_c=orig_d, ponto_d=orig_c,
+        origem_x_na_direita=nova_orientacao,
+        medicao_chave_y_oposta=preservar_y,
+    )
+    CANTO_HOME_XY = "B"
+    CANTOS_X_CORRIGIDOS_FISICAMENTE = True
+    salvar_calibracao_matriz()
+    registrar_log(
+        "Identificacao fisica corrigida: A/B e C/D trocados, "
+        "Home G54 preservado no mesmo lugar (agora B), "
+        "orientacao da imagem mantida. Nenhum motor foi movido; "
+        "refaca Home XY antes de utilizar percursos.", "aviso"
+    )
+    return obter_estado_coordenadas()
 
 
 def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
