@@ -1979,39 +1979,86 @@ class ControladorGRBL:
             f"Ultimo status valido: {self.ultimo_status_raw or 'nenhum'}."
         )
 
-    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0,
+    def _jog_passo_xy_home(self, deslocamentos, feed, passo_max=0.5,
                           detectar_contato=True):
-        """Passo incremental: detecta chave na busca, mas a ignora durante recuo."""
-        if eixo not in ("X", "Y") or abs(deslocamento) > passo_max + 1e-6:
-            raise RuntimeError("Passo de Home XY excede o limite permitido.")
+        """Jog incremental XY; 0x85 cancela ambos os eixos em caso de contato."""
+        if not deslocamentos or any(
+            eixo not in ("X", "Y") or not math.isfinite(delta)
+            or abs(delta) <= 1e-7 or abs(delta) > passo_max + 1e-6
+            for eixo, delta in deslocamentos.items()
+        ):
+            raise RuntimeError("Passo de Home XY invalido ou excede o limite.")
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
             raise RuntimeError("GRBL nao esta Idle antes do passo de Home XY.")
-        posicao_antes = self.mpos[0 if eixo == "X" else 1]
-        comando = f"$J=G91 G21 {eixo}{deslocamento:.3f} F{feed:.1f}"
+        antes = dict(zip(("X", "Y"), self.mpos[:2]))
+        partes = [f"{eixo}{deslocamentos[eixo]:.3f}" for eixo in ("X", "Y")
+                  if eixo in deslocamentos]
+        comando = f"$J=G91 G21 {' '.join(partes)} F{feed:.1f}"
         ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
         if not ok:
-            raise RuntimeError(f"GRBL rejeitou jog de {eixo}: {msg}")
-        prazo = time.monotonic() + max(5.0, abs(deslocamento) * 60.0 / feed + 4.0)
-        acionou = False
+            raise RuntimeError(f"GRBL rejeitou jog de Home XY: {msg}")
+        comprimento = math.hypot(deslocamentos.get("X", 0.0),
+                                 deslocamentos.get("Y", 0.0))
+        prazo = time.monotonic() + max(5.0, comprimento * 60.0 / feed + 4.0)
+        contatos = set()
         movimento_observado = False
+        cancelado = False
         while time.monotonic() < prazo:
             estado = self._status_home_xy()
             if estado.startswith(("<Jog", "<Run")):
                 movimento_observado = True
-            if abs(self.mpos[0 if eixo == "X" else 1] - posicao_antes) >= 0.005:
+            if any(abs(self.mpos[0 if eixo == "X" else 1] - antes[eixo]) >= 0.005
+                   for eixo in deslocamentos):
                 movimento_observado = True
-            if detectar_contato and eixo in pinos_ativos(estado):
-                if not acionou and estado.startswith(("<Jog", "<Run")):
-                    # Jog cancel e em tempo real, nao um comando de movimento adicional.
-                    if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
-                        raise RuntimeError("Falhou o envio de cancelamento de jog.")
-                acionou = True
+            if detectar_contato:
+                novos = set(deslocamentos).intersection(pinos_ativos(estado))
+                contatos.update(novos)
+                if novos and not cancelado and estado.startswith(("<Jog", "<Run")):
+                    if not self.enviar_byte_tempo_real(
+                        b"\x85", f"Home XY: contato {','.join(sorted(novos))}, cancelar jog"
+                    ):
+                        raise RuntimeError("Falhou o cancelamento de jog no contato.")
+                    cancelado = True
             if estado.startswith("<Idle") and movimento_observado:
-                return acionou or (detectar_contato and eixo in pinos_ativos(estado)), estado
+                if detectar_contato:
+                    contatos.update(set(deslocamentos).intersection(pinos_ativos(estado)))
+                return contatos, estado
             time.sleep(0.15)
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
-        raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
+        raise RuntimeError("Timeout esperando parar jog do Home XY.")
+
+    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=5.0,
+                          detectar_contato=True):
+        """Jog de um eixo, inclusive recuo de 5 mm."""
+        contatos, estado = self._jog_passo_xy_home(
+            {eixo: deslocamento}, feed, passo_max, detectar_contato
+        )
+        return eixo in contatos, estado
+
+    def _confirmar_chave_liberada_home(self, eixo):
+        """Exige duas leituras Idle consecutivas livres, sem mover o carro.
+
+        Um unico Pn ativo depois de um jog pode ser temporario (bounce ou
+        atraso de status). O Home nunca e validado por uma amostra livre isolada.
+        """
+        amostras = []
+        livres_seguidas = 0
+        estado = ""
+        for tentativa in range(4):
+            if tentativa:
+                time.sleep(0.15)
+            estado = self._status_home_xy()
+            if not estado.startswith("<Idle"):
+                raise RuntimeError(
+                    f"GRBL saiu de Idle durante verificacao da chave {eixo}: {estado}"
+                )
+            pn = pinos_ativos(estado)
+            amostras.append(pn or "livre")
+            livres_seguidas = livres_seguidas + 1 if eixo not in pn else 0
+            if livres_seguidas >= 2:
+                return True, estado, amostras
+        return False, estado, amostras
 
     def _recuar_chave_home(self, eixo, direcao, feed, recuo, fase):
         """Recuo supervisionado: valida Pn e movimento INFORMADO pelo GRBL.
@@ -2027,62 +2074,92 @@ class ControladorGRBL:
         deslocamento = -direcao * recuo
         self._jog_passo_home_xy(eixo, deslocamento, feed, passo_max=recuo,
                                 detectar_contato=False)
-        time.sleep(0.05)
-        estado = self._status_home_xy()
+        liberada, estado, amostras = self._confirmar_chave_liberada_home(eixo)
         deslocamento_grbl = self.mpos[indice] - posicao_antes
         pn = pinos_ativos(estado)
         diagnostico = (f"Comando: {eixo}{deslocamento:+.2f} mm; "
                        f"MPos informado: {deslocamento_grbl:+.2f} mm; "
-                       f"Pn:{pn or 'livre'}; estado: {estado.split('|', 1)[0]}.")
-        if eixo in pn:
-            raise RuntimeError(
-                f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm. "
-                f"{diagnostico} Confirme fisicamente o afastamento, a direcao, "
-                "a chave e a fiacao (NO/NC, GND e $5). "
-                + ("Y nao foi iniciado porque X falhou." if eixo == "X" else "")
-            )
+                       f"Pn final:{pn or 'livre'}; "
+                       f"leituras Pn: {' / '.join(amostras)}; "
+                       f"estado: {estado.split('|', 1)[0]}.")
         if abs(deslocamento_grbl - deslocamento) > 0.35:
             raise RuntimeError(
                 f"Recuo {eixo} nao confirmado pela posicao reportada do GRBL. "
                 f"{diagnostico} Pare e verifique comandos, configuracao do eixo e mecanica."
             )
-        registrar_log(f"Home XY: chave {eixo} liberada. {diagnostico}", "ok")
+        if not liberada:
+            raise RuntimeError(
+                f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm. "
+                f"{diagnostico} O GRBL segue detectando o sensor. Se a chave "
+                "solta manualmente, verifique se o acionador ainda a pressiona "
+                f"apos os {recuo:.1f} mm (folga, curso de acionamento e posicionamento). "
+                "Confira o espaco livre e o sentido antes de repetir. "
+                + "Home XY interrompido antes de concluir a referencia."
+            )
+        registrar_log(f"Home XY: chave {eixo} liberada em leituras consecutivas. {diagnostico}", "ok")
 
-    def _home_um_eixo(self, eixo, direcao, curso_max, passo, feed, recuo):
-        """Busca a chave fisica em passos curtos, com curso maximo verificavel."""
-        self._estado_home_xy(f"Buscando chave {eixo}", eixo)
+    def _home_xy_busca_sincronizada(self, direcoes, cursos, passo, feed, recuo):
+        """Busca X/Y juntos; ao achar uma chave, recua seu eixo e o retira da busca."""
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
-            raise RuntimeError("GRBL precisa estar Idle antes da busca.")
-        # Caso a maquina ja esteja sobre o contato, libera primeiro sem buscar alem do limite.
-        if eixo in pinos_ativos(estado):
-            self._recuar_chave_home(eixo, direcao, feed, recuo,
-                                    f"Liberando chave {eixo} inicialmente acionada")
+            raise RuntimeError("GRBL precisa estar Idle antes da busca XY.")
+        for eixo in ("X", "Y"):
+            if eixo in pinos_ativos(estado):
+                self._recuar_chave_home(
+                    eixo, direcoes[eixo], feed, recuo,
+                    f"Liberando chave {eixo} inicialmente acionada",
+                )
+                estado = self._status_home_xy()
 
-        percorrido = 0.0
-        achou = False
-        while percorrido < curso_max - 1e-6:
-            incremento = min(passo, curso_max - percorrido)
-            achou, estado = self._jog_passo_home_xy(eixo, direcao * incremento, feed, passo_max=passo)
-            percorrido += incremento
-            self._estado_home_xy(f"Busca {eixo}: {percorrido:.1f}/{curso_max:.1f} mm", eixo)
-            if achou:
-                break
-        if not achou:
-            raise RuntimeError(f"Chave {eixo} nao encontrada no curso limitado de {curso_max:.1f} mm.")
-
-        # A chave deve continuar acionada apos o motor parar: evita referencia por ruido.
-        time.sleep(0.05)
-        estado = self._status_home_xy()
-        if eixo not in pinos_ativos(estado):
-            raise RuntimeError(f"Leitura da chave {eixo} instavel; nao foi possivel confirmar o contato.")
-        self._recuar_chave_home(eixo, direcao, feed, recuo,
-                                f"Recuando {recuo:.1f} mm da chave {eixo}")
-        registrar_log(f"Home XY: eixo {eixo} referenciado pela chave e recuado {recuo:.1f} mm.", "ok")
+        percorrido = {"X": 0.0, "Y": 0.0}
+        encontrados = set()
+        while len(encontrados) < 2:
+            pendentes = tuple(e for e in ("X", "Y") if e not in encontrados)
+            deslocamentos = {}
+            for eixo in pendentes:
+                restante = cursos[eixo] - percorrido[eixo]
+                if restante < 1e-6:
+                    raise RuntimeError(
+                        f"Chave {eixo} nao encontrada no curso limitado de "
+                        f"{cursos[eixo]:.1f} mm."
+                    )
+                deslocamentos[eixo] = direcoes[eixo] * min(passo, restante)
+            self._estado_home_xy(
+                "Busca sincronizada " + "/".join(pendentes) + ": " +
+                ", ".join(f"{e}={percorrido[e]:.1f}/{cursos[e]:.1f} mm"
+                          for e in pendentes),
+                "/".join(pendentes),
+            )
+            antes = dict(zip(("X", "Y"), self.mpos[:2]))
+            contatos, estado = self._jog_passo_xy_home(
+                deslocamentos, feed, passo_max=passo
+            )
+            for eixo in pendentes:
+                posicao = self.mpos[0 if eixo == "X" else 1]
+                delta = abs(posicao - antes[eixo])
+                percorrido[eixo] += min(abs(deslocamentos[eixo]), delta)
+            if contatos:
+                estado = self._status_home_xy()
+                for eixo in sorted(contatos):
+                    if eixo not in pinos_ativos(estado):
+                        raise RuntimeError(
+                            f"Leitura da chave {eixo} instavel: contato nao "
+                            "persistiu apos a parada."
+                        )
+                for eixo in sorted(contatos):
+                    self._recuar_chave_home(
+                        eixo, direcoes[eixo], feed, recuo,
+                        f"Recuando {recuo:.1f} mm da chave {eixo}",
+                    )
+                    encontrados.add(eixo)
+                    registrar_log(
+                        f"Home XY: {eixo} encontrado e recuado {recuo:.1f} mm.",
+                        "ok",
+                    )
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
-                               recuo=2.0, seguranca_confirmada=False):
+                               recuo=5.0, seguranca_confirmada=False):
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
         bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
@@ -2105,8 +2182,8 @@ class ControladorGRBL:
                 raise ValueError("Home requer passo 0.1..0.5 mm e feed 20..150 mm/min.")
             if not 1.0 <= curso_x <= 320.0 or not 1.0 <= curso_y <= 320.0:
                 raise ValueError("Cursos de busca devem estar no intervalo de 1..320 mm.")
-            if recuo != 2.0:
-                raise ValueError("Esta rotina usa recuo fixo de 2.0 mm.")
+            if recuo != 5.0:
+                raise ValueError("Esta rotina usa recuo fixo de 5.0 mm.")
             if fora_dos_limites(coord_x, coord_y):
                 raise ValueError("Posicao declarada apos o recuo nao pertence aos limites A/B/C/D.")
 
@@ -2123,8 +2200,10 @@ class ControladorGRBL:
             if float(cfg.get("$20", "0")) != 0:
                 raise RuntimeError("$20=1 (soft limits) depende de referencia valida do GRBL; revise $20.")
             self._status_home_xy()
-            self._home_um_eixo("X", direcao_x, curso_x, passo, feed, recuo)
-            self._home_um_eixo("Y", direcao_y, curso_y, passo, feed, recuo)
+            self._home_xy_busca_sincronizada(
+                {"X": direcao_x, "Y": direcao_y},
+                {"X": curso_x, "Y": curso_y}, passo, feed, recuo
+            )
             if _job_abortar or abortar_job_evento.is_set():
                 raise RuntimeError("Home cancelado antes de gravar origem.")
             estado = self._status_home_xy()
@@ -2144,7 +2223,7 @@ class ControladorGRBL:
                 )
             self.home_xy_referenciado = True
             self.home_xy_estado.update({"concluido": True, "fase": "Home XY concluido", "erro": "", "eixo": ""})
-            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo de 2.0 mm em ambos; "
+            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo de 5.0 mm em ambos; "
                    f"G54 definido em X{coord_x:.3f} Y{coord_y:.3f}.")
             registrar_log(msg, "ok")
             return True, msg
@@ -3698,7 +3777,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -3708,7 +3787,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="sidebar-footer">
       <strong>Malha física: 100 × 100 pontos</strong><br>
       Passo nominal 3 mm · extremos separados por 297 mm.<br>
-      Home XY por chaves · recuo de 2 mm · Smart Matrix EESC-USP
+      Home XY por chaves · recuo de 5 mm · Smart Matrix EESC-USP
     </div>
   </aside>
 
@@ -3827,9 +3906,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" onclick="acaoUGS('resume')">▶‖ Resume (~)</button>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
-      <div class="grid-4">
-        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
-        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home por sensores X/Y</button>
+      <div class="grid-2">
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -3868,7 +3945,6 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <button class="jog-btn" onclick="jog(1, -1)">↘</button>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
-          <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home XY (automatico)</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
             <button class="btn" onclick="acaoUGS('zerar_x')">Zerar X0</button>
             <button class="btn" onclick="acaoUGS('zerar_y')">Zerar Y0</button>
@@ -3950,7 +4026,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" onclick="acaoReset('descer')">↓ Descer</button>
         <button class="btn" onclick="acaoReset('subir')">↑ Subir</button>
         <button class="btn" onclick="acaoReset('varrer')">→ Varrer X'</button>
-        <button class="btn" onclick="acaoReset('home')">← Home X'</button>
+        <button class="btn" onclick="acaoReset('home')">← Retornar X' (reset)</button>
       </div>
     </div>
   </section>
@@ -4028,15 +4104,17 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
 <div class="modal-backdrop" id="modal-home">
   <div class="modal">
     <div class="modal-header">
-      <span>⌂ Home XY automatico nas chaves — recuo de 2 mm (sem eixo Z)</span>
+      <span>⌂ Home XY automatico nas chaves — recuo de 5 mm (sem eixo Z)</span>
       <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
     </div>
     <div class="modal-body">
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 busca a chave X e depois a Y, avanca em passos de ate 0,5 mm,
-        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.
-        <strong>Y so inicia se X detectar e liberar sua chave. Se X falhar, Y fica parado por seguranca.</strong><br>
+        O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
+        Quando qualquer chave aciona, cancela o jog conjunto, confirma o contato,
+        recua somente o eixo correspondente em 5,0 mm e continua com o eixo pendente.
+        <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
+        <strong>Verifique o espaco mecanico livre para 5 mm de recuo em ambos os eixos.</strong><br>
         Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
         abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
         Pn:X e Pn:Y devem aparecer somente durante cada acionamento.<br>
@@ -4074,7 +4152,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
         </label>
         <div class="row">
-          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home X e Y — recuo 2 mm</button>
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado — recuo 5 mm</button>
           <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
         </div>
         <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
@@ -4260,7 +4338,7 @@ async function iniciarHomeXY() {
   const seguro = document.getElementById('home-confirmacao-seguranca').checked;
   if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
   if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
-  if (!confirm('A CNC vai movimentar X e Y ATE as chaves selecionadas.\n' +
+  if (!confirm('A CNC buscara X e Y juntos, recuando cada eixo em 5 mm apos contato.\n' +
                'Verifique direcoes, percurso livre, limites maximos, parada fisica e $21=0 / $22=0.\n' +
                'Continuar?')) return;
   const valor = id => Number(document.getElementById(id).value);
@@ -4622,7 +4700,7 @@ async function atualizarStatus() {
     if (st.home_xy) {
       const h = st.home_xy;
       const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
-          : h.referenciado ? 'Home XY referenciado (recuo 2 mm)'
+          : h.referenciado ? 'Home XY referenciado (recuo 5 mm)'
           : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
       document.getElementById('home-xy-status').textContent = resumo;
     }
@@ -5156,7 +5234,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
                 curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
-                coord_x=coord_x, coord_y=coord_y, recuo=2.0,
+                coord_x=coord_x, coord_y=coord_y, recuo=5.0,
                 seguranca_confirmada=True,
             )
             self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
