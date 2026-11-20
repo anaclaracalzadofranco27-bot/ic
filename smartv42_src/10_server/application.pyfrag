@@ -497,7 +497,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
                 curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
-                coord_x=coord_x, coord_y=coord_y, recuo=2.0,
+                coord_x=coord_x, coord_y=coord_y, recuo=5.0,
                 seguranca_confirmada=True,
             )
             self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
