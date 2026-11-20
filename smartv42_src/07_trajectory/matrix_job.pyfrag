@@ -42,12 +42,15 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
     reflitam exatamente a origem fisica configurada (Direita = 0,0 por padrao).
     """
     t0 = time.perf_counter()
-    pontos = montar_pontos(matriz)
+    pontos = [
+        (xi, yi, nivel) for xi, yi, nivel in montar_pontos(matriz)
+        if ponto_na_janela_plotagem(*indice_para_mm_fisico(xi, yi))
+    ]
     cfg_z = obter_estado_config_z()
     on_ms = cfg_z["z_on_ms"]
     off_ms = cfg_z["z_off_ms"]
 
-    origem_desc = "DIREITA (col 99 -> X=0mm)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (col 0 -> X=0mm)"
+    origem_desc = "DIREITA (colunas espelhadas)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (colunas normais)"
     linhas_gcode = [
         "G21 ; unidades em mm",
         "G90 ; posicionamento absoluto",

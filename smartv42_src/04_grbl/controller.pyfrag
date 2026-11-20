@@ -62,6 +62,9 @@ def validar_cantos(tol_mm=3.0):
     Retorna lista de avisos (vazia = coerente).
     """
     avisos = []
+    ok, motivo = validar_calibracao_cantos()
+    if not ok:
+        avisos.append(motivo)
     checks = [
         ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
         ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
@@ -1220,6 +1223,10 @@ def configurar_sistema_coordenadas(
     if limite_y_mm is not None:
         LIMITE_Y_MM = float(limite_y_mm)
 
+    grbl = globals().get("_grbl_global")
+    if grbl is not None:
+        bloquear_z_fisico("Calibracao ou orientacao XY alterada")
+        grbl.invalidar_home_xy("Calibracao/orientacao modificada: execute Home XY novamente.")
     salvar_calibracao_matriz()
     est = obter_estado_coordenadas()
     registrar_log(
