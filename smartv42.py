@@ -4965,7 +4965,7 @@ async function acaoUGS(tipo) {
 async function homeAutomatico() {
   if (!confirm(
     'HOME AUTOMÁTICO\n' +
-    '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 12 mm) e define A = (0,0)\n' +
+    '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 15 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
     '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
     '4) Vai até D e volta para A\n\n' +
@@ -5793,7 +5793,7 @@ HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer po
 HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
-HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
+HOME_AUTO_RECUO_Y_MM = 15.0   # a chave Y precisa de ~15 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
@@ -6355,7 +6355,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
-            recuo_y = float(dados.get("recuo_y", 12.0))
+            recuo_y = float(dados.get("recuo_y", 15.0))
             coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
             coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):

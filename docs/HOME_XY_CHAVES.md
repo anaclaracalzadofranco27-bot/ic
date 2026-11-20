@@ -123,9 +123,9 @@ O botao de perimetro agora inicia a medicao automaticamente quando Y2 ainda nao 
 
 O botão **⌂ Home** junta Home XY, sonda da chave 2 e perímetro, com parâmetros fixos da bancada (`$3=1`: X+ de A para B, Y+ de A para D):
 
-1. Exige confirmação da parada elétrica independente e GRBL conectado. As duas chaves Y usam a mesma entrada; se `Pn:Y` já estiver acionado, a rotina anda Y+ 10 mm. Se soltar, era a chave 1 (lado A). Se continuar acionado, é a chave 2 (lado C/D): volta Y− 22 mm (10 + recuo de 12) e confirma que soltou. Se não soltar, para com erro.
+1. Exige confirmação da parada elétrica independente e GRBL conectado. As duas chaves Y usam a mesma entrada; se `Pn:Y` já estiver acionado, a rotina anda Y+ 10 mm. Se soltar, era a chave 1 (lado A). Se continuar acionado, é a chave 2 (lado C/D): volta Y− 25 mm (10 + recuo de 15) e confirma que soltou. Se não soltar, para com erro.
 2. Volta C/D ao Y nominal (297 mm) antes de medir, para que uma medição anterior não encurte a busca.
-3. Home XY por software: busca sempre X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de **5 mm em X e 12 mm em Y** (a chave Y precisa de ~12 mm para soltar), e grava G54 = A = (0, 0). O recuo aceito no Home vai de 2 a 15 mm por eixo.
+3. Home XY por software: busca sempre X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de **5 mm em X e 15 mm em Y** (a chave Y precisa de ~15 mm para soltar), e grava G54 = A = (0, 0). O recuo aceito no Home vai de 2 a 15 mm por eixo.
 4. Vai de A até B (F250).
 5. Sonda a chave 2 a partir de B em Y+ (mesma rotina `sondar_chave_y_oposta`: aproximação F200 até 25 mm antes do nominal, busca final F120 até **Y = 350 mm**, recuo 4 mm). Se a chave acionar antes de 297 mm, C/D recebem o Y medido; se acionar depois, C/D ficam no nominal de 297 mm. O Home é preservado.
 6. Vai até D e volta para A.
