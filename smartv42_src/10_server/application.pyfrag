@@ -524,7 +524,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 return
             curso_x = float(dados.get("curso_x", 30))
             curso_y = float(dados.get("curso_y", 30))
-            passo = float(dados.get("passo", 0.5))
+            passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
             recuo_y = float(dados.get("recuo_y", 5.0))
