@@ -6,7 +6,7 @@ O novo Home XY da interface usa os pinos X/Y da CNC pela USB, sem enviar $H nem 
 
 1. Confirma o GRBL em Idle e le as chaves pelo status Pn:X e Pn:Y.
 2. Se alguma chave estiver inicialmente acionada, libera essa chave com recuo limitado a 5,0 mm antes de iniciar a busca.
-3. Busca X e Y **juntos** usando um comando de jog XY de ate 0,5 mm por eixo em cada passo, supervisionando Pn:.
+3. Busca X e Y **juntos** usando um comando de jog XY de ate 10 mm por eixo em cada passo, supervisionando Pn:.
 4. Ao detectar uma das chaves, cancela o jog de **ambos os eixos** (byte 0x85), confirma o contato e **recua 5,0 mm no eixo acionado**, sem avancar no outro. Prossegue somente com os eixos restantes ate a deteccao de ambas as chaves.
 5. Confirma a liberacao de X e Y. So depois grava os comandos G21, G90, G54, G92.1 e G10 L20 P1 X... Y..., verificando WPos.
 6. Invalida o Home apos reconexao USB, soft reset, Alarm, Sleep ou alteracao externa de offsets. Jobs ficam bloqueados sem nova referencia confirmada.
@@ -25,7 +25,7 @@ O recuo **comandado** eh de 5,0 mm apos a deteccao, nao uma medida metrologica d
 
 ## Uso na interface
 
-Abra Home XY (chaves), escolha os sentidos reais no GRBL e os cursos maximos de **busca** (1..300 mm por eixo). O padrao de curso e 30 mm por seguranca; aumente somente apos medir o espaco livre. A velocidade de busca tem padrao **500 mm/min** e permite 20..600 mm/min; o passo por segmento e 0,1..0,5 mm. O Y tem **Y negativo preselecionado** por relato de inversao fisica, mas deve ser conferido na bancada. O recuo apos contato continua **5 mm**, nunca 300 mm. Informe G54 X/Y **da posicao final apos recuo**. O padrao e PONTO_A da calibracao; use outra coordenada se a posicao fisica dos sensores nao coincidir com esse ponto. Marque a confirmacao da parada eletrica e inicie.
+Abra Home XY (chaves), escolha os sentidos reais no GRBL e os cursos maximos de **busca** (1..300 mm por eixo). O padrao de curso e 30 mm por seguranca; aumente somente apos medir o espaco livre. A velocidade de busca tem padrao **500 mm/min** e permite 20..600 mm/min; o passo por segmento e 0,1..10 mm. O Y tem **Y negativo preselecionado** por relato de inversao fisica, mas deve ser conferido na bancada. O recuo apos contato continua **5 mm**, nunca 300 mm. Informe G54 X/Y **da posicao final apos recuo**. O padrao e PONTO_A da calibracao; use outra coordenada se a posicao fisica dos sensores nao coincidir com esse ponto. Marque a confirmacao da parada eletrica e inicie.
 
 A rotina roda em background, com progresso e motivos de erro exibidos na interface. O botao Abortar/Reset GRBL permanece disponivel. Apos qualquer erro, Home nao e marcado como concluido.
 
@@ -35,7 +35,7 @@ Nao simula o motor Z, nao envia comandos Z ao GRBL, nao injeta valores falsos de
 
 ## Falhas intermitentes de USB e botao Abortar (2026-11)
 
-- O Home consulta o status do GRBL em intervalos de aproximadamente 150 ms durante os pequenos movimentos, em vez de sondar a cada 25 ms.
+- O Home consulta o status do GRBL em intervalos de aproximadamente 50 ms durante os segmentos de busca, em vez de sondar a cada 25 ms.
 - Se uma consulta `?` voltar sem resposta, tenta mais duas vezes, com pequena pausa. `<Idle|MPos:...>` sem `Pn:` e uma resposta VALIDA com as chaves livres.
 - Se as tres consultas falharem, o programa NAO continua aproximando o cabeçote de uma chave que nao pode confirmar: interrompe e registra o ultimo status recebido para diagnostico.
 - O botao **Abortar** sinaliza a interrupcao imediatamente e envia `!` seguido de `Ctrl+X (0x18)` diretamente pela USB, sem aguardar a trava de leitura de status. O GRBL perde a referencia e precisa de novo Home XY.
@@ -88,3 +88,9 @@ A referencia anexada `smartv42_2.py` foi analisada como exemplo de ergonomia, na
 Os campos **Busca max X/Y** iniciam em **30 mm**, mesmo que o limite superior configuravel seja de 300 mm. Esse limite nao e o recuo de 5 mm. Quando Y conclui seu recuo, X continua sozinho; ao atingir seu limite de busca antes de ver `Pn:X`, o Home interrompe com o motivo `Busca do eixo X encerrada por limite: ...` e informa que Y ja havia sido encontrado. Amplie a busca de X somente depois de medir o deslocamento seguro na direcao correta e confirmar a parada eletrica independente; o limite maximo de 300 mm nao e garantia de curso mecanico protegido.
 
 Apos recuar uma chave, o controle agora pode consultar seu estado durante ate cerca de 2 segundos (duas leituras Idle consecutivas sem `Pn`), sem enviar deslocamento adicional. Se a chave continuar ativa, ou o GRBL entrar em alarme, a rotina nao prossegue para a origem G54. O painel exibe tambem o motivo exato da interrupcao.
+
+## Home mais fluido: distancia de segmento ampliada
+
+O campo **Trecho de busca (mm)** mudou do maximo antigo de **0,5 mm** para **0,1 a 10 mm**, com **5 mm por padrao**. Os motores X e Y, quando ambos estao pendentes, recebem um unico comando coordenado por segmento. O software consulta o GRBL a cada ~50 ms enquanto o comando esta em andamento e solicita cancelamento de jog (0x85) se detectar `Pn:X` ou `Pn:Y`. Apos o contato, somente o eixo encontrado recua e o outro continua em novos segmentos de busca. Se os dois sensores forem encontrados juntos, o recuo e coordenado.
+
+**Diferencie os campos:** trecho de busca (0,1..10 mm) = distancia de cada comando; busca maxima X/Y (ate 300 mm) = distancia acumulada permitida; recuo X/Y (2..10 mm) = afastamento da chave apos o acionamento. Trechos maiores reduzem solavancos mas **nao garantem interrupcao imediata no batente**: o cancelamento depende da USB, do periodo de leitura e da desaceleracao do GRBL. O simulador testa comandos e estados, nao a distancia mecanica real ate parar. Confira o posicionamento das chaves, direcoes e o espaco livre com emergencia eletrica independente antes da operacao real.
