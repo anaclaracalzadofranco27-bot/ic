@@ -244,6 +244,25 @@ class TestarModosZ(unittest.TestCase):
         self.assertFalse(ctrl.home_xy_referenciado)
         self.assertFalse(mod.MODO_Z_FISICO_HABILITADO)
 
+    def test_abort_interrompe_pulso_z_em_andamento_e_desliga_rele(self):
+        self.grbl_fisico_falso()
+        with patch.object(mod, "SIMULADO", False), \
+             patch.object(mod, "GPIO_DISPONIVEL", True), \
+             patch.object(mod, "OutputDevice", ReleFake, create=True):
+            self.assertTrue(mod.habilitar_z_fisico()[0])
+            rele = mod.reles_z[3]
+            def abortar_durante_espera(tempo):
+                mod.abortar_job_evento.set()
+                return True
+            with patch.object(mod.abortar_job_evento, "wait",
+                              side_effect=abortar_durante_espera) as espera:
+                ok, info = mod.acionar_eixo_z(4, pulsos_override=10, on_ms_override=1500)
+            self.assertFalse(ok)
+            self.assertEqual(rele.on_calls, 1)
+            self.assertGreaterEqual(rele.off_calls, 1)
+            self.assertEqual(info["pulsos"], 0)
+            espera.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
