@@ -160,14 +160,14 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 ### Etapa C — Fazer o Home XY pelas chaves
 
 1. Clique no único acesso **Home XY**, na barra de navegação.
-2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada.
+2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada. O novo padrão de Y é **Y− (sugerido)** porque o sentido físico foi relatado invertido; confirme-o com um jog curto, pois o ajuste do firmware $3 pode alterar o sentido real.
 3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
-4. Escolha o passo da busca (**0,1 a 0,5 mm**) e o avanço (**20 a 150 mm/min**).
+4. Escolha o passo de busca (**0,1 a 0,5 mm**) e o avanço (**20 a 600 mm/min**, padrão **500 mm/min**). O curso máximo de busca pode chegar a **300 mm por eixo**, mas inicia em **30 mm** para evitar percursos longos antes de verificar fisicamente a bancada.
 5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
 6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home XY sincronizado — recuo 5 mm**.
 7. Aguarde a indicação **Home XY concluído**.
 
-O programa começa procurando as chaves **X e Y juntas**, com um único jog coordenado por pequeno passo; interrompe o jog conjunto ao detectar uma chave, recua **somente o eixo detectado em 5 mm**, e continua buscando a outra. Quando as duas chaves acionarem e liberarem, define a origem G54. Não utiliza `$H` nem movimenta Z.
+O programa começa procurando as chaves **X e Y juntas**, usando jogs coordenados em pequenos passos. Se somente uma chave acionar, interrompe ambos os motores, recua **o eixo detectado 5 mm** e continua com o eixo pendente. Se ambas acionarem no mesmo passo, **o recuo também será conjunto**. Apenas depois da confirmação da liberação das duas chaves a origem G54 é definida. Não utiliza `$H` nem movimenta Z.
 
 **Importante:** a posição do cabeçote após recuar 5 mm **não é automaticamente o ponto A da matriz**. Só use G54 = (0, 0) se essa posição realmente coincidir com A; caso contrário, informe a posição medida. A repetibilidade do disparo e a precisão dos recuos precisam ser testadas mecanicamente.
 
@@ -363,3 +363,7 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 - [Histórico de correções técnicas A–H](docs/CORRECOES_A_H.md)
 
 **Resumo:** use `smartv42.py` para executar, `smartv42_src/` para modificar, `tests/` para verificar e este README para operar. Comece em **simulação**, valide **Home XY**, teste **XY com Z bloqueado** e só depois habilite o **cabeçote real**, com proteção elétrica independente.
+
+**Atenção ao limite de 300 mm:** ele se refere à **busca da chave**, não ao recuo. O recuo depois do acionamento continua em 5 mm. Como o curso nominal da bancada é aproximadamente 299 mm, confira fisicamente se 300 mm são seguros e não aumente a busca antes dessa verificação. Com hard limits desabilitados ($21=0), o software não substitui uma parada elétrica independente.
+
+**Direção física do Y:** a interface sugere Y negativo no Home. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
