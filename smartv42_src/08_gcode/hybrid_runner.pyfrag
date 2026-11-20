@@ -127,6 +127,11 @@ def validar_programa_antes_movimento(grbl, programa):
                 raise ValueError(f"Linha {bloco['linha']}: XY fora dos cantos calibrados ({wx}, {wy}).")
             posicao = (wx, wy)
         elif bloco["tipo"] == "z":
+            if "gpio" in bloco and bloco["gpio"] != PINOS_GPIO_Z[int(bloco["nivel"]) - 1]:
+                raise ValueError(
+                    f"Linha {bloco['linha']}: GPIO de Z{bloco['nivel']} nao corresponde ao mapa atual. "
+                    "Reimporte o G-code ou restaure o mapa dos pinos."
+                )
             if posicao is None:
                 raise ValueError(f"Linha {bloco['linha']}: acionamento Z sem deslocamento XY anterior.")
             x, y = posicao
