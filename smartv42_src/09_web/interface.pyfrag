@@ -550,11 +550,14 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="modal-body">
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 busca X e Y simultaneamente em trechos coordenados de ate 10 mm
-        por eixo (padrao 5 mm, 10 vezes maior que antes). A leitura do sensor
-        continua ativa durante o movimento, para cancelar o jog ao detectar contato.
-        Trechos maiores exigem espaco livre e chave funcionando: a USB nao garante
-        parada instantanea no batente.
+        O SmartV42 agora <strong>enfileira movimentos XY coordenados no GRBL</strong>
+        sem esperar o motor parar entre cada trecho de busca. O padrao continua
+        em 5 mm por comando, mas o planejador recebe trechos sucessivos.
+        Quando um sensor aciona, cancela a fila, espera o GRBL parar e
+        <strong>recua o eixo acionado no sentido oposto ao da busca</strong>.
+        O outro eixo continua a busca sozinho depois disso.
+        A fila e curta e supervisionada por Pn:, mas a USB nao substitui
+        hard limits ou parada eletrica independente.
         Quando uma chave aciona, o Home interrompe o jog conjunto,
         confirma o contato, recua o eixo correspondente na distancia configurada
         e continua com o eixo pendente.
@@ -568,6 +571,10 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         fisica livre, pois os hard limits estao desativados neste modo.<br>
         A direcao inicial do Y foi sugerida como negativa porque o sentido fisico
         relatado estava invertido; confirme com um movimento curto antes do Home.
+        <strong>Exemplo: busca Y- implica recuo Y+; busca Y+ implica recuo Y-.</strong>
+        Se o Y tocar a chave e nao afastar, confira o comando
+        <code>HOME XY RECUO Y</code> nos logs, o valor atual de $3 e o estado
+        <code>Pn:Y</code>. Nao repita movimentos sem confirmar a direcao real.
         O feed inicial do Home e 500 mm/min, independente do feed de plotagem.<br>
         Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
         abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
