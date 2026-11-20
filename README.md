@@ -381,3 +381,11 @@ O Home usava jogs de apenas **0,5 mm** e reiniciava os motores a cada trecho, pr
 ### Home XY: fluxo continuo no planejador GRBL (sem stop-and-go)
 
 Os trechos `$J` de X/Y sao agora **enfileirados**, sem aguardar `Idle` a cada 5 mm. Enquanto ambos os sensores estao pendentes, cada `$J` contem **X e Y no mesmo bloco**. No primeiro contato, a fila e cancelada pelo byte `0x85`; o programa aguarda a parada, confirma o sensor, realiza recuo no sentido contrario (exemplo: busca Y- -> recuo Y+) e prossegue apenas com o eixo ainda nao encontrado. Os logs `HOME XY FLUXO CONJUNTO` e `HOME XY RECUO Y` esclarecem o que foi comandado. Se `Pn:Y` permanecer ativo, G54 nao e validado. E obrigatoria parada de emergencia eletrica independente, pois o controle por USB nao garante parada instantanea.
+
+### Visualizacao do G-code importado na malha 100x100
+
+A fonte selecionada controla tambem o canvas **Mapa Tatil 2D/3D**. Ao importar um arquivo e escolher **G-code importado**, o servidor converte os movimentos XY para o referencial bilinear dos quatro cantos da malha e desenha os comandos discretos `Z1..Z8` (ou `M42 P1 ; Z_LEVEL=N`) nos respectivos pontos. A vista 3D mostra os niveis Z. A vista 2D tambem sobrepoe a trajetoria em **ciano (G1)** e os deslocamentos **cinza (G0)**, que por si so **nao acionam relevo**.
+
+A legenda informa quantos pinos e acionamentos Z foram encontrados; quando nao houver Z, indica que a previa contem apenas deslocamentos XY. Comandos Z fora dos centros fisicos (desvio maior que 0,35 mm) ou fora da malha sao sinalizados e nao aparecem como pinos validos: o motor de execucao continua fazendo a propria validacao antes de mover.
+
+O desenho da fonte importada **nao substitui a matriz produzida pela IA** nem reescreve o arquivo recebido. Ao selecionar **Matriz 100x100**, o canvas volta a exibir a matriz original. A atualizacao de calibracao dos cantos e refletida na previa quando o painel e recarregado. A existencia de trajetoria XY nao implica pulsos GPIO de Z; sem comandos Z discretos o job nao grava relevo.
