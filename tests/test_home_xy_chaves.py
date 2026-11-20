@@ -94,6 +94,33 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertAlmostEqual(ctrl.mpos[0], -1.0, places=2)
         self.assertAlmostEqual(ctrl.mpos[1], 1.0, places=2)
 
+    def test_chave_x_presa_apos_recuo_exibe_diagnostico_e_nao_inicia_y(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ler_status_original = ctrl._status_home_xy
+        contato_x_ocorreu = [False]
+
+        def status_com_chave_x_presa():
+            estado = ler_status_original()
+            if "X" in mod.pinos_ativos(estado):
+                contato_x_ocorreu[0] = True
+            if contato_x_ocorreu[0] and "X" not in mod.pinos_ativos(estado):
+                if "|Pn:" in estado:
+                    estado = estado.replace("|Pn:", "|Pn:X", 1)
+                else:
+                    estado = estado.replace(">", "|Pn:X>", 1)
+            return estado
+
+        with patch.object(ctrl, "_status_home_xy", side_effect=status_com_chave_x_presa):
+            ok, erro = self.executar_simulado(ctrl)
+        self.assertFalse(ok)
+        self.assertIn("Chave X nao liberou", erro)
+        self.assertIn("MPos informado", erro)
+        self.assertIn("Pn:X", erro)
+        self.assertIn("Y nao foi iniciado", erro)
+        self.assertEqual(ctrl.mpos[1], 0.0)
+        self.assertFalse(ctrl.home_xy_referenciado)
+
     def test_usb_reconectada_invalida_referencia(self):
         ctrl = self.novo_controlador()
         ctrl.home_xy_referenciado = True
