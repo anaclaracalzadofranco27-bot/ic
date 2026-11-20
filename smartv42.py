@@ -2422,7 +2422,7 @@ class ControladorGRBL:
 
     def sondar_chave_y_oposta(self, curso=15.0, feed=120.0,
                              recuo=4.0, passo=1.0, progresso=None,
-                             y_limite_busca=None):
+                             y_limite_busca=None, feed_aproximacao=200.0):
         """Busca Y2 automaticamente desde A ou B, sem JOG manual.
 
         Se ja estiver perto de C/D (modo legado), permite somente a busca
@@ -2442,9 +2442,11 @@ class ControladorGRBL:
             )
         if not self.ser or self.conexao_real == self.modo_simulacao:
             raise RuntimeError("Conexao GRBL ausente ou inconsistente.")
-        valores = (curso, feed, recuo, passo)
+        valores = (curso, feed, recuo, passo, feed_aproximacao)
         if not all(math.isfinite(v) for v in valores):
             raise ValueError("Parametros de sonda Y2 precisam ser finitos.")
+        if not 50.0 <= feed_aproximacao <= 600.0:
+            raise ValueError("Sonda Y2: feed de aproximacao 50..600 mm/min.")
         if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
                 2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
             raise ValueError(
@@ -2524,12 +2526,12 @@ class ControladorGRBL:
                 curso_aproximacao = distancia_prevista - distancia_lenta
                 fase(
                     f"aproximacao monitorada Y2: ate {curso_aproximacao:.1f} mm, "
-                    "F200, trechos de 2 mm. Abortar permanece ativo."
+                    f"F{feed_aproximacao:.0f}, trechos de 2 mm. Abortar permanece ativo."
                 )
                 contatos, _ = self._buscar_xy_em_fluxo_home(
                     ("Y",), {"Y": direcao},
                     {"Y": curso_aproximacao}, {"Y": 0.0},
-                    2.0, 200.0
+                    2.0, feed_aproximacao
                 )
 
             if not contatos:
@@ -5794,7 +5796,9 @@ HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 15.0   # a chave Y precisa de ~15 mm para soltar
-HOME_AUTO_FEED_PERIMETRO = 250.0
+HOME_AUTO_FEED_PERIMETRO = 500.0     # A->B, C->D, D->A
+HOME_AUTO_FEED_CHAVE2_APROX = 400.0  # B->C ate 25 mm antes de 297
+HOME_AUTO_FEED_CHAVE2_BUSCA = 240.0  # B->C perto da chave 2 (ate Y=350)
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
@@ -5931,7 +5935,8 @@ def iniciar_home_automatico(grbl):
 
             _fase("Home 3/4: B -> C procurando a chave 2 de Y")
             medicao = grbl.sondar_chave_y_oposta(
-                curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
+                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA, recuo=4.0, passo=1.0,
+                feed_aproximacao=HOME_AUTO_FEED_CHAVE2_APROX,
                 progresso=lambda t: _fase("Home 3/4: " + t),
                 y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
             )
