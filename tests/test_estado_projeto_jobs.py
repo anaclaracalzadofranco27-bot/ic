@@ -36,8 +36,8 @@ class EstadosIsolados(unittest.TestCase):
             "gcode": mod._gcode_atual,
             "trajetoria": mod._trajetoria_atual,
             "importado": copy.deepcopy(mod.estado_importacao_gcode),
-            "fonte": mod._fonte_job_ativa,
-            "revisao": mod._revisao_estado_projeto,
+            "fonte": mod._repositorio_projeto._fonte,
+            "revisao": mod._repositorio_projeto._revisao,
             "job_em_execucao": mod._job_em_execucao,
             "operacao_manual": mod._operacao_manual,
             "job_abortar": mod._job_abortar,
@@ -52,8 +52,8 @@ class EstadosIsolados(unittest.TestCase):
         mod.estado_importacao_gcode.update({
             "linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False
         })
-        mod._fonte_job_ativa = "matriz"
-        mod._revisao_estado_projeto = 0
+        mod._repositorio_projeto._fonte = "matriz"
+        mod._repositorio_projeto._revisao = 0
         m = np.zeros((100, 100), dtype=np.uint8)
         m[0, 1] = 4
         mod.atualizar_matriz_global(m)
@@ -64,8 +64,8 @@ class EstadosIsolados(unittest.TestCase):
         mod._trajetoria_atual = self.anterior["trajetoria"]
         mod.estado_importacao_gcode.clear()
         mod.estado_importacao_gcode.update(self.anterior["importado"])
-        mod._fonte_job_ativa = self.anterior["fonte"]
-        mod._revisao_estado_projeto = self.anterior["revisao"]
+        mod._repositorio_projeto._fonte = self.anterior["fonte"]
+        mod._repositorio_projeto._revisao = self.anterior["revisao"]
         mod._job_em_execucao = self.anterior["job_em_execucao"]
         mod._operacao_manual = self.anterior["operacao_manual"]
         mod._job_abortar = self.anterior["job_abortar"]

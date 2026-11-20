@@ -156,17 +156,66 @@ def assinatura_geometria_execucao():
     )
 
 
+@dataclass(frozen=True)
+class ConfiguracaoExecucao:
+    """Contrato imutavel do job, independente dos campos editaveis da interface.
+
+    Suporta acesso por chave para compatibilidade com o motor e testes legados.
+    O mapeamento de GPIO e a calibracao sao assinaturas de verificacao, nunca
+    fontes de movimentacao dinamica.
+    """
+    feed_rate: float
+    pulsos_por_nivel: tuple
+    on_ms: float
+    off_ms: float
+    pausa_ms: float
+    auto_reset_apos_plot: bool
+    assinatura_geometria: tuple
+
+    def __getitem__(self, chave):
+        return getattr(self, chave)
+
+    def get(self, chave, default=None):
+        return getattr(self, chave, default)
+
+    def to_dict(self):
+        return {
+            "feed_rate": self.feed_rate,
+            "pulsos_por_nivel": list(self.pulsos_por_nivel),
+            "on_ms": self.on_ms,
+            "off_ms": self.off_ms,
+            "pausa_ms": self.pausa_ms,
+            "auto_reset_apos_plot": self.auto_reset_apos_plot,
+            "assinatura_geometria": self.assinatura_geometria,
+        }
+
+    @classmethod
+    def de_snapshot(cls, valores):
+        if isinstance(valores, cls):
+            return valores
+        # Aceita o antigo dicionario como interface de transicao, sem alias.
+        assinatura = copy.deepcopy(tuple(valores["assinatura_geometria"]))
+        return cls(
+            feed_rate=float(valores["feed_rate"]),
+            pulsos_por_nivel=tuple(int(v) for v in valores["pulsos_por_nivel"]),
+            on_ms=float(valores["on_ms"]), off_ms=float(valores["off_ms"]),
+            pausa_ms=float(valores["pausa_ms"]),
+            auto_reset_apos_plot=bool(valores["auto_reset_apos_plot"]),
+            assinatura_geometria=assinatura,
+        )
+
+
 def capturar_snapshot_parametros_job():
-    """Fotografia dos parametros da UI ao iniciar, usada ate terminar ou abortar."""
+    """Cria uma ConfiguracaoExecucao imutavel antes da reserva do motor."""
     z = obter_estado_config_z()
-    return {
-        "feed_rate": float(FEED_RATE),
-        "pulsos_por_nivel": tuple(int(v) for v in z["pulsos_por_nivel"]),
-        "on_ms": float(z["z_on_ms"]), "off_ms": float(z["z_off_ms"]),
-        "pausa_ms": float(z["pausa_z_ms"]),
-        "auto_reset_apos_plot": bool(AUTO_RESET_APOS_PLOT),
-        "assinatura_geometria": assinatura_geometria_execucao(),
-    }
+    return ConfiguracaoExecucao(
+        feed_rate=float(FEED_RATE),
+        pulsos_por_nivel=tuple(int(v) for v in z["pulsos_por_nivel"]),
+        on_ms=float(z["z_on_ms"]), off_ms=float(z["z_off_ms"]),
+        pausa_ms=float(z["pausa_z_ms"]),
+        auto_reset_apos_plot=bool(AUTO_RESET_APOS_PLOT),
+        assinatura_geometria=assinatura_geometria_execucao(),
+    )
 
 
 def validar_snapshot_geometria_job(snapshot):
@@ -241,55 +290,88 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
     raise RuntimeError(f"Tipo de instrucao invalido: {tipo}")
 
 
-def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
-                                      usar_parametros_arquivo=False, parametros_job=None,
-                                      nome_programa=None):
-    """Motor UNICO de comandos XY/Z, usado por matriz e G-code externo."""
-    global _job_em_execucao, _job_pausado, _job_abortar
-    if not programa:
-        return False
-    # Protege contra edicoes simultaneas do arquivo em memoria apos o inicio.
-    programa = copy.deepcopy(list(programa))
-    config_job = copy.deepcopy(parametros_job if parametros_job is not None
-                               else capturar_snapshot_parametros_job())
-    try:
-        validar_snapshot_geometria_job(config_job)
-    except RuntimeError as exc:
-        registrar_log(str(exc), "erro")
-        return False
-    if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
-        registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
-        return False
-    if config_job["auto_reset_apos_plot"] and origem == "matriz" and reset_ctrl is not None:
-        if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
-            registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
-            return False
-    if any(bloco.get("tipo") == "z" for bloco in programa):
-        modo_z = obter_modo_z_efetivo()
-        if modo_z not in ("simulacao", "completo"):
-            registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
-            return False
-    try:
-        validar_programa_antes_movimento(grbl, programa)
-    except (ValueError, RuntimeError) as exc:
-        registrar_log(f"Programa rejeitado antes de movimentar: {exc}", "erro")
-        return False
-    with _job_lock:
-        if _job_em_execucao or _operacao_manual:
-            registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
-            return False
-        _job_em_execucao = True
-        _job_pausado = False
-        _job_abortar = False
-        abortar_job_evento.clear()
+class MotorExecucaoGCode:
+    """Executor unico: controla preflight, reserva, progresso, blocos e reset.
 
-    def _worker_gcode():
+    Nunca recebe a matriz ou referencias para programas da interface: somente
+    um programa copiado e uma ConfiguracaoExecucao congelada.
+    O GRBL e o controlador Z continuam responsaveis pelos intertravamentos.
+    """
+    def __init__(self, grbl, programa, reset_ctrl=None, origem="gcode",
+                 usar_parametros_arquivo=False, parametros_job=None,
+                 nome_programa=None):
+        self.grbl = grbl
+        self.programa = copy.deepcopy(list(programa)) if programa is not None else []
+        self.reset_ctrl = reset_ctrl
+        self.origem = origem
+        self.usar_parametros_arquivo = bool(usar_parametros_arquivo)
+        self.config_job = ConfiguracaoExecucao.de_snapshot(
+            parametros_job if parametros_job is not None else capturar_snapshot_parametros_job()
+        )
+        self.nome_programa = nome_programa or origem
+
+    def validar_antes_de_reservar(self):
+        if not self.programa:
+            return False
+        try:
+            validar_snapshot_geometria_job(self.config_job)
+            if (hasattr(self.grbl, "home_xy_referenciado")
+                    and not getattr(self.grbl, "modo_simulacao", False)
+                    and not self.grbl.home_xy_referenciado):
+                registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
+                return False
+            if (self.config_job["auto_reset_apos_plot"] and self.origem == "matriz"
+                    and self.reset_ctrl is not None
+                    and bool(getattr(self.grbl, "modo_simulacao", False)) != bool(self.reset_ctrl.simulado)):
+                registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
+                return False
+            if any(b.get("tipo") == "z" for b in self.programa):
+                modo_z = obter_modo_z_efetivo()
+                if modo_z not in ("simulacao", "completo"):
+                    registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
+                    return False
+            validar_programa_antes_movimento(self.grbl, self.programa)
+        except (ValueError, RuntimeError) as exc:
+            registrar_log(f"Programa rejeitado antes de movimentar: {exc}", "erro")
+            return False
+        return True
+
+    def iniciar(self):
+        """Faz uma unica reserva para todos os tipos de programa."""
+        global _job_em_execucao, _job_pausado, _job_abortar
+        if not self.validar_antes_de_reservar():
+            return False
+        with _job_lock:
+            if _job_em_execucao or _operacao_manual:
+                registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
+                return False
+            _job_em_execucao = True
+            _job_pausado = False
+            _job_abortar = False
+            abortar_job_evento.clear()
+        try:
+            threading.Thread(target=self.executar, daemon=True).start()
+        except Exception as exc:
+            with _job_lock:
+                _job_em_execucao = False
+            registrar_log(f"Nao foi possivel iniciar thread do job: {exc}", "erro")
+            return False
+        return True
+
+    def executar(self):
+        """Rotina unica para matriz e G-code externo; nao inicia novas threads."""
         global _job_em_execucao, _job_pausado
+        grbl = self.grbl
+        programa = self.programa
+        reset_ctrl = self.reset_ctrl
+        origem = self.origem
+        config_job = self.config_job
+        usar_parametros_arquivo = self.usar_parametros_arquivo
         _job_progresso.update({
             "ativo": True, "pausado": False, "atual": 0, "total": len(programa),
             "inicio_ts": time.monotonic(), "nivel_z": 0,
-            "origem": origem, "nome_programa": nome_programa or origem,
-            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+            "origem": origem, "nome_programa": self.nome_programa,
+            "usar_parametros_arquivo": usar_parametros_arquivo,
             "parametros_job": {
                 "feed_rate": config_job["feed_rate"], "on_ms": config_job["on_ms"],
                 "off_ms": config_job["off_ms"], "pausa_ms": config_job["pausa_ms"],
@@ -303,15 +385,16 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             if not ok_cal:
                 raise RuntimeError(erro_cal)
             validar_snapshot_geometria_job(config_job)
-            if any(bloco.get("tipo") == "z" for bloco in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
-                raise RuntimeError("Modo Z alterado antes do job; relés Z bloqueados.")
+            if any(b.get("tipo") == "z" for b in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
+                raise RuntimeError("Modo Z alterado antes do job; reles Z bloqueados.")
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
-            # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
             validar_programa_antes_movimento(grbl, programa)
             validar_snapshot_geometria_job(config_job)
-            contexto = {"usar_parametros_arquivo": bool(usar_parametros_arquivo),
-                        "config_job": config_job}
+            contexto = {
+                "usar_parametros_arquivo": usar_parametros_arquivo,
+                "config_job": config_job,
+            }
             for pos, bloco in enumerate(programa, 1):
                 if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
                     raise RuntimeError("Execucao interrompida pelo operador.")
@@ -342,5 +425,13 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             with _job_lock:
                 _job_em_execucao = False
 
-    threading.Thread(target=_worker_gcode, daemon=True).start()
-    return True
+
+def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
+                                      usar_parametros_arquivo=False, parametros_job=None,
+                                      nome_programa=None):
+    """Interface compativel: ambos os tipos de trabalho usam MotorExecucaoGCode."""
+    return MotorExecucaoGCode(
+        grbl, programa, reset_ctrl=reset_ctrl, origem=origem,
+        usar_parametros_arquivo=usar_parametros_arquivo,
+        parametros_job=parametros_job, nome_programa=nome_programa,
+    ).iniciar()
