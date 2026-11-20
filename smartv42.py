@@ -68,8 +68,14 @@ NOME_MODELO = "deeplabv3plus_int8.onnx"
 LIMIAR_IA_PADRAO = 0.42
 
 TAMANHO_MATRIZ = (100, 100)
-LIMITE_X_MM = 297.0
-LIMITE_Y_MM = 297.0
+PASSO_NOMINAL_MALHA_MM = 3.0
+# 100 pontos geram 99 intervalos; extremos fisicos separados por 297 mm.
+EXTENSAO_UTIL_MALHA_MM = (TAMANHO_MATRIZ[1] - 1) * PASSO_NOMINAL_MALHA_MM
+# Faixa nominal 0..299 do mecanismo NAO significa 300 pontos e nao
+# autoriza extrapolar o centro dos pinos para alem dos cantos medidos.
+CURSO_NOMINAL_DESLOCAMENTO_MM = 299.0
+LIMITE_X_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
+LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 
 # -----------------------------------------------------------------------------
 # SINCRONIZAÇÃO DO SISTEMA DE COORDENADAS COM A BANCADA FÍSICA:
@@ -110,16 +116,14 @@ X_FIM_FISICO = 297.000
 Y_FIM_FISICO = -297.000
 
 # =============================================================================
-# JANELA DE DELIMITAÇÃO DE PLOTAGEM DA IMAGEM (mm — COM EIXO Y NEGATIVO)
-# A imagem inteira é delimitada e plotada EXCLUSIVAMENTE nesta região:
-#   - Eixo X: 246.0 <= X <= 270.0 (largura = 24.0 mm)
-#   - Eixo Y: -50.0 <= Y <= -29.0 (29 <= |Y| <= 50, altura = 21.0 mm)
+# JANELA OPCIONAL DE RECORTE: mascara pontos sem reescalar o passo fisico.
+# Padrao: 100x100 pinos sobre a area inteira entre os centros 0..297 mm.
 # =============================================================================
-USAR_JANELA_PLOTAGEM = True
-PLOT_X_MIN = 246.0
-PLOT_X_MAX = 270.0
-PLOT_Y_MIN = -50.0   # Topo da imagem (|Y| = 50 mm)
-PLOT_Y_MAX = -29.0   # Base da imagem (|Y| = 29 mm)
+USAR_JANELA_PLOTAGEM = False
+PLOT_X_MIN = 0.0
+PLOT_X_MAX = 297.0
+PLOT_Y_MIN = -297.0
+PLOT_Y_MAX = 0.0
 
 TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
@@ -253,6 +257,7 @@ def salvar_calibracao_matriz():
         "inverter_jog_y": INVERTER_JOG_Y,
         "sinal_eixo_x": SINAL_EIXO_X,
         "sinal_eixo_y": SINAL_EIXO_Y,
+        "modelo": "100x100_3mm_297mm",
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -262,95 +267,152 @@ def salvar_calibracao_matriz():
 
 
 def carregar_calibracao_matriz():
+    """Carrega configuracao legada apenas se os quatro cantos cobrem 100x100 a 3 mm.
+
+    Uma calibracao antiga de 24x21/247.5 mm NUNCA substitui silenciosamente os
+    pontos de 297 mm. Nao salva nem migra sem intervencao do operador.
+    """
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
     global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
-        with open(ARQUIVO_CALIBRACAO_MATRIZ, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        if "ponto_a" in d and len(d["ponto_a"]) == 2:
-            PONTO_A = [float(d["ponto_a"][0]), float(d["ponto_a"][1])]
-        if "ponto_b" in d and len(d["ponto_b"]) == 2:
-            PONTO_B = [float(d["ponto_b"][0]), float(d["ponto_b"][1])]
-        if "ponto_c" in d and len(d["ponto_c"]) == 2:
-            PONTO_C = [float(d["ponto_c"][0]), float(d["ponto_c"][1])]
-        if "ponto_d" in d and len(d["ponto_d"]) == 2:
-            PONTO_D = [float(d["ponto_d"][0]), float(d["ponto_d"][1])]
-        USAR_CALIBRACAO_4_PONTOS = bool(d.get("usar_calibracao_4_pontos", True))
-        ORIGEM_X_NA_DIREITA = bool(d.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
-        INVERTER_JOG_X = bool(d.get("inverter_jog_x", INVERTER_JOG_X))
-        INVERTER_JOG_Y = bool(d.get("inverter_jog_y", INVERTER_JOG_Y))
-        SINAL_EIXO_X = -1.0 if float(d.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
-        SINAL_EIXO_Y = -1.0 if float(d.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
+        with open(ARQUIVO_CALIBRACAO_MATRIZ, "r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+        nomes = ("ponto_a", "ponto_b", "ponto_c", "ponto_d")
+        pontos = [[float(v) for v in dados[nome]] for nome in nomes]
+        ok, motivo = validar_calibracao_cantos(pontos)
+        if not ok:
+            registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
+            return False
+        origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
+        sx = -1.0 if float(dados.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
+        sy = -1.0 if float(dados.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
+        PONTO_A, PONTO_B, PONTO_C, PONTO_D = pontos
+        USAR_CALIBRACAO_4_PONTOS = True
+        ORIGEM_X_NA_DIREITA = origem_direita
+        INVERTER_JOG_X = bool(dados.get("inverter_jog_x", INVERTER_JOG_X))
+        INVERTER_JOG_Y = bool(dados.get("inverter_jog_y", INVERTER_JOG_Y))
+        SINAL_EIXO_X, SINAL_EIXO_Y = sx, sy
         return True
-    except Exception:
+    except (ValueError, TypeError, KeyError, OSError, json.JSONDecodeError) as exc:
+        registrar_log(f"Calibracao salva invalida e ignorada: {exc}", "erro")
         return False
 
 
+def validar_calibracao_cantos(pontos=None, tolerancia_extensao_mm=12.0):
+    """Exige quatro cantos medidos compativeis com a malha 100x100 de ~3 mm."""
+    pontos = (PONTO_A, PONTO_B, PONTO_C, PONTO_D) if pontos is None else pontos
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in pontos]
+        if len(pts) != 4 or any(not all(math.isfinite(v) for v in p) for p in pts):
+            return False, "Quatro cantos finitos A/B/C/D sao obrigatorios."
+    except (ValueError, TypeError, IndexError):
+        return False, "Coordenadas XY invalidas nos quatro cantos."
+    a, b, c, d = pts
+    edges = [(b[0]-a[0], b[1]-a[1]), (c[0]-b[0], c[1]-b[1]),
+             (d[0]-c[0], d[1]-c[1]), (a[0]-d[0], a[1]-d[1])]
+    distancias = [math.hypot(*e) for e in edges]
+    for i, dist in enumerate(distancias):
+        if abs(dist - EXTENSAO_UTIL_MALHA_MM) > tolerancia_extensao_mm:
+            return False, (
+                f"Calibracao antiga/incompativel: aresta {i+1} tem {dist:.2f} mm; "
+                f"esperado aproximadamente {EXTENSAO_UTIL_MALHA_MM:.1f} mm "
+                "para 100 pinos espacados 3 mm."
+            )
+    cruzamentos = [edges[i][0]*edges[(i+1)%4][1] -
+                   edges[i][1]*edges[(i+1)%4][0] for i in range(4)]
+    if any(abs(c) < 1.0 for c in cruzamentos) or not (
+        all(c > 0 for c in cruzamentos) or all(c < 0 for c in cruzamentos)
+    ):
+        return False, "Cantos degenerados, cruzados ou com orientacao inconsistente."
+    return True, ""
+
+
+def _interpolar_cantos(u, v, pontos=None):
+    """Coordenadas no G54: topo D->C; base A->B; passo real pelos cantos."""
+    a, b, c, d = (PONTO_A, PONTO_B, PONTO_C, PONTO_D) if pontos is None else pontos
+    return (
+        (1-u)*(1-v)*d[0] + u*(1-v)*c[0] + (1-u)*v*a[0] + u*v*b[0],
+        (1-u)*(1-v)*d[1] + u*(1-v)*c[1] + (1-u)*v*a[1] + u*v*b[1],
+    )
+
+
+def _inverter_cantos(x_mm, y_mm):
+    """Inversa numerica da mesma bilinear, inclusive para leve desalinhamento."""
+    if not math.isfinite(float(x_mm)) or not math.isfinite(float(y_mm)):
+        raise ValueError("Coordenadas fisicas nao finitas.")
+    a, b, c, d = [(float(p[0]), float(p[1])) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    ex = (c[0]-d[0], c[1]-d[1])
+    ey = (a[0]-d[0], a[1]-d[1])
+    cruz = (d[0]-c[0]-a[0]+b[0], d[1]-c[1]-a[1]+b[1])
+    det = ex[0]*ey[1]-ex[1]*ey[0]
+    if abs(det) < 1e-9:
+        raise ValueError("Calibracao degenerada: eixo XY nao invertivel.")
+    tx, ty = float(x_mm)-d[0], float(y_mm)-d[1]
+    u = (tx*ey[1]-ty*ey[0])/det
+    v = (ex[0]*ty-ex[1]*tx)/det
+    for _ in range(15):
+        rx = d[0]+ex[0]*u+ey[0]*v+cruz[0]*u*v-float(x_mm)
+        ry = d[1]+ex[1]*u+ey[1]*v+cruz[1]*u*v-float(y_mm)
+        ju = (ex[0]+cruz[0]*v, ex[1]+cruz[1]*v)
+        jv = (ey[0]+cruz[0]*u, ey[1]+cruz[1]*u)
+        determinant = ju[0]*jv[1]-ju[1]*jv[0]
+        if abs(determinant) < 1e-9:
+            raise ValueError("Calibracao bilinear nao invertivel.")
+        du = (rx*jv[1]-ry*jv[0])/determinant
+        dv = (ju[0]*ry-ju[1]*rx)/determinant
+        u -= du
+        v -= dv
+        if max(abs(du), abs(dv)) < 1e-12:
+            break
+    px, py = _interpolar_cantos(u, v)
+    if math.hypot(px-float(x_mm),py-float(y_mm)) > 0.001:
+        raise ValueError("Coordenada fisica incompativel com bilinear.")
+    return u, v
+
+
 def indice_para_mm_fisico(x_idx, y_idx):
-    """
-    Converte o pino (x_idx=coluna [0..99], y_idx=linha [0..99]) do grafico para a coordenada
-    (X_GRBL, Y_GRBL) com eixo Y invertido negativo.
-    Se USAR_JANELA_PLOTAGEM=True, delimita a imagem EXCLUSIVAMENTE em:
-      -  246.0 <= X <= 270.0
-      -  -50.0 <= Y <= -29.0  (lin=0 topo -> Y=-50.0, lin=99 base -> Y=-29.0)
-    Caso contrario, usa a interpolacao bilinear completa dos 4 cantos (PONTO_A..D).
-    """
-    cols = TAMANHO_MATRIZ[1]
-    rows = TAMANHO_MATRIZ[0]
-    u = max(0.0, min(1.0, float(x_idx) / float(max(1, cols - 1))))  # 0.0 (Esquerda) -> 1.0 (Direita)
-    v = max(0.0, min(1.0, float(y_idx) / float(max(1, rows - 1))))  # 0.0 (Topo)     -> 1.0 (Base)
-
-    # Uma unica orientacao X para o mapeamento e sua inversa.
-    # A janela e uma subregiao ABSOLUTA da caixa calibrada; A..D a delimitam.
-    # O sinal X muda a orientacao da imagem, nao multiplica coordenadas absolutas.
-    inverter_u = bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0)
-    if inverter_u:
-        u = 1.0 - u
-
-    if USAR_JANELA_PLOTAGEM:
-        x_min, x_max = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-        # Com Y negativo (SINAL_EIXO_Y < 0): topo (lin=0) fica em y_lo (-50.0) e base (lin=99) em y_hi (-29.0)
-        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
-        x_grbl = x_min + u * (x_max - x_min)
-        y_grbl = y_topo + v * (y_base - y_topo)
-        x_grbl = max(x_min, min(x_max, x_grbl))
-        y_grbl = max(y_lo, min(y_hi, y_grbl))
-        return float(x_grbl), float(y_grbl)
-
-    xa, ya = float(PONTO_A[0]), float(PONTO_A[1])
-    xb, yb = float(PONTO_B[0]), float(PONTO_B[1])
-    xc, yc = float(PONTO_C[0]), float(PONTO_C[1])
-    xd, yd = float(PONTO_D[0]), float(PONTO_D[1])
-
-    x_grbl = (1.0 - u) * (1.0 - v) * xd + u * (1.0 - v) * xc + (1.0 - u) * v * xa + u * v * xb
-    y_grbl = (1.0 - u) * (1.0 - v) * yd + u * (1.0 - v) * yc + (1.0 - u) * v * ya + u * v * yb
-    return float(x_grbl), float(y_grbl)
+    """Um indice logico [0..99] vira sempre um centro fisico da malha."""
+    x_idx, y_idx = float(x_idx), float(y_idx)
+    if not (math.isfinite(x_idx) and math.isfinite(y_idx) and
+            0 <= x_idx <= TAMANHO_MATRIZ[1]-1 and
+            0 <= y_idx <= TAMANHO_MATRIZ[0]-1):
+        raise ValueError("Indice fora da matriz 100x100 (0..99).")
+    u = x_idx/(TAMANHO_MATRIZ[1]-1)
+    v = y_idx/(TAMANHO_MATRIZ[0]-1)
+    if ORIGEM_X_NA_DIREITA:
+        u = 1.0-u
+    return tuple(float(z) for z in _interpolar_cantos(u,v))
 
 
 def mm_fisico_para_indice(x_grbl, y_grbl):
-    """Converte a posicao atual (X_GRBL, Y_GRBL) para (x_idx, y_idx) [0..99] na tela."""
-    cols = TAMANHO_MATRIZ[1]
-    rows = TAMANHO_MATRIZ[0]
-    if USAR_JANELA_PLOTAGEM:
-        x_esq, x_dir = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
-    else:
-        x_esq = 0.5 * (PONTO_A[0] + PONTO_D[0])
-        x_dir = 0.5 * (PONTO_B[0] + PONTO_C[0])
-        y_topo = 0.5 * (PONTO_D[1] + PONTO_C[1])
-        y_base = 0.5 * (PONTO_A[1] + PONTO_B[1])
+    """Inversa exata da transformacao de centros, independente do recorte."""
+    u, v = _inverter_cantos(x_grbl, y_grbl)
+    if ORIGEM_X_NA_DIREITA:
+        u = 1.0-u
+    return (int(round(max(0, min(1, u))*(TAMANHO_MATRIZ[1]-1))),
+            int(round(max(0, min(1, v))*(TAMANHO_MATRIZ[0]-1))))
 
-    u = ((float(x_grbl) - x_esq) / (x_dir - x_esq)) if abs(x_dir - x_esq) > 1e-6 else 0.0
-    if bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0):
-        u = 1.0 - u
-    v = ((float(y_grbl) - y_topo) / (y_base - y_topo)) if abs(y_base - y_topo) > 1e-6 else 0.0
-    u = max(0.0, min(1.0, u))
-    v = max(0.0, min(1.0, v))
-    return int(round(u * (cols - 1))), int(round(v * (rows - 1)))
+
+def ponto_na_janela_plotagem(x_mm, y_mm, tolerancia_mm=1e-6):
+    """Janela e uma mascara; nao muda nunca as coordenadas dos 100x100 centros."""
+    if not USAR_JANELA_PLOTAGEM:
+        return True
+    return (min(PLOT_X_MIN,PLOT_X_MAX)-tolerancia_mm <= x_mm <=
+            max(PLOT_X_MIN,PLOT_X_MAX)+tolerancia_mm and
+            min(PLOT_Y_MIN,PLOT_Y_MAX)-tolerancia_mm <= y_mm <=
+            max(PLOT_Y_MIN,PLOT_Y_MAX)+tolerancia_mm)
+
+
+def desvio_centro_malha_mm(x_mm, y_mm):
+    """Distancia ao centro fisico mais proximo para validar pressionamentos Z."""
+    u, v = _inverter_cantos(x_mm, y_mm)
+    if not (-0.001 <= u <= 1.001 and -0.001 <= v <= 1.001):
+        return float("inf")
+    idx_x, idx_y = mm_fisico_para_indice(x_mm, y_mm)
+    px, py = indice_para_mm_fisico(idx_x, idx_y)
+    return math.hypot(x_mm-px, y_mm-py)
 
 
 def obter_estado_coordenadas():
@@ -378,6 +440,10 @@ def obter_estado_coordenadas():
         "y_fim_fisico": round(float(PONTO_C[1]), 3),
         "limite_x_mm": LIMITE_X_MM,
         "limite_y_mm": LIMITE_Y_MM,
+        "passo_nominal_mm": PASSO_NOMINAL_MALHA_MM,
+        "extensao_util_mm": EXTENSAO_UTIL_MALHA_MM,
+        "curso_nominal_mm": CURSO_NOMINAL_DESLOCAMENTO_MM,
+        "modelo": "100x100_3mm_297mm",
         "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
         "plot_x_min": PLOT_X_MIN,
         "plot_x_max": PLOT_X_MAX,
@@ -958,19 +1024,17 @@ def avaliar_status_para_mover(status):
 
 
 def fora_dos_limites(x_mm, y_mm):
+    """Area segura de trabalho limitada pelos cantos medidos de 297 mm.
+
+    A escala nominal de movimentacao 0..299 NAO acrescenta pontos fisicos nem
+    libera deslocamentos fora da area medida sem verificacao mecanica.
     """
-    Verifica limites respeitando os 4 cantos físicos calibrados (PONTO_A, PONTO_B, PONTO_C, PONTO_D),
-    permitindo toda a faixa real medida na bancada (ex: X de 0 a 450, Y de -500 a +500).
-    """
-    # Uma janela de 30 mm alem dos cantos nao e intertravamento seguro.
-    margem = 0.0
-    xs = [p[0] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    ys = [p[1] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    if x_mm < min(xs) - margem or x_mm > max(xs) + margem:
+    try:
+        u, v = _inverter_cantos(x_mm, y_mm)
+    except (ValueError, TypeError, ZeroDivisionError):
         return True
-    if y_mm < min(ys) - margem or y_mm > max(ys) + margem:
-        return True
-    return False
+    margem = 0.0002  # ~0.06 mm para arredondamentos G-code de tres casas
+    return not (-margem <= u <= 1.0+margem and -margem <= v <= 1.0+margem)
 
 
 def validar_cantos(tol_mm=3.0):
@@ -981,6 +1045,9 @@ def validar_cantos(tol_mm=3.0):
     Retorna lista de avisos (vazia = coerente).
     """
     avisos = []
+    ok, motivo = validar_calibracao_cantos()
+    if not ok:
+        avisos.append(motivo)
     checks = [
         ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
         ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
@@ -1844,26 +1911,9 @@ class ControladorGRBL:
         return False, status
 
     def zerar_eixo(self, eixo="XY", valor_x=0.0, valor_y=0.0, valor_z=0.0):
-        eixo = eixo.upper()
-        if "Z" in eixo:
-            registrar_log("Z nao e eixo cartesiano; zeramento GRBL limitado a XY.", "aviso")
-            eixo = eixo.replace("Z", "")
-        if not eixo or any(letra not in "XY" for letra in eixo):
-            return False
-        partes = []
-        if "X" in eixo:
-            partes.append(f"X{float(valor_x):.3f}")
-        if "Y" in eixo:
-            partes.append(f"Y{float(valor_y):.3f}")
-        if "Z" in eixo:
-            partes.append(f"Z{float(valor_z):.3f}")
-        coords = " ".join(partes) if partes else "X0 Y0"
-        ok1, _ = self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
-        ok2, _ = self.enviar_comando(f"G92 {coords}", logar=False)
-        self.atualizar_status()
-        if ok1 and ok2:
-            registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
-        return bool(ok1 and ok2)
+        # Origem de trabalho e definida APENAS apos as chaves X/Y e recuo de 2 mm.
+        registrar_log("Zeramento manual/G92 desativado: use Home XY pelas chaves.", "erro")
+        return False
 
 
     def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
@@ -2056,63 +2106,10 @@ class ControladorGRBL:
         registrar_log("Home $H desabilitado nesta instalacao: exige Z. Use Home XY por chaves.", "erro")
         return False
 
-    def calibrar_home(
-        self,
-        modo="manual_aqui",
-        offset_x=0.0,
-        offset_y=0.0,
-        offset_z=0.0,
-        salvar_g28=True,
-        zerar_mpos_reset=False,
-        homing_dir_mask=None,
-        homing_pulloff_mm=None,
-        homing_feed=None,
-        homing_seek=None,
-    ):
-        registrar_log(f"Iniciando Calibração de Home (modo={modo})...", "info")
+    def calibrar_home(self, *args, **kwargs):
+        registrar_log("Calibracao manual e homing $H desativados; execute Home XY automatico.", "erro")
+        return False
 
-        if homing_dir_mask is not None:
-            self.gravar_parametro_grbl("$22", 1)
-            self.gravar_parametro_grbl("$23", int(homing_dir_mask))
-        if homing_feed is not None and float(homing_feed) > 0:
-            self.gravar_parametro_grbl("$24", f"{float(homing_feed):.3f}")
-        if homing_seek is not None and float(homing_seek) > 0:
-            self.gravar_parametro_grbl("$25", f"{float(homing_seek):.3f}")
-        if homing_pulloff_mm is not None and float(homing_pulloff_mm) >= 0:
-            self.gravar_parametro_grbl("$27", f"{float(homing_pulloff_mm):.3f}")
-
-        if modo == "gravar_eeprom_home":
-            registrar_log("Parâmetros de Homing ($22, $23, $24, $25, $27) gravados na EEPROM do GRBL!", "ok")
-            return True
-
-        if modo == "homing_chave":
-            ok_h = self.executar_homing()
-            if not ok_h:
-                return False
-            if abs(offset_x) > 1e-6 or abs(offset_y) > 1e-6 or abs(offset_z) > 1e-6:
-                self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
-            if salvar_g28:
-                self.enviar_comando("G28.1", logar=False)
-            self.atualizar_status()
-            registrar_log("Calibração de Home com Fim de Curso ($H + G28.1) concluída!", "ok")
-            return True
-
-        if zerar_mpos_reset:
-            self.soft_reset()
-            time.sleep(0.2)
-            self.enviar_comando("$X", logar=False)
-            self.enviar_comando("G21 G90", logar=False)
-
-        self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
-        if salvar_g28:
-            self.enviar_comando("G28.1", logar=False)
-        self.atualizar_status()
-        registrar_log(
-            f"Home Manual calibrado na posição atual (Extremidade Direita = 0,0) -> WPos=({offset_x:.2f}, {offset_y:.2f}, {offset_z:.2f}) "
-            f"{'+ G28.1 salvo' if salvar_g28 else ''}!",
-            "ok",
-        )
-        return True
 
     def ir_para_g28(self):
         ok, _ = self.enviar_comando("G28")
@@ -2162,82 +2159,63 @@ class ControladorGRBL:
 
 
 def configurar_sistema_coordenadas(
-    origem_x_na_direita=None,
-    sinal_eixo_x=None,
-    sinal_eixo_y=None,
-    inverter_jog_x=None,
-    inverter_jog_y=None,
-    limite_x_mm=None,
-    limite_y_mm=None,
-    x_inicio_fisico=None,
-    y_inicio_fisico=None,
-    x_fim_fisico=None,
-    y_fim_fisico=None,
-    ponto_a=None,
-    ponto_b=None,
-    ponto_c=None,
-    ponto_d=None,
+    origem_x_na_direita=None, sinal_eixo_x=None, sinal_eixo_y=None,
+    inverter_jog_x=None, inverter_jog_y=None, limite_x_mm=None,
+    limite_y_mm=None, x_inicio_fisico=None, y_inicio_fisico=None,
+    x_fim_fisico=None, y_fim_fisico=None,
+    ponto_a=None, ponto_b=None, ponto_c=None, ponto_d=None,
 ):
-    """
-    Atualiza em tempo real a orientação e a caixa física real da matriz (X_INICIO..X_FIM, Y_INICIO..Y_FIM).
-    Salva automaticamente em calibracao_matriz.json para persistir entre execuções.
-    """
-    global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y, INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
-    global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO, PONTO_A, PONTO_B, PONTO_C, PONTO_D
-    if ponto_a is not None and len(ponto_a) == 2:
-        PONTO_A = [float(ponto_a[0]), float(ponto_a[1])]
-    if ponto_b is not None and len(ponto_b) == 2:
-        PONTO_B = [float(ponto_b[0]), float(ponto_b[1])]
-    if ponto_c is not None and len(ponto_c) == 2:
-        PONTO_C = [float(ponto_c[0]), float(ponto_c[1])]
-    if ponto_d is not None and len(ponto_d) == 2:
-        PONTO_D = [float(ponto_d[0]), float(ponto_d[1])]
+    """Calibracao atomica. Mudar sentido de jog nunca altera geometria A/B/C/D."""
+    global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y
+    global INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
+    global PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO
 
+    candidatos = [
+        list(PONTO_A if ponto_a is None else ponto_a),
+        list(PONTO_B if ponto_b is None else ponto_b),
+        list(PONTO_C if ponto_c is None else ponto_c),
+        list(PONTO_D if ponto_d is None else ponto_d),
+    ]
+    ok, motivo = validar_calibracao_cantos(candidatos)
+    if not ok:
+        raise ValueError(f"Calibracao recusada: {motivo}")
+    candidatos = [[float(x), float(y)] for x,y in candidatos]
+    if limite_x_mm is not None and (not math.isfinite(float(limite_x_mm)) or float(limite_x_mm) < EXTENSAO_UTIL_MALHA_MM):
+        raise ValueError("Limite X precisa cobrir os 297 mm medidos.")
+    if limite_y_mm is not None and (not math.isfinite(float(limite_y_mm)) or float(limite_y_mm) < EXTENSAO_UTIL_MALHA_MM):
+        raise ValueError("Limite Y precisa cobrir os 297 mm medidos.")
+    if any(v is not None for v in (x_inicio_fisico,y_inicio_fisico,x_fim_fisico,y_fim_fisico)):
+        raise ValueError("Limites fisicos legados desativados: use somente os quatro cantos A/B/C/D.")
+    # Os quatro cantos descrevem diretamente a posicao fisica no sistema G54.
+    PONTO_A, PONTO_B, PONTO_C, PONTO_D = candidatos
+    X_INICIO_FISICO, Y_INICIO_FISICO = PONTO_A
+    X_FIM_FISICO, Y_FIM_FISICO = PONTO_C
     if origem_x_na_direita is not None:
         ORIGEM_X_NA_DIREITA = bool(origem_x_na_direita)
     if sinal_eixo_x is not None:
         SINAL_EIXO_X = -1.0 if float(sinal_eixo_x) < 0 else 1.0
-        if x_fim_fisico is None:
-            larg_atual = abs(X_FIM_FISICO - X_INICIO_FISICO) or 247.5
-            X_FIM_FISICO = X_INICIO_FISICO + larg_atual * SINAL_EIXO_X
     if sinal_eixo_y is not None:
         SINAL_EIXO_Y = -1.0 if float(sinal_eixo_y) < 0 else 1.0
-        if y_fim_fisico is None:
-            alt_atual = abs(Y_FIM_FISICO - Y_INICIO_FISICO) or 247.5
-            Y_FIM_FISICO = Y_INICIO_FISICO + alt_atual * SINAL_EIXO_Y
     if inverter_jog_x is not None:
         INVERTER_JOG_X = bool(inverter_jog_x)
     if inverter_jog_y is not None:
         INVERTER_JOG_Y = bool(inverter_jog_y)
-    if x_inicio_fisico is not None:
-        X_INICIO_FISICO = float(x_inicio_fisico)
-    if y_inicio_fisico is not None:
-        Y_INICIO_FISICO = float(y_inicio_fisico)
-    if x_fim_fisico is not None:
-        X_FIM_FISICO = float(x_fim_fisico)
-        SINAL_EIXO_X = -1.0 if (X_FIM_FISICO - X_INICIO_FISICO) < 0 else 1.0
-    if y_fim_fisico is not None:
-        Y_FIM_FISICO = float(y_fim_fisico)
-        SINAL_EIXO_Y = -1.0 if (Y_FIM_FISICO - Y_INICIO_FISICO) < 0 else 1.0
-    if limite_x_mm is not None and float(limite_x_mm) > 0:
+    if limite_x_mm is not None:
         LIMITE_X_MM = float(limite_x_mm)
-    if limite_y_mm is not None and float(limite_y_mm) > 0:
+    if limite_y_mm is not None:
         LIMITE_Y_MM = float(limite_y_mm)
 
-    LIMITE_X_MM = max(abs(LIMITE_X_MM or 250.0), abs(X_INICIO_FISICO), abs(X_FIM_FISICO))
-    LIMITE_Y_MM = max(abs(LIMITE_Y_MM or 250.0), abs(Y_INICIO_FISICO), abs(Y_FIM_FISICO))
-
+    grbl = globals().get("_grbl_global")
+    if grbl is not None:
+        bloquear_z_fisico("Calibracao ou orientacao XY alterada")
+        grbl.invalidar_home_xy("Calibracao/orientacao modificada: execute Home XY novamente.")
     salvar_calibracao_matriz()
     est = obter_estado_coordenadas()
-    msg = (
-        f"4 Cantos Calibrados: A={est['ponto_a']} | B={est['ponto_b']} | "
-        f"C={est['ponto_c']} | D={est['ponto_d']} | "
-        f"Centro da Flor (50,50)=({est['x_meio_fisico']}, {est['y_meio_fisico']})"
+    registrar_log(
+        f"Malha 100x100, passo ~3 mm: cantos A={PONTO_A}, B={PONTO_B}, C={PONTO_C}, D={PONTO_D}",
+        "ok",
     )
-    registrar_log(msg, "ok")
-    registrar_terminal("SYS", msg, "ok")
-    for aviso in est.get("avisos", []):
-        registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
     return est
 
 
@@ -2887,12 +2865,15 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
     reflitam exatamente a origem fisica configurada (Direita = 0,0 por padrao).
     """
     t0 = time.perf_counter()
-    pontos = montar_pontos(matriz)
+    pontos = [
+        (xi, yi, nivel) for xi, yi, nivel in montar_pontos(matriz)
+        if ponto_na_janela_plotagem(*indice_para_mm_fisico(xi, yi))
+    ]
     cfg_z = obter_estado_config_z()
     on_ms = cfg_z["z_on_ms"]
     off_ms = cfg_z["z_off_ms"]
 
-    origem_desc = "DIREITA (col 99 -> X=0mm)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (col 0 -> X=0mm)"
+    origem_desc = "DIREITA (colunas espelhadas)" if ORIGEM_X_NA_DIREITA else "ESQUERDA (colunas normais)"
     linhas_gcode = [
         "G21 ; unidades em mm",
         "G90 ; posicionamento absoluto",
@@ -3005,22 +2986,25 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
 
 
 def validar_janela_calibrada():
-    """Impede usar calibracao antiga que nao cobre a janela de plotagem."""
-    xs = [float(p[0]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    ys = [float(p[1]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    if not all(math.isfinite(v) for v in xs + ys):
-        return False, "Calibracao tem coordenadas nao finitas."
+    """Confere geometria 100x100, passo nominal 3 mm e recorte espacial."""
+    ok, motivo = validar_calibracao_cantos()
+    if not ok:
+        return False, motivo
     if not USAR_JANELA_PLOTAGEM:
         return True, ""
-    if (min(xs) > min(PLOT_X_MIN, PLOT_X_MAX) or
-            max(xs) < max(PLOT_X_MIN, PLOT_X_MAX) or
-            min(ys) > min(PLOT_Y_MIN, PLOT_Y_MAX) or
-            max(ys) < max(PLOT_Y_MIN, PLOT_Y_MAX)):
-        return False, (
-            "CALIBRACAO INCOMPATIVEL com a janela de plotagem. "
-            "Confira calibracao_matriz.json: v41/v42 utilizam Y negativo. "
-            "Calibre os quatro cantos antes de mover a maquina."
-        )
+    janela = (float(PLOT_X_MIN), float(PLOT_X_MAX), float(PLOT_Y_MIN), float(PLOT_Y_MAX))
+    if not all(math.isfinite(v) for v in janela):
+        return False, "Janela de plotagem nao finita."
+    if abs(janela[1]-janela[0]) < 1e-6 or abs(janela[3]-janela[2]) < 1e-6:
+        return False, "Janela de plotagem deve ter largura e altura positivas."
+    # A janela e um recorte opcional: precisa intersectar algum centro da malha.
+    encontrou = any(
+        ponto_na_janela_plotagem(*indice_para_mm_fisico(i, j))
+        for i in range(TAMANHO_MATRIZ[1])
+        for j in range(TAMANHO_MATRIZ[0])
+    )
+    if not encontrou:
+        return False, "Janela nao contem nenhum centro da malha (passo de 3 mm)."
     return True, ""
 
 
@@ -3127,11 +3111,13 @@ def validar_programa_antes_movimento(grbl, programa):
             if posicao is None:
                 raise ValueError(f"Linha {bloco['linha']}: acionamento Z sem deslocamento XY anterior.")
             x, y = posicao
-            if USAR_JANELA_PLOTAGEM and not (
-                min(PLOT_X_MIN, PLOT_X_MAX) - 1e-6 <= x <= max(PLOT_X_MIN, PLOT_X_MAX) + 1e-6
-                and min(PLOT_Y_MIN, PLOT_Y_MAX) - 1e-6 <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX) + 1e-6
-            ):
+            if not ponto_na_janela_plotagem(x, y):
                 raise ValueError(f"Linha {bloco['linha']}: Z fora da janela em ({x}, {y}).")
+            if desvio_centro_malha_mm(x, y) > 0.35:
+                raise ValueError(
+                    f"Linha {bloco['linha']}: Z em ({x:.3f}, {y:.3f}) fora dos centros "
+                    "fisicos da matriz (100x100, passo ~3 mm)."
+                )
     return True
 
 
@@ -3161,10 +3147,10 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
         if pos is None:
             raise RuntimeError("Z bloqueado: nenhum movimento XY concluido.")
         x, y = pos
-        if USAR_JANELA_PLOTAGEM:
-            if not (min(PLOT_X_MIN, PLOT_X_MAX) <= x <= max(PLOT_X_MIN, PLOT_X_MAX)
-                    and min(PLOT_Y_MIN, PLOT_Y_MAX) <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX)):
-                raise RuntimeError(f"Z fora da janela em X={x:.3f}, Y={y:.3f}.")
+        if not ponto_na_janela_plotagem(x,y):
+            raise RuntimeError(f"Z fora da janela em X={x:.3f}, Y={y:.3f}.")
+        if desvio_centro_malha_mm(x,y) > 0.35:
+            raise RuntimeError("Z recusado fora do centro fisico de um pino (passo ~3 mm).")
         if not aguardar_liberacao_z():
             raise RuntimeError("Z interrompido durante pausa.")
         pronto, motivo = grbl.aguardar_grbl_idle()
@@ -3501,9 +3487,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <button class="nav-btn" onclick="exportarGCode()">⬇ Exportar G-Code</button>
 
     <div class="sidebar-footer">
-      <strong>Origem (0,0) na Direita:</strong><br>
-      Coluna 99 (direita da imagem) mapeada em X=0.0mm e Coluna 0 (esquerda) em X=247.5mm.<br>
-      Smart Matrix • EESC-USP
+      <strong>Malha física: 100 × 100 pontos</strong><br>
+      Passo nominal 3 mm · extremos separados por 297 mm.<br>
+      Home XY por chaves · recuo de 2 mm · Smart Matrix EESC-USP
     </div>
   </aside>
 
@@ -3586,21 +3572,16 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_d')">📍D</button>
       </div>
-      <div style="font-size:10px;color:#34d399;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:5px;padding:4px 6px;margin-top:4px;font-family:monospace;">
-        Janela Plotagem (Y negativo): X=[246.0 .. 270.0] | Y=[-50.0 .. -29.0]
+      <div id="janela-matriz-info" style="font-size:10px;color:#34d399;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:5px;padding:4px 6px;margin-top:4px;font-family:monospace;">
+        Matriz 100 × 100 · passo 3 mm · extensão útil 297 × 297 mm · 299 mm é faixa nominal do movimento.
       </div>
       <div id="lbl-avisos" style="display:none;white-space:pre-wrap;font-size:10px;color:#fbbf24;background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:5px;padding:5px;margin-top:4px;"></div>
       <div class="row" style="justify-content:space-between;font-size:10.5px;margin-top:4px;">
         <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=258.00, Y=-39.50</span>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
-      <div class="row" style="justify-content:space-between;font-size:9.5px;margin-top:3px;">
-        <span style="color:var(--muted);">Carro esta agora em:</span>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_a')" title="Define a posicao atual do GRBL como Ponto A (G92)">Aqui=A</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_b')" title="Define a posicao atual do GRBL como Ponto B (G92)">Aqui=B</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_c')" title="Define a posicao atual do GRBL como Ponto C (G92)">Aqui=C</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_d')" title="Define a posicao atual do GRBL como Ponto D (G92)">Aqui=D</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_meio')" title="Define a posicao atual do GRBL como Centro (50,50)">Aqui=Meio</button>
+      <div style="font-size:10px;color:var(--muted);margin:5px 0;">
+        Os cantos A/B/C/D são os centros extremos no G54. Defina a origem somente pelo Home XY com chaves, não pelo G92.
       </div>
       <div class="row" style="justify-content:space-between;font-size:10px;">
         <button class="btn btn-sky" style="padding:2px 6px;font-size:9.5px;" onclick="resetarQuadrado297()">↺ Padrao 297x297 (A..D)</button>
@@ -3854,8 +3835,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
           <label>Feed (mm/min) <input id="home-feed" type="number" min="20" max="150" step="10" value="120" style="width:75px;"></label>
-          <label>G54 X apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
-          <label>G54 Y apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
         <label style="font-size:11px;display:flex;gap:6px;align-items:flex-start;">
           <input type="checkbox" id="home-confirmacao-seguranca" style="width:auto;">
@@ -3873,7 +3854,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" onclick="abrirModal('modal-terminal')">⌨ Verificar $21, $22 e Pn:</button>
       </div>
       <div class="card">
-        <div class="card-title"><span>Ajuste Fino de Direcao e Limites Fisicos (250 mm x 250 mm)</span></div>
+        <div class="card-title"><span>Sentido dos motores · malha útil ~297 × 297 mm</span></div>
         <div class="row">
           <span>Se ao mandar ir para a esquerda o motor andar para a direita:</span>
           <button class="btn btn-amber" onclick="inverterMotorXGrbl()">⇄ Inverter Direcao do Motor X no GRBL ($3)</button>
@@ -3896,7 +3877,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <div style="font-size:11px;color:var(--muted);">
-        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
+        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>Home XY via interface</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
       </div>
       <div class="log-box" id="term-historico" style="height:280px;font-size:11.5px;"></div>
       <div class="row">
@@ -3970,6 +3951,7 @@ async function aplicarConfigCoordenadas() {
     ponto_c: pc,
     ponto_d: pd
   });
+  if (!r.ok) { alert(r.erro || 'Calibracao recusada. Confira a distancia entre centros extremos.'); return; }
   if (r.coord) configCoord = r.coord;
   await carregarEstadoInicial();
 }
@@ -3988,6 +3970,7 @@ async function resetarQuadrado297() {
 
 async function calibrarCantoMatriz(etapa) {
   const r = await apiPost('calibrar_caixa_fisica', { etapa });
+  if (!r.ok) { alert(r.erro || 'Calibracao/posicionamento recusado.'); return; }
   if (r.coord) configCoord = r.coord;
   await carregarEstadoInicial();
   await atualizarStatus();
@@ -4294,7 +4277,10 @@ async function carregarEstadoInicial() {
       document.getElementById('inp-xd').value = d.coord.ponto_d[0];
       document.getElementById('inp-yd').value = d.coord.ponto_d[1];
     }
-    document.getElementById('lbl-meio-fisico').textContent = `Centro(50,50): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+    document.getElementById('lbl-meio-fisico').textContent = `Centro (49,5;49,5): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+    document.getElementById('janela-matriz-info').textContent = d.coord.usar_janela_plotagem
+      ? `Recorte: X[${d.coord.plot_x_min},${d.coord.plot_x_max}], Y[${d.coord.plot_y_min},${d.coord.plot_y_max}] · passo físico não muda`
+      : 'Malha completa 100 × 100 · passo 3 mm · 297 mm entre centros extremos · faixa nominal 299 mm';
     const av = document.getElementById('lbl-avisos');
     av.style.display = (d.coord.avisos && d.coord.avisos.length) ? 'block' : 'none';
     av.textContent = (d.coord.avisos || []).map(a => '⚠ ' + a).join('\n');
@@ -4557,20 +4543,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
                 return
             if etapa in ("sync_a", "sync_b", "sync_c", "sync_d", "sync_meio"):
-                xm, ym = indice_para_mm_fisico(49.5, 49.5)
-                alvo = {
-                    "sync_a": PONTO_A,
-                    "sync_b": PONTO_B,
-                    "sync_c": PONTO_C,
-                    "sync_d": PONTO_D,
-                    "sync_meio": [xm, ym],
-                }[etapa]
-                nome_p = etapa.replace("sync_", "").upper()
-                _grbl_global.enviar_comando(f"G10 P0 L20 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
-                _grbl_global.enviar_comando(f"G92 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
-                _grbl_global.atualizar_status()
-                registrar_log(f"Posicao atual sincronizada como Ponto {nome_p}: X={alvo[0]:.3f}, Y={alvo[1]:.3f}")
-                self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Zeramento G92 manual removido; a origem G54 e definida apenas pelo Home XY nas chaves."
+                }, 409)
                 return
             if etapa == "ir_meio":
                 xm, ym = indice_para_mm_fisico(49.5, 49.5)
@@ -4697,17 +4673,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "home_grbl":
                 self._enviar_json({"ok": False, "erro": "Home $H desabilitado: use Home XY por chaves sem Z."}, 409)
                 return
-            elif cmd == "definir_home_manual":
-                ok_manual = _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+            elif cmd in ("definir_home_manual", "zerar_x", "zerar_y"):
                 self._enviar_json({
-                    "ok": bool(ok_manual), "erro": None if ok_manual else "Falha ao definir referencia manual.",
-                    "aviso": "Origem manual nao substitui Home XY por chaves.",
-                })
+                    "ok": False,
+                    "erro": "Origem manual desativada: faca Home XY pelas chaves, com recuo de 2 mm."
+                }, 409)
                 return
-            elif cmd == "zerar_x":
-                _grbl_global.zerar_eixo("X")
-            elif cmd == "zerar_y":
-                _grbl_global.zerar_eixo("Y")
             elif cmd == "ir_zero_trabalho":
                 _grbl_global.voltar_origem()
             elif cmd == "ir_g28":
