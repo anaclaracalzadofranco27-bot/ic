@@ -980,7 +980,7 @@ class ControladorGRBL:
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
             raise RuntimeError("GRBL nao esta Idle antes do passo de Home XY.")
-        comando = f"$J=G91 G21 {eixo}{deslocamento:+.3f} F{feed:.1f}"
+        comando = f"$J=G91 G21 {eixo}{deslocamento:.3f} F{feed:.1f}"
         ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
         if not ok:
             raise RuntimeError(f"GRBL rejeitou jog de {eixo}: {msg}")
