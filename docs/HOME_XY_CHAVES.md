@@ -32,3 +32,14 @@ A rotina roda em background, com progresso e motivos de erro exibidos na interfa
 ## Limitacoes
 
 Nao simula o motor Z, nao envia comandos Z ao GRBL, nao injeta valores falsos de MPos. Nao torna seguro trabalhar sem protecao eletrica independente. Homing automatico pelo firmware so e possivel apos reconfiguracao que retire Z do ciclo, nao realizada aqui. Os testes CI usam sensores simulados, sem CNC real.
+
+## Falhas intermitentes de USB e botao Abortar (2026-11)
+
+- O Home consulta o status do GRBL em intervalos de aproximadamente 150 ms durante os pequenos movimentos, em vez de sondar a cada 25 ms.
+- Se uma consulta `?` voltar sem resposta, tenta mais duas vezes, com pequena pausa. `<Idle|MPos:...>` sem `Pn:` e uma resposta VALIDA com as chaves livres.
+- Se as tres consultas falharem, o programa NAO continua aproximando o cabeçote de uma chave que nao pode confirmar: interrompe e registra o ultimo status recebido para diagnostico.
+- O botao **Abortar** sinaliza a interrupcao imediatamente e envia `!` seguido de `Ctrl+X (0x18)` diretamente pela USB, sem aguardar a trava de leitura de status. O GRBL perde a referencia e precisa de novo Home XY.
+- Os pulsos fisicos Z e o teste manual dos oito relés usam espera interrompivel; ao receber Abortar, desligam os relés no respectivo `finally`.
+- **A acao de software nao garante parada instantanea mecanica** em falha USB/firmware e nao substitui parada eletrica de emergencia. Se a USB nao confirmar envio dos bytes, a interface indica que a parada fisica deve ser acionada.
+
+Se a maquina continuar parando no primeiro passo, com motores DESENERGIZADOS verifique se `?` responde repetidamente com USB conectada, teste `Pn:X` e `Pn:Y` separadamente e procure erros de alimentacao/interferencia. Nao remova intertravamentos de curso nem trate `Pn` ausente como chave acionada.

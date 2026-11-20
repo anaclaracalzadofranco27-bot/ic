@@ -290,6 +290,8 @@ O código editável está em `smartv42_src/`. As **dez partes** são fragmentos 
 | A CNC não conecta ou dá `Permission denied` | Confira porta USB, cabo, acesso à serial e se outro programa mantém a porta aberta | `04_grbl` / `01_config` |
 | O servidor inicia, mas a interface não abre de outro computador | Está vinculado a `127.0.0.1`; abra no próprio host ou configure um acesso remoto apropriado separadamente | `10_server` |
 | GRBL não responde a `?` | Confira porta correta, baud `115200`, alimentação e firmware | `04_grbl` |
+| Home XY anda pouco no X e acusa ausência de sensores/status | A busca move até 0,5 mm por vez; a nova rotina tolera duas leituras `?` perdidas. Se persistir, teste USB/alimentação, `Pn:X` e `Pn:Y` sem potência nos motores | `04_grbl` / `docs/HOME_XY_CHAVES.md` |
+| Botão Abortar responde lentamente | Abortar envia `!` e `Ctrl+X` pela USB sem aguardar status; se não parar, use a **parada elétrica física**. O Home deve ser refeito | `04_grbl` / `10_server` |
 | `Pn:X` / `Pn:Y` não aparece ao pressionar a chave | Verifique o conector, estado elétrico, polaridade e relatório de status **com motores desenergizados** | Ligação / `04_grbl` |
 | Home XY não inicia com aviso de `$21`, `$22` ou `$20` | Verifique `$$` e a configuração exigida pelo Home; não desative limites sem parada elétrica independente | `04_grbl` |
 | O Home procura no sentido errado | Interrompa; confira físicamente o sentido X+/X− ou Y+/Y− antes de tentar novamente | `04_grbl` / interface |
