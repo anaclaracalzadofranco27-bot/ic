@@ -92,25 +92,27 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 # -----------------------------------------------------------------------------
 ORIGEM_X_NA_DIREITA = False
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
-SINAL_EIXO_Y = -1.0         # -1.0 = eixo Y invertido com valores negativos (0 a -297)
+SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
 INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
-INVERTER_JOG_Y = True       # True = inverte os botões ↑ Y+ / ↓ Y- para acompanhar Y negativo
+INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
-# CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (Y INVERTIDO NEGATIVO)
-# Plano com eixo X positivo (0..297) e eixo Y invertido negativo (0..-297):
+# CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
+# Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
+# Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
 #   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
 #   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
-#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = -297.000
-#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = -297.000
+#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = 297.000
+#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = 297.000
+# A imagem e plotada dentro do retangulo A-B-C-D.
 # =============================================================================
 ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
 USAR_CALIBRACAO_4_PONTOS = True
 
 PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
 PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
-PONTO_C = [297.000, -297.000]   # Topo-Direita da matriz  (col 99, lin 0)
-PONTO_D = [0.000, -297.000]     # Topo-Esquerda da matriz (col 0,  lin 0)
+PONTO_C = [297.000, 297.000]    # Topo-Direita da matriz  (col 99, lin 0)
+PONTO_D = [0.000, 297.000]      # Topo-Esquerda da matriz (col 0,  lin 0)
 
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
@@ -126,7 +128,7 @@ def ponto_home_xy():
 X_INICIO_FISICO = 0.000
 Y_INICIO_FISICO = 0.000
 X_FIM_FISICO = 297.000
-Y_FIM_FISICO = -297.000
+Y_FIM_FISICO = 297.000
 
 # =============================================================================
 # JANELA OPCIONAL DE RECORTE: mascara pontos sem reescalar o passo fisico.
@@ -135,8 +137,8 @@ Y_FIM_FISICO = -297.000
 USAR_JANELA_PLOTAGEM = False
 PLOT_X_MIN = 0.0
 PLOT_X_MAX = 297.0
-PLOT_Y_MIN = -297.0
-PLOT_Y_MAX = 0.0
+PLOT_Y_MIN = 0.0
+PLOT_Y_MAX = 297.0
 
 TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
@@ -301,6 +303,17 @@ def carregar_calibracao_matriz():
         ok, motivo = validar_calibracao_cantos(pontos)
         if not ok:
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
+            return False
+        y_ab = 0.5 * (pontos[0][1] + pontos[1][1])
+        y_cd = 0.5 * (pontos[2][1] + pontos[3][1])
+        if y_cd < y_ab:
+            # Modelo antigo (D em Y negativo). Na bancada com $3=1, Y+ vai
+            # de A para D; usar esse arquivo mandaria o cabecote para fora.
+            registrar_log(
+                "Calibracao salva IGNORADA: usa o modelo antigo com Y negativo "
+                f"(Y de C/D={y_cd:.1f}). Usando A=(0,0), B=(297,0), "
+                "C=(297,297), D=(0,297). Execute o Home automatico.", "aviso"
+            )
             return False
         origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
         sx = -1.0 if float(dados.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0

@@ -31,7 +31,7 @@ class FakeGRBL:
     def aguardar_grbl_idle(self):
         return True, ""
     def ler_status_grbl(self, timeout=0.5):
-        return "<Idle|WPos:258.000,-39.000,0.000>"
+        return "<Idle|WPos:258.000,39.000,0.000>"
 
 
 class TestesABSeguranca(unittest.TestCase):
@@ -95,7 +95,7 @@ class TestesABSeguranca(unittest.TestCase):
     def test_reserva_manual_inibe_inicio_de_job(self):
         self.assertTrue(mod.reservar_operacao_manual())
         try:
-            p = mod.analisar_gcode_hibrido("G1 X258 Y-39 F900\nZ2")
+            p = mod.analisar_gcode_hibrido("G1 X258 Y39 F900\nZ2")
             self.assertFalse(mod.executar_job_gcode_em_background(FakeGRBL(), p))
         finally:
             mod.liberar_operacao_manual()
@@ -120,7 +120,7 @@ class TestesCDCoordenadasEDados(unittest.TestCase):
             x99, _ = mod.indice_para_mm_fisico(99, 50)
             self.assertAlmostEqual(x0, 297)
             self.assertAlmostEqual(x99, 0)
-            self.assertEqual(mod.mm_fisico_para_indice(x99, -40)[0], 99)
+            self.assertEqual(mod.mm_fisico_para_indice(x99, 40)[0], 99)
 
     def test_sinal_x_persistido(self):
         with tempfile.TemporaryDirectory() as p:
@@ -132,7 +132,7 @@ class TestesCDCoordenadasEDados(unittest.TestCase):
                 self.assertEqual(mod.SINAL_EIXO_X, -1)
 
     def test_atualizar_matriz_nao_apaga_gcode_importado(self):
-        importado = {"linhas": ["G1 X258 Y-40", "Z3"], "programa": [{"tipo": "xy"}], "nome": "teste", "usar_parametros_arquivo": True}
+        importado = {"linhas": ["G1 X258 Y40", "Z3"], "programa": [{"tipo": "xy"}], "nome": "teste", "usar_parametros_arquivo": True}
         with patch.dict(mod.estado_importacao_gcode, importado, clear=True), patch.object(mod, "compilar_matriz_para_estudio", return_value=(["G21"], [], 0)):
             mod.atualizar_matriz_global(np.zeros((100, 100), dtype=np.uint8))
             self.assertEqual(mod.estado_importacao_gcode["nome"], "teste")
@@ -176,14 +176,14 @@ class TestesEHMotorUnico(unittest.TestCase):
 
     def test_xy_invalidos_rejeitados_antes_do_primeiro_movimento(self):
         fake = FakeGRBL()
-        p = mod.analisar_gcode_hibrido("G1 X258 Y-40\nZ3\nG1 X9999 Y0")
+        p = mod.analisar_gcode_hibrido("G1 X258 Y40\nZ3\nG1 X9999 Y0")
         with self.assertRaises(ValueError):
             mod.validar_programa_antes_movimento(fake, p)
         self.assertEqual(fake.movimentos, [])
 
     def test_z_fora_da_janela_rejeitado_no_preflight(self):
         fake = FakeGRBL()
-        p = mod.analisar_gcode_hibrido("G1 X5 Y-5\nZ2")
+        p = mod.analisar_gcode_hibrido("G1 X5 Y5\nZ2")
         with self.assertRaises(ValueError):
             mod.validar_programa_antes_movimento(fake, p)
 
@@ -198,9 +198,9 @@ class TestesEHMotorUnico(unittest.TestCase):
         fake = FakeGRBL()
         bloco = {"tipo": "z", "nivel": 4, "pulsos": 12, "on_ms": 15, "off_ms": 0}
         with patch.object(mod, "acionar_eixo_z", return_value=(True, {"pino_gpio": 27, "pulsos": 4})) as z, patch.object(mod.time, "sleep"):
-            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": False})
+            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, 39), "usar_parametros_arquivo": False})
             self.assertEqual(z.call_args.kwargs["pulsos_override"], mod.obter_pulsos_para_nivel(4))
-            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": True})
+            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, 39), "usar_parametros_arquivo": True})
             self.assertEqual(z.call_args.kwargs["pulsos_override"], 12)
             self.assertEqual(z.call_args.kwargs["off_ms_override"], 0)
 

@@ -39,10 +39,10 @@ class TesteHibrido(unittest.TestCase):
 G90
 G54
 M3 S1000 ; matriz
-G1 X258.000 Y-39.000 F900
+G1 X258.000 Y39.000 F900
 G4 P0
 M42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=4 ON_MS=10 OFF_MS=10 IDX=(50,50)
-G1 X261.000 Y-36.000 F900
+G1 X261.000 Y36.000 F900
 M42 P1 ; Z_LEVEL=2 GPIO=6 PULSOS=2
 M5
 G0 X0 Y0
@@ -53,13 +53,13 @@ G0 X0 Y0
         self.assertEqual(z[0]['pulsos'], 4)
 
     def test_nao_aceita_z_cartesiano(self):
-        for texto in ('G1 X258 Y-39 Z4', 'G91\nG1 X5', 'M42 P1', 'G1 X1 Y2\nG28'):
+        for texto in ('G1 X258 Y39 Z4', 'G91\nG1 X5', 'M42 P1', 'G1 X1 Y2\nG28'):
             with self.subTest(texto=texto), self.assertRaises(ValueError):
                 mod.analisar_gcode_hibrido(texto)
 
     def test_nao_envia_m42_ao_grbl(self):
         grbl = GRBLFalso()
-        programa = mod.analisar_gcode_hibrido('G1 X258 Y-39 F900\nM42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=3')
+        programa = mod.analisar_gcode_hibrido('G1 X258 Y39 F900\nM42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=3')
         with patch.object(mod, 'acionar_eixo_z', return_value=(True, {'pino_gpio': 27, 'pulsos': 3})) as z:
             with patch.object(mod.time, 'sleep'):
                 contexto = {}
@@ -71,7 +71,7 @@ G0 X0 Y0
 
     def test_bloqueia_z_fora_da_janela(self):
         grbl = GRBLFalso()
-        programa = mod.analisar_gcode_hibrido('G1 X20 Y-30\nZ4')
+        programa = mod.analisar_gcode_hibrido('G1 X20 Y30\nZ4')
         with patch.object(mod, 'acionar_eixo_z') as z:
             ctx = {}
             mod.executar_bloco_hibrido(grbl, programa[0], ctx)

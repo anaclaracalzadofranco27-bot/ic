@@ -11,12 +11,14 @@
 
 ## Mapeamento único da malha para G54
 
-No padrão inicial, A=(0,0) corresponde à linha 99, coluna 0; B=(297,0) à linha 99, coluna 99; C=(297,-297) à linha 0, coluna 99; D=(0,-297) à linha 0, coluna 0.
+No padrão inicial, A=(0,0) corresponde à linha 99, coluna 0; B=(297,0) à linha 99, coluna 99; C=(297,297) à linha 0, coluna 99; D=(0,297) à linha 0, coluna 0. Isso segue a bancada com `$3=1`: X+ vai de A para B e Y+ vai de A para D. As chaves X/Y do Home ficam no canto A e a chave 2 de Y na borda C/D.
 
 Para uma malha quadrada perfeitamente alinhada, as coordenadas são:
 
 - X = 3 × coluna
-- Y = -297 + 3 × linha
+- Y = 297 − 3 × linha
+
+Calibrações salvas no modelo antigo (C/D em Y negativo) são ignoradas na inicialização.
 
 Para uma matriz calibrada com quatro cantos levemente não ortogonais, a mesma rotina de interpolação bilinear converte índices da imagem para coordenadas G54 e faz a transformação inversa para telemetria, mantendo correspondência nos quatro cantos.
 

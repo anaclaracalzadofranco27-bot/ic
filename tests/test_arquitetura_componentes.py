@@ -17,13 +17,13 @@ spec.loader.exec_module(mod)
 
 class CNCFalsa:
     def __init__(self):
-        self.wpos = [0.0, -297.0, 0.0]
+        self.wpos = [0.0, 297.0, 0.0]
         self.modo_simulacao = True
         self.home_xy_referenciado = False
         self.chamadas = []
 
     def preparar_grbl(self):
-        return "<Idle|MPos:0.000,-297.000,0.000>"
+        return "<Idle|MPos:0.000,297.000,0.000>"
 
     def mover_xy_e_aguardar(self, x, y, feed):
         self.chamadas.append((x, y, feed))
@@ -112,7 +112,7 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertEqual(config.get("feed_rate"), config.feed_rate)
 
     def test_plano_immutavel_e_independente_do_programa_de_origem(self):
-        entrada = mod.analisar_gcode_hibrido("G21\nG1 X3 Y-297 F100\nZ4")
+        entrada = mod.analisar_gcode_hibrido("G21\nG1 X3 Y297 F100\nZ4")
         config = mod.capturar_snapshot_parametros_job()
         plano = mod.PlanoJobStudio.criar("gcode", "f1.gcode", True, entrada, config)
         self.assertTrue(is_dataclass(plano))
@@ -129,7 +129,7 @@ class ComponentesArquitetura(unittest.TestCase):
         repo = mod._repositorio_projeto
         self.assertEqual(repo.fonte_ativa(), "matriz")
         anterior = repo.resumo()["revisao"]
-        mod.carregar_gcode_importado("G1 X3 Y-297 F80\nZ3", "arquivo.gcode")
+        mod.carregar_gcode_importado("G1 X3 Y297 F80\nZ3", "arquivo.gcode")
         self.assertEqual(repo.fonte_ativa(), "gcode")
         self.assertGreater(repo.resumo()["revisao"], anterior)
         mod.atualizar_matriz_global(mod._matriz_atual)
@@ -137,7 +137,7 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertEqual(repo.resumo()["nome_gcode"], "arquivo.gcode")
 
     def test_preparacao_nao_aciona_controladores(self):
-        mod.carregar_gcode_importado("G1 X3 Y-297 F80\nZ3", "referencia.gcode")
+        mod.carregar_gcode_importado("G1 X3 Y297 F80\nZ3", "referencia.gcode")
         cncf = CNCFalsa()
         with patch.object(cncf, "mover_xy_e_aguardar") as mover:
             plano, motivo = mod._repositorio_projeto.preparar_plano(
@@ -149,7 +149,7 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertEqual(plano.origem, "gcode")
 
     def test_preparador_encaminha_para_motor_unico(self):
-        mod.carregar_gcode_importado("G1 X3 Y-297 F80\nZ3", "entrada.gcode")
+        mod.carregar_gcode_importado("G1 X3 Y297 F80\nZ3", "entrada.gcode")
         cncf = CNCFalsa()
         with patch.object(mod, "executar_job_gcode_em_background", return_value=True) as iniciar:
             ok, mensagem = mod.iniciar_job_selecionado(
@@ -164,7 +164,7 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertIsInstance(kwargs["parametros_job"], mod.ConfiguracaoExecucao)
 
     def test_revisao_incorreta_impede_preparar_e_executar(self):
-        mod.carregar_gcode_importado("G1 X3 Y-297 F80", "arquivo.gcode")
+        mod.carregar_gcode_importado("G1 X3 Y297 F80", "arquivo.gcode")
         atual = mod._repositorio_projeto.resumo()["revisao"]
         mod.selecionar_fonte_job("matriz")
         plano, erro = mod._repositorio_projeto.preparar_plano("gcode", atual)
@@ -175,7 +175,7 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertIn("modificado", erro)
 
     def test_motor_copia_antes_de_executar_e_respeita_configuracao(self):
-        entrada = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        entrada = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         cfg = mod.capturar_snapshot_parametros_job()
         grbl = CNCFalsa()
         motor = mod.MotorExecucaoGCode(grbl, entrada, parametros_job=cfg)
@@ -186,7 +186,7 @@ class ComponentesArquitetura(unittest.TestCase):
 
     def test_motor_concorrencia_rejeita_reserva_manual(self):
         grbl = CNCFalsa()
-        prog = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        prog = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         self.assertTrue(mod.reservar_operacao_manual())
         try:
             self.assertFalse(mod.MotorExecucaoGCode(grbl, prog).iniciar())
@@ -196,7 +196,7 @@ class ComponentesArquitetura(unittest.TestCase):
 
     def test_motor_inicia_unica_thread_e_limpa_estado(self):
         grbl = CNCFalsa()
-        prog = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        prog = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         criadas = []
         def criar_thread(target, daemon=True):
             thread = ThreadControlada(target, daemon)
@@ -216,7 +216,7 @@ class ComponentesArquitetura(unittest.TestCase):
 
     def test_motor_cancela_e_libera_reserva_em_falha_interna(self):
         grbl = CNCFalsa()
-        prog = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        prog = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         threads = []
         def fake_thread(target, daemon=True):
             t = ThreadControlada(target, daemon)
@@ -232,7 +232,7 @@ class ComponentesArquitetura(unittest.TestCase):
 
     def test_geometria_alterada_impede_qualquer_movimento(self):
         grbl = CNCFalsa()
-        programa = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        programa = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         motor = mod.MotorExecucaoGCode(grbl, programa)
         with patch.object(mod, "PLOT_X_MIN", mod.PLOT_X_MIN + 12):
             self.assertFalse(motor.iniciar())
@@ -243,7 +243,7 @@ class ComponentesArquitetura(unittest.TestCase):
         grbl = CNCFalsa()
         grbl.modo_simulacao = False
         grbl.home_xy_referenciado = False
-        programa = mod.analisar_gcode_hibrido("G1 X3 Y-297 F90")
+        programa = mod.analisar_gcode_hibrido("G1 X3 Y297 F90")
         self.assertFalse(mod.MotorExecucaoGCode(grbl, programa).iniciar())
         self.assertFalse(grbl.chamadas)
 

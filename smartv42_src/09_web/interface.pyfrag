@@ -216,7 +216,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY</button>
+    <button class="nav-btn" onclick="homeAutomatico()">⌂ Home automático (A→B→C→D)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⚙ Home XY avançado</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -297,15 +298,15 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
         <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
-        <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,-297) - X">
-        <input type="number" id="inp-yc" value="-297.000" step="0.5" title="Ponto C (297,-297) - Y">
+        <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,297) - X">
+        <input type="number" id="inp-yc" value="297.000" step="0.5" title="Ponto C (297,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
         <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
-        <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,-297) - X">
-        <input type="number" id="inp-yd" value="-297.000" step="0.5" title="Ponto D (0,-297) - Y">
+        <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,297) - X">
+        <input type="number" id="inp-yd" value="297.000" step="0.5" title="Ponto D (0,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_d')">📍D</button>
       </div>
@@ -314,7 +315,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       </div>
       <div id="lbl-avisos" style="display:none;white-space:pre-wrap;font-size:10px;color:#fbbf24;background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:5px;padding:5px;margin-top:4px;"></div>
       <div class="row" style="justify-content:space-between;font-size:10.5px;margin-top:4px;">
-        <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=258.00, Y=-39.50</span>
+        <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=148.50, Y=148.50</span>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
       <div style="font-size:10px;color:var(--muted);margin:5px 0;">
@@ -368,7 +369,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
       <div class="grid-3">
-        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY</button>
+        <button class="btn btn-purple" onclick="homeAutomatico()" title="Chaves X/Y no canto A, depois A→B, chave 2 em C, C→D→A">⌂ Home</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -592,8 +593,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         O recuo de X/Y apos contato e configurado separadamente.
         Antes de aumentar a busca, confira a distancia
         fisica livre, pois os hard limits estao desativados neste modo.<br>
-        A direcao inicial do Y foi sugerida como negativa porque o sentido fisico
-        relatado estava invertido; confirme com um movimento curto antes do Home.
+        Com $3=1, X+ vai de A para B e Y+ vai de A para D; por isso o padrao
+        e buscar X- e Y- (chaves no canto A). Para o uso normal prefira o
+        botao <strong>Home</strong>, que faz tudo sozinho.
         <strong>Exemplo: busca Y- implica recuo Y+; busca Y+ implica recuo Y-.</strong>
         Se o Y tocar a chave e nao afastar, confira o comando
         <code>HOME XY RECUO Y</code> nos logs, o valor atual de $3 e o estado
@@ -613,10 +615,10 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Direcao X no GRBL
             <select id="home-dir-x" style="width:95px;">
-              <option value="">Escolher</option><option value="-1">X negativo</option><option value="1">X positivo</option>
+              <option value="">Escolher</option><option value="-1" selected>X negativo</option><option value="1">X positivo</option>
             </select>
           </label>
-          <label>Direcao Y no GRBL (invertido na bancada)
+          <label>Direcao Y no GRBL (Y- vai para A)
             <select id="home-dir-y" style="width:110px;">
               <option value="-1" selected>Y negativo</option><option value="1">Y positivo</option>
             </select>
@@ -743,8 +745,8 @@ async function aplicarConfigCoordenadas() {
   const invJogX = document.getElementById('cfg-inv-jog-x').checked;
   const pa = [lerNumeroInput('inp-xa', 0.0), lerNumeroInput('inp-ya', 0.0)];
   const pb = [lerNumeroInput('inp-xb', 297.0), lerNumeroInput('inp-yb', 0.0)];
-  const pc = [lerNumeroInput('inp-xc', 297.0), lerNumeroInput('inp-yc', -297.0)];
-  const pd = [lerNumeroInput('inp-xd', 0.0), lerNumeroInput('inp-yd', -297.0)];
+  const pc = [lerNumeroInput('inp-xc', 297.0), lerNumeroInput('inp-yc', 297.0)];
+  const pd = [lerNumeroInput('inp-xd', 0.0), lerNumeroInput('inp-yd', 297.0)];
   const r = await apiPost('config_coordenadas', {
     inverter_jog_x: invJogX,
     ponto_a: pa,
@@ -764,9 +766,9 @@ async function resetarQuadrado297() {
   document.getElementById('inp-xb').value = trocados ? '0.000' : '297.000';
   document.getElementById('inp-yb').value = '0.000';
   document.getElementById('inp-xc').value = trocados ? '0.000' : '297.000';
-  document.getElementById('inp-yc').value = '-297.000';
+  document.getElementById('inp-yc').value = '297.000';
   document.getElementById('inp-xd').value = trocados ? '297.000' : '0.000';
-  document.getElementById('inp-yd').value = '-297.000';
+  document.getElementById('inp-yd').value = '297.000';
   await aplicarConfigCoordenadas();
 }
 
@@ -894,6 +896,24 @@ async function acaoUGS(tipo) {
   }
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
+  atualizarStatus();
+}
+
+async function homeAutomatico() {
+  if (!confirm(
+    'HOME AUTOMÁTICO\n' +
+    '1) Busca as chaves X- e Y- e define o canto A = (0,0)\n' +
+    '2) Vai de A até B\n' +
+    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
+    '4) Vai até D e volta para A\n\n' +
+    'Z fica desligado. O botão Abortar continua disponível.\n' +
+    'Confirmo que existe parada de emergência física independente e área livre.'
+  )) return;
+  const resp = await apiPost('home_automatico', { seguranca_confirmada: true });
+  document.getElementById('info-progresso').textContent =
+    resp.ok ? (resp.mensagem || 'Home automático iniciado.')
+            : ('Home não iniciado: ' + (resp.erro || 'erro desconhecido'));
+  if (!resp.ok) alert(resp.erro || 'Home automático não iniciado.');
   atualizarStatus();
 }
 
@@ -1178,8 +1198,8 @@ function desenharMatriz() {
     } else {
       const pa = configCoord.ponto_a || [0, 0];
       const pb = configCoord.ponto_b || [297, 0];
-      const pc = configCoord.ponto_c || [297, -297];
-      const pd = configCoord.ponto_d || [0, -297];
+      const pc = configCoord.ponto_c || [297, 297];
+      const pd = configCoord.ponto_d || [0, 297];
       const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
       const supEsq = trocados ? ['C', pc] : ['D', pd];
       const supDir = trocados ? ['D', pd] : ['C', pc];
@@ -1369,7 +1389,8 @@ async function atualizarStatus() {
       }
     }
     if (st.sonda_y2 && st.sonda_y2.ativo) {
-      document.getElementById('info-progresso').textContent = 'Sonda Y2 / perímetro: ' + st.sonda_y2.fase;
+      document.getElementById('info-progresso').textContent = st.sonda_y2.fase +
+        (st.home_xy && st.home_xy.ativo ? ' · ' + st.home_xy.fase : '');
     } else if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
     } else if (st.job && st.job.ativo) {
