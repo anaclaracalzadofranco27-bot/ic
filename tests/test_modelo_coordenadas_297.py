@@ -20,12 +20,13 @@ class Modelo297(unittest.TestCase):
                        "ORIGEM_X_NA_DIREITA", "SINAL_EIXO_X", "SINAL_EIXO_Y",
                        "USAR_JANELA_PLOTAGEM", "PLOT_X_MIN", "PLOT_X_MAX",
                        "PLOT_Y_MIN", "PLOT_Y_MAX", "ARQUIVO_CALIBRACAO_MATRIZ",
-                       "_grbl_global"]
+                       "_grbl_global", "BORDA_Y_OPOSTA_CALIBRADA"]
         self.anterior = {k: getattr(mod,k) for k in self.campos}
         for k in ("PONTO_A","PONTO_B","PONTO_C","PONTO_D"):
             self.anterior[k] = list(self.anterior[k])
         mod.PONTO_A, mod.PONTO_B = [0.0,0.0], [297.0,0.0]
         mod.PONTO_C, mod.PONTO_D = [297.0,-297.0], [0.0,-297.0]
+        mod.BORDA_Y_OPOSTA_CALIBRADA = False
         mod.ORIGEM_X_NA_DIREITA = False
         mod.SINAL_EIXO_X = 1.0
         mod.SINAL_EIXO_Y = -1.0
@@ -37,6 +38,88 @@ class Modelo297(unittest.TestCase):
     def tearDown(self):
         for k,v in self.anterior.items():
             setattr(mod,k,v)
+
+    def preparar_sonda_y_simulada(self):
+        ctrl = mod.ControladorGRBL()
+        with patch.object(mod, "SIMULADO", True):
+            self.assertTrue(ctrl.conectar("SIMULADO"))
+        ctrl.enviar_comando("$22=0")
+        ctrl.ser.home_simulado_y_oposto = -291.0
+        ctrl.ser.mpos[:2] = [297.0, -279.0]
+        ctrl.ser.wco[:2] = [0.0, 0.0]
+        ctrl.home_xy_referenciado = True
+        ctrl.atualizar_status()
+        return ctrl
+
+    def test_segunda_chave_y_define_c_e_d_com_recuo_confirmado(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        with patch.object(mod, "salvar_calibracao_matriz"), \
+             patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            medida = ctrl.sondar_chave_y_oposta(
+                curso=15.0, feed=120.0, recuo=4.0, passo=1.0
+            )
+            self.assertAlmostEqual(medida["y_contato"], -291.0, places=3)
+            self.assertAlmostEqual(medida["y_cd"], -287.0, places=3)
+            self.assertNotIn("Y", ctrl.pinos_pn)
+            estado = mod.configurar_sistema_coordenadas(
+                ponto_c=medida["ponto_c"], ponto_d=medida["ponto_d"],
+                medicao_chave_y_oposta=True
+            )
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 Y-1.000 " in c for c in comandos))
+        self.assertTrue(any("$J=G91 G21 Y4.000 " in c for c in comandos))
+        self.assertEqual(estado["ponto_c"], [297.0, -287.0])
+        self.assertEqual(estado["ponto_d"], [0.0, -287.0])
+        self.assertTrue(mod.BORDA_Y_OPOSTA_CALIBRADA)
+        self.assertFalse(ctrl.home_xy_referenciado)
+
+    def test_segunda_chave_y_nao_encontrada_nao_muda_c_d(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        ctrl.ser.home_simulado_y_oposto = -310.0
+        with patch.object(mod, "_grbl_global", ctrl):
+            with self.assertRaisesRegex(RuntimeError, "nao encontrada"):
+                ctrl.sondar_chave_y_oposta(
+                    curso=15.0, feed=120.0, recuo=4.0, passo=1.0
+                )
+        self.assertEqual(mod.PONTO_C, [297.0, -297.0])
+        self.assertEqual(mod.PONTO_D, [0.0, -297.0])
+        self.assertFalse(ctrl.home_xy_referenciado)
+
+    def test_segunda_chave_y_nao_aceita_partida_distante(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        ctrl.ser.mpos[1] = -80.0
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            with self.assertRaisesRegex(RuntimeError, "perto de C"):
+                ctrl.sondar_chave_y_oposta()
+        self.assertFalse(any(
+            call.args[0].startswith("$J=") for call in enviar.call_args_list
+        ))
+
+    def test_edicao_manual_de_c_ou_d_invalida_medicao_y_oposta(self):
+        with patch.object(mod, "salvar_calibracao_matriz"):
+            mod.configurar_sistema_coordenadas(
+                ponto_c=[297.0, -295.0],
+                ponto_d=[0.0, -295.0],
+                medicao_chave_y_oposta=True
+            )
+            self.assertTrue(mod.BORDA_Y_OPOSTA_CALIBRADA)
+            mod.configurar_sistema_coordenadas(ponto_c=[297.0, -294.0])
+        self.assertFalse(mod.BORDA_Y_OPOSTA_CALIBRADA)
+
+    def test_perimetro_bloqueado_sem_medicao_segunda_chave_y(self):
+        ctrl = mod.ControladorGRBL()
+        respostas = []
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        handler._enviar_json = lambda corpo, status=200: respostas.append((corpo, status))
+        with patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(ctrl, "mover_xy_sincrono") as movimento:
+            handler._executar_acao_POST(
+                "calibrar_caixa_fisica", {"etapa": "testar_perimetro"}
+            )
+        self.assertFalse(respostas[-1][0]["ok"])
+        self.assertEqual(respostas[-1][1], 409)
+        movimento.assert_not_called()
 
     def test_grade_100_pontos_99_passos(self):
         self.assertEqual(mod.TAMANHO_MATRIZ, (100,100))
