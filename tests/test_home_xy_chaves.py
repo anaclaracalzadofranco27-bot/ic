@@ -220,12 +220,25 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertFalse(ctrl.home_xy_referenciado)
         self.assertGreater(ctrl.mpos[0], 0.0)
 
-    def test_recuo_diferente_de_cinco_mm_nao_e_aceito(self):
+    def test_recuo_fora_da_faixa_2_a_10_mm_nao_e_aceito(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
-        ok, mensagem = self.executar_simulado(ctrl, recuo=2.0)
-        self.assertFalse(ok)
-        self.assertIn("recuo fixo de 5.0 mm", mensagem)
+        for kwargs in ({"recuo": 1.0}, {"recuo_y": 11.0}):
+            ok, mensagem = self.executar_simulado(ctrl, **kwargs)
+            self.assertFalse(ok)
+            self.assertIn("entre 2 e 10 mm", mensagem)
+
+    def test_recuo_y_independente_do_x(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl, recuo=5.0, recuo_y=8.0)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X5.000 Y-8.000 F" in c
+                            for c in comandos))
+        self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -5.0, places=2)
 
     def test_confirmacao_chave_requer_duas_leituras_livres_consecutivas(self):
         ctrl = self.novo_controlador()
