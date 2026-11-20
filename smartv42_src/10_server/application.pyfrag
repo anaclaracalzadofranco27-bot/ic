@@ -364,6 +364,7 @@ HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
+HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
 
 
 def validar_layout_home_automatico():
@@ -466,6 +467,7 @@ def iniciar_home_automatico(grbl):
             medicao = grbl.sondar_chave_y_oposta(
                 curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
                 progresso=lambda t: _fase("Home 3/4: " + t),
+                y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
             )
             configurar_sistema_coordenadas(
                 ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],

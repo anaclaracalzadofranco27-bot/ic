@@ -168,7 +168,7 @@ Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emer
 3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
 4. Vai até **D** e volta para **A**.
 
-O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa e `Pn:Y` livre no início (as duas chaves Y usam a mesma entrada, então com `Pn:Y` acionado o programa não sabe para onde recuar e pede um Jog Y curto). A busca da chave 2 **não passa do Y nominal de 297 mm**: se a chave estiver além disso, o Home para com a mensagem "Segunda chave Y nao encontrada" e os cantos não mudam.
+O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa e `Pn:Y` livre no início (as duas chaves Y usam a mesma entrada, então com `Pn:Y` acionado o programa não sabe para onde recuar e pede um Jog Y curto). A busca da chave 2 vai **até Y = 350 mm** (`HOME_AUTO_Y_LIMITE_CHAVE2_MM`). Se a chave acionar antes de 297 mm, C/D recebem o Y medido depois do recuo; se acionar depois, C/D ficam em 297 mm, porque a malha tem 100 pontos a 3 mm. Se não acionar até 350 mm, o Home para com "Segunda chave Y nao encontrada" e os cantos não mudam.
 
 No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
 

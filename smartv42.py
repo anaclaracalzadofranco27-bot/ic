@@ -2421,7 +2421,8 @@ class ControladorGRBL:
             )
 
     def sondar_chave_y_oposta(self, curso=15.0, feed=120.0,
-                             recuo=4.0, passo=1.0, progresso=None):
+                             recuo=4.0, passo=1.0, progresso=None,
+                             y_limite_busca=None):
         """Busca Y2 automaticamente desde A ou B, sem JOG manual.
 
         Se ja estiver perto de C/D (modo legado), permite somente a busca
@@ -2471,6 +2472,15 @@ class ControladorGRBL:
         direcao = 1 if y_previsto > y_base else -1
         extensao = direcao * (y_previsto - y_base)
         distancia_prevista = direcao * (y_previsto - y_atual)
+        busca_estendida = y_limite_busca is not None
+        y_limite = float(y_limite_busca) if busca_estendida else y_previsto
+        if busca_estendida and not (
+                math.isfinite(y_limite) and
+                0.0 <= direcao * (y_limite - y_previsto) <= 60.0):
+            raise ValueError(
+                f"Limite da busca Y2 ({y_limite}) deve ficar entre o Y nominal "
+                f"de C/D ({y_previsto:.2f}) e 60 mm alem dele."
+            )
         perto_de_a = abs(x_atual - float(PONTO_A[0])) <= 8.0
         perto_de_b = abs(x_atual - float(PONTO_B[0])) <= 8.0
         # A mesma chave Y da extremidade oposta pode ser medida pelo lado A
@@ -2530,10 +2540,10 @@ class ControladorGRBL:
                         "Pn:Y acionado entre etapas sem contato confirmado. "
                         "Verifique a chave e refaca Home."
                     )
-                # Nunca ultrapassa o Y estimado para C/D. A margem final
-                # ajustavel em 'curso' limita a etapa curta e nao amplia
-                # o percurso nominal em direcao ao batente.
-                restante = direcao * (y_previsto - float(self.wpos[1]))
+                # Sem y_limite_busca, nunca ultrapassa o Y estimado para C/D.
+                # Com ele (Home automatico), a busca lenta continua ate esse
+                # Y absoluto, pois a chave 2 pode ficar alem do ultimo pino.
+                restante = direcao * (y_limite - float(self.wpos[1]))
                 if not math.isfinite(restante) or restante < 0.0:
                     raise RuntimeError(
                         "Posicao Y ultrapassou o Y nominal de C/D sem "
@@ -2541,7 +2551,8 @@ class ControladorGRBL:
                     )
                 # De A/B, etapa final tem ate 25 mm; se ja iniciou
                 # perto de C/D, o limite continua 15 mm por padrao.
-                alcance = min(restante, 25.0 if partida_base else curso)
+                alcance = (restante if busca_estendida else
+                           min(restante, 25.0 if partida_base else curso))
                 if alcance < 0.2:
                     raise RuntimeError(
                         "Y ja esta no limite nominal C/D mas Pn:Y nao acionou. "
@@ -2558,7 +2569,7 @@ class ControladorGRBL:
             if "Y" not in contatos:
                 raise RuntimeError(
                     f"Segunda chave Y nao encontrada ate Y={float(self.wpos[1]):.2f} "
-                    f"(limite nominal C/D Y={y_previsto:.2f}). "
+                    f"(limite da busca Y={y_limite:.2f}). "
                     "Movimento encerrado sem alterar calibracao. "
                     "Confirme Pn:Y, posicao da chave e sentido do motor."
                 )
@@ -2583,10 +2594,13 @@ class ControladorGRBL:
                 raise RuntimeError(
                     "Y nao recuou para o interior da malha; C/D nao atualizados."
                 )
+            # Chave alem do ultimo pino: a malha continua com 297 mm, entao
+            # C/D ficam no Y nominal; antes dele, usa o Y medido.
+            y_cd = y_previsto if direcao * (y_util - y_previsto) > 0 else y_util
             candidatos = (
                 list(PONTO_A), list(PONTO_B),
-                [float(PONTO_C[0]), y_util],
-                [float(PONTO_D[0]), y_util],
+                [float(PONTO_C[0]), y_cd],
+                [float(PONTO_D[0]), y_cd],
             )
             ok_cantos, motivo = validar_calibracao_cantos(candidatos)
             if not ok_cantos:
@@ -2596,11 +2610,11 @@ class ControladorGRBL:
                 )
             fase(
                 f"Y2 validado: contato={y_contato:.2f}, "
-                f"limite interno C/D={y_util:.2f}; Pn:Y livre."
+                f"apos recuo Y={y_util:.2f}, C/D em Y={y_cd:.2f}; Pn:Y livre."
             )
             return {
                 "y_contato": round(y_contato, 3),
-                "y_cd": round(y_util, 3),
+                "y_cd": round(y_cd, 3),
                 "ponto_c": candidatos[2],
                 "ponto_d": candidatos[3],
                 "recuo": recuo,
@@ -6014,6 +6028,7 @@ HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
+HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
 
 
 def validar_layout_home_automatico():
@@ -6116,6 +6131,7 @@ def iniciar_home_automatico(grbl):
             medicao = grbl.sondar_chave_y_oposta(
                 curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
                 progresso=lambda t: _fase("Home 3/4: " + t),
+                y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
             )
             configurar_sistema_coordenadas(
                 ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],

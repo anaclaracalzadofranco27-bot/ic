@@ -127,7 +127,7 @@ O botão **⌂ Home** junta Home XY, sonda da chave 2 e perímetro, com parâmet
 2. Volta C/D ao Y nominal (297 mm) antes de medir, para que uma medição anterior não encurte a busca.
 3. Home XY por software: busca sempre X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de **5 mm em X e 12 mm em Y** (a chave Y precisa de ~12 mm para soltar), e grava G54 = A = (0, 0). O recuo aceito no Home vai de 2 a 15 mm por eixo.
 4. Vai de A até B (F250).
-5. Sonda a chave 2 a partir de B em Y+ (mesma rotina `sondar_chave_y_oposta`: aproximação F200 até 25 mm antes do nominal, busca final F120, recuo 4 mm) e grava o Y medido em C e D, preservando o Home.
+5. Sonda a chave 2 a partir de B em Y+ (mesma rotina `sondar_chave_y_oposta`: aproximação F200 até 25 mm antes do nominal, busca final F120 até **Y = 350 mm**, recuo 4 mm). Se a chave acionar antes de 297 mm, C/D recebem o Y medido; se acionar depois, C/D ficam no nominal de 297 mm. O Home é preservado.
 6. Vai até D e volta para A.
 
 Qualquer erro interrompe a sequência, registra o motivo no log e na barra de progresso, e não altera os cantos além do que já foi medido com sucesso. Abortar continua disponível durante toda a rotina. O modal **⚙ Home XY avançado** continua disponível para escolher sentidos, cursos e recuos manualmente.
