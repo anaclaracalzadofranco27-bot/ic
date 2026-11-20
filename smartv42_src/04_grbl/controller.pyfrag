@@ -1058,15 +1058,16 @@ class ControladorGRBL:
         return eixo in contatos, estado
 
     def _confirmar_chave_liberada_home(self, eixo):
-        """Exige duas leituras Idle consecutivas livres, sem mover o carro.
+        """Confirma chave livre em duas leituras Idle consecutivas.
 
-        Um unico Pn ativo depois de um jog pode ser temporario (bounce ou
-        atraso de status). O Home nunca e validado por uma amostra livre isolada.
+        Aguarda ate ~2 segundos apenas consultando o GRBL, sem mover nenhum
+        motor. Isso tolera status serial atrasado ou bounce do contato, mas
+        nunca presume liberacao se Pn continuar ativo.
         """
         amostras = []
         livres_seguidas = 0
         estado = ""
-        for tentativa in range(4):
+        for tentativa in range(12):
             if tentativa:
                 time.sleep(0.15)
             estado = self._status_home_xy()
@@ -1204,8 +1205,14 @@ class ControladorGRBL:
                 restante = cursos[eixo] - percorrido[eixo]
                 if restante < 1e-6:
                     raise RuntimeError(
-                        f"Chave {eixo} nao encontrada no curso limitado de "
-                        f"{cursos[eixo]:.1f} mm."
+                        f"Busca do eixo {eixo} encerrada por limite: "
+                        f"{percorrido[eixo]:.1f}/{cursos[eixo]:.1f} mm percorridos "
+                        f"sem detectar Pn:{eixo}. "
+                        f"Eixos ja encontrados: {('/'.join(sorted(encontrados)) or 'nenhum')}. "
+                        f"Confira o campo 'Busca max {eixo}' no Home; "
+                        "o valor inicial na interface e 30 mm (o teto permitido e 300 mm). "
+                        "Somente aumente apos confirmar espaco mecanico livre, "
+                        "sentido correto e parada eletrica independente."
                     )
                 deslocamentos[eixo] = direcoes[eixo] * min(passo, restante)
             self._estado_home_xy(
