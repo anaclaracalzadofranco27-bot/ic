@@ -162,7 +162,7 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 1. Clique no único acesso **Home XY**, na barra de navegação.
 2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada. O novo padrão de Y é **Y− (sugerido)** porque o sentido físico foi relatado invertido; confirme-o com um jog curto, pois o ajuste do firmware $3 pode alterar o sentido real.
 3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
-4. Escolha o passo de busca (**0,1 a 0,5 mm**) e o avanço (**20 a 600 mm/min**, padrão **500 mm/min**). O curso máximo de busca pode chegar a **300 mm por eixo**, mas inicia em **30 mm** para evitar percursos longos antes de verificar fisicamente a bancada.
+4. Escolha o passo de busca (**0,1 a 10 mm**) e o avanço (**20 a 600 mm/min**, padrão **500 mm/min**). O curso máximo de busca pode chegar a **300 mm por eixo**, mas inicia em **30 mm** para evitar percursos longos antes de verificar fisicamente a bancada.
 5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
 6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home XY sincronizado — recuo 5 mm**.
 7. Aguarde a indicação **Home XY concluído**.
@@ -290,7 +290,7 @@ O código editável está em `smartv42_src/`. As **dez partes** são fragmentos 
 | A CNC não conecta ou dá `Permission denied` | Confira porta USB, cabo, acesso à serial e se outro programa mantém a porta aberta | `04_grbl` / `01_config` |
 | O servidor inicia, mas a interface não abre de outro computador | Está vinculado a `127.0.0.1`; abra no próprio host ou configure um acesso remoto apropriado separadamente | `10_server` |
 | GRBL não responde a `?` | Confira porta correta, baud `115200`, alimentação e firmware | `04_grbl` |
-| Home XY anda pouco no X e acusa ausência de sensores/status | A busca sincronizada move até 0,5 mm por eixo por comando; a nova rotina tolera duas leituras `?` perdidas. Se persistir, teste USB/alimentação, `Pn:X` e `Pn:Y` sem potência nos motores | `04_grbl` / `docs/HOME_XY_CHAVES.md` |
+| Home XY anda pouco no X e acusa ausência de sensores/status | A busca sincronizada move por trechos de 5 mm por padrao (ate 10 mm) por eixo; a nova rotina tolera duas leituras `?` perdidas. Se persistir, teste USB/alimentação, `Pn:X` e `Pn:Y` sem potência nos motores | `04_grbl` / `docs/HOME_XY_CHAVES.md` |
 | Botão Abortar responde lentamente | Abortar envia `!` e `Ctrl+X` pela USB sem aguardar status; se não parar, use a **parada elétrica física**. O Home deve ser refeito | `04_grbl` / `10_server` |
 | `Pn:X` / `Pn:Y` não aparece ao pressionar a chave | Verifique o conector, estado elétrico, polaridade e relatório de status **com motores desenergizados** | Ligação / `04_grbl` |
 | Home XY não inicia com aviso de `$21`, `$22` ou `$20` | Verifique `$$` e a configuração exigida pelo Home; não desative limites sem parada elétrica independente | `04_grbl` |
@@ -373,3 +373,7 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 O Home XY agora aceita **recuo X/Y configurado separadamente** na janela (2 a 10 mm, padrao 5 mm para cada eixo). O formulario mantem a verificacao explicita de parada eletrica, mas nao repete a mesma confirmacao em `confirm()`. A remocao do G-code importado em memoria e a importacao bem-sucedida tambem nao exibem popups redundantes.
 
 **Continuam obrigatorios:** chaves livres para concluir Home e gravar G54; erros GRBL e status confiavel; bloqueio de Z fisico antes do Home validado; abortamento em tempo real; limite fisico e geometria valida da matriz. O arquivo de bancada que desativa esses elementos nao deve ser tratado como substituto direto do controlador real.
+
+### Home XY sem solavancos de 0,5 mm
+
+O Home usava jogs de apenas **0,5 mm** e reiniciava os motores a cada trecho, produzindo movimento intermitente. O campo **Trecho de busca (mm)** agora aceita **0,1 a 10 mm**, padrao **5 mm**. A busca de X e Y continua coordenada enquanto ambos estao pendentes. O programa monitora os sensores durante cada trecho (consulta a cada ~50 ms) e cancela o jog ao detectar uma chave; depois recua o eixo detectado e prossegue com o outro. **Trecho** nao e **busca maxima** (ate 300 mm) nem **recuo apos contato** (2 a 10 mm, configurados individualmente). Com segmentos grandes, o movimento pode ultrapassar o ponto de acionamento devido a latencia serial e ao tempo de frenagem: nunca use o valor maior sem verificar a folga e a parada independente na bancada.
