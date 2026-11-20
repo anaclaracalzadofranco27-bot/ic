@@ -112,6 +112,10 @@ PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
 PONTO_C = [297.000, -297.000]   # Topo-Direita da matriz  (col 99, lin 0)
 PONTO_D = [0.000, -297.000]     # Topo-Esquerda da matriz (col 0,  lin 0)
 
+# Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
+# So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
+BORDA_Y_OPOSTA_CALIBRADA = False
+
 X_INICIO_FISICO = 0.000
 Y_INICIO_FISICO = 0.000
 X_FIM_FISICO = 297.000
@@ -254,6 +258,7 @@ def salvar_calibracao_matriz():
         "ponto_b": PONTO_B,
         "ponto_c": PONTO_C,
         "ponto_d": PONTO_D,
+        "borda_y_oposta_calibrada": BORDA_Y_OPOSTA_CALIBRADA,
         "origem_x_na_direita": ORIGEM_X_NA_DIREITA,
         "inverter_jog_x": INVERTER_JOG_X,
         "inverter_jog_y": INVERTER_JOG_Y,
@@ -276,6 +281,7 @@ def carregar_calibracao_matriz():
     """
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
     global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
+    global BORDA_Y_OPOSTA_CALIBRADA
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
@@ -291,6 +297,7 @@ def carregar_calibracao_matriz():
         sx = -1.0 if float(dados.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
         sy = -1.0 if float(dados.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
         PONTO_A, PONTO_B, PONTO_C, PONTO_D = pontos
+        BORDA_Y_OPOSTA_CALIBRADA = dados.get("borda_y_oposta_calibrada") is True
         USAR_CALIBRACAO_4_PONTOS = True
         ORIGEM_X_NA_DIREITA = origem_direita
         INVERTER_JOG_X = bool(dados.get("inverter_jog_x", INVERTER_JOG_X))
@@ -427,6 +434,7 @@ def obter_estado_coordenadas():
         "ponto_b": [round(float(PONTO_B[0]), 3), round(float(PONTO_B[1]), 3)],
         "ponto_c": [round(float(PONTO_C[0]), 3), round(float(PONTO_C[1]), 3)],
         "ponto_d": [round(float(PONTO_D[0]), 3), round(float(PONTO_D[1]), 3)],
+        "borda_y_oposta_calibrada": BORDA_Y_OPOSTA_CALIBRADA,
         "x_meio_fisico": round(float(x_meio), 3),
         "y_meio_fisico": round(float(y_meio), 3),
         "curso_x_grbl": round(float(curso_x), 3),
@@ -2522,11 +2530,12 @@ def configurar_sistema_coordenadas(
     limite_y_mm=None, x_inicio_fisico=None, y_inicio_fisico=None,
     x_fim_fisico=None, y_fim_fisico=None,
     ponto_a=None, ponto_b=None, ponto_c=None, ponto_d=None,
+    medicao_chave_y_oposta=False,
 ):
     """Calibracao atomica. Mudar sentido de jog nunca altera geometria A/B/C/D."""
     global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y
     global INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
-    global PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    global PONTO_A, PONTO_B, PONTO_C, PONTO_D, BORDA_Y_OPOSTA_CALIBRADA
     global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO
 
     candidatos = [
@@ -2547,6 +2556,11 @@ def configurar_sistema_coordenadas(
         raise ValueError("Limites fisicos legados desativados: use somente os quatro cantos A/B/C/D.")
     # Os quatro cantos descrevem diretamente a posicao fisica no sistema G54.
     PONTO_A, PONTO_B, PONTO_C, PONTO_D = candidatos
+    if medicao_chave_y_oposta:
+        BORDA_Y_OPOSTA_CALIBRADA = True
+    elif ponto_c is not None or ponto_d is not None or ponto_a is not None or ponto_b is not None:
+        # A alteracao manual dos cantos desfaz a confianca da medicao da outra chave.
+        BORDA_Y_OPOSTA_CALIBRADA = False
     X_INICIO_FISICO, Y_INICIO_FISICO = PONTO_A
     X_FIM_FISICO, Y_FIM_FISICO = PONTO_C
     if origem_x_na_direita is not None:
