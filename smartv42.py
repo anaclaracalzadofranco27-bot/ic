@@ -928,6 +928,9 @@ class PortaSimulada:
         self.rapid_override_pct = 100
         self.spindle_override_pct = 100
         self.check_mode = False
+        # Chaves VIRTUAIS apenas no simulador: testes reproduziveis sem acionar hardware.
+        self.home_simulado_x = -3.0
+        self.home_simulado_y = 3.0
         self.settings = {
             0: ("10", "Step pulse time, microseconds"),
             1: ("25", "Step idle delay, milliseconds"),
@@ -976,10 +979,14 @@ class PortaSimulada:
             wy = self.mpos[1] - self.wco[1]
             wz = self.mpos[2] - self.wco[2]
             fs = int(self.feed_atual * self.override_pct / 100.0) if self.estado in ("Run", "Jog") else 0
+            pn_simulado = ("X" if self.mpos[0] <= self.home_simulado_x else "") + (
+                "Y" if self.mpos[1] >= self.home_simulado_y else ""
+            )
+            campo_pn = f"|Pn:{pn_simulado}" if pn_simulado else ""
             status = (
                 f"<{self.estado}|MPos:{self.mpos[0]:.3f},{self.mpos[1]:.3f},{self.mpos[2]:.3f}|"
                 f"WPos:{wx:.3f},{wy:.3f},{wz:.3f}|WCO:{self.wco[0]:.3f},{self.wco[1]:.3f},{self.wco[2]:.3f}|"
-                f"FS:{fs},0|Ov:{self.override_pct},{self.rapid_override_pct},{self.spindle_override_pct}>"
+                f"FS:{fs},0|Ov:{self.override_pct},{self.rapid_override_pct},{self.spindle_override_pct}{campo_pn}>"
             )
             self.fila.append((status, 0.0))
             return
@@ -1235,6 +1242,12 @@ class ControladorGRBL:
         self.porta_atual = PORTA_GRBL
         self.conexao_real = False
         self.modo_simulacao = False
+        # Referencia XY eh valida somente ate reset, alarme ou reconexao da USB.
+        self.home_xy_referenciado = False
+        self.home_xy_estado = {
+            "ativo": False, "concluido": False, "fase": "Nao referenciado",
+            "eixo": "", "erro": "", "passos": 0,
+        }
         self.config_eeprom = {}
         self.offsets_wcs = {}
         self.estado_parser = "G0 G54 G17 G21 G90 G94"
@@ -1254,6 +1267,7 @@ class ControladorGRBL:
         global SIMULADO
         porta = (porta or PORTA_GRBL).strip()
         baud = baud or BAUD
+        self.invalidar_home_xy("Conexao USB reiniciada")
         with self.lock:
             if self.ser and getattr(self.ser, "is_open", False):
                 try:
@@ -1267,13 +1281,12 @@ class ControladorGRBL:
                 self.porta_atual = "SIMULADO"
                 self.modo_simulacao = True
                 self.ser = PortaSimulada("grbl")
+                registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
             elif serial is None:
                 self.ser = None
                 self.porta_atual = "DESCONECTADO"
                 registrar_log("pyserial ausente: conexao fisica indisponivel. Sem fallback para simulacao.", "erro")
                 return False
-                registrar_log("Conexao GRBL em Modo Simulado (UGS Ready).", "info")
-                registrar_terminal("SYS", "Conectado ao Simulador GRBL 1.1h (UGS Completo)", "ok")
             else:
                 candidatas = [porta]
                 for p_alt in ("/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0", "/dev/ttyUSB1"):
@@ -1385,6 +1398,8 @@ class ControladorGRBL:
 
     def _parse_status(self, linha):
         self.ultimo_status_raw = linha
+        if linha.startswith(("<Alarm", "<Sleep")):
+            self.invalidar_home_xy(f"GRBL informou {linha.split('|', 1)[0]}")
         partes = linha.strip("<>").split("|")
         if partes:
             self.estado = partes[0].split(":")[0].upper()
@@ -1464,6 +1479,7 @@ class ControladorGRBL:
         return self.enviar_override_tempo_real("jog_cancel")
 
     def soft_reset(self):
+        self.invalidar_home_xy("Soft reset GRBL")
         if not self.ser:
             return False
         registrar_terminal("TX", "Ctrl+X (0x18 Soft-Reset)", "aviso")
@@ -1502,6 +1518,8 @@ class ControladorGRBL:
         cmd_limpo = comando.strip()
         if not cmd_limpo:
             return True, ""
+        if cmd_limpo.upper() == "$H":
+            return False, "Homing $H exige eixo Z nesse firmware. Use Home XY por chaves no SmartV42."
         # Todas as entradas GRBL (inclusive terminal e jog) obedecem a separacao do Z GPIO.
         if re.search(r"Z\s*[+-]?(?:\d|\.)", cmd_limpo.upper()):
             return False, "GRBL bloqueou coordenada cartesiana Z; use comandos discretos Z1..Z8."
@@ -1528,12 +1546,15 @@ class ControladorGRBL:
                         self._parse_status(linha)
                         continue
                     if linha == "ok":
+                        if re.match(r"^(?:G10\b|G92\b|G92\.1\b|\$X\b|\$2[012]=)", cmd_limpo, re.I):
+                            self.invalidar_home_xy("Referencia alterada por comando GRBL externo")
                         if registrar_no_terminal:
                             registrar_terminal("RX", "ok", "ok")
                         if logar:
                             registrar_log(f"Comando {cmd_limpo} executado (ok).", "ok")
                         return True, "\n".join(linhas_resposta)
                     if linha.startswith("ALARM"):
+                        self.invalidar_home_xy(f"GRBL retornou {linha}")
                         msg = f"GRBL retornou {explicar_alarme(linha)}"
                         registrar_log(msg, "erro")
                         if registrar_no_terminal:
@@ -1625,6 +1646,8 @@ class ControladorGRBL:
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
+        if not SIMULADO and not self.home_xy_referenciado:
+            return False, "sem referencia XY", "Execute Home XY por chaves antes de movimentos absolutos."
         if not self.ser or (not SIMULADO and not self.conexao_real):
             return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
         if fora_dos_limites(x_mm, y_mm):
@@ -1744,16 +1767,193 @@ class ControladorGRBL:
             registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
         return bool(ok1 and ok2)
 
+
+    def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
+        """Nao persiste a referencia: GRBL perde confiabilidade apos reset/alarme."""
+        self.home_xy_referenciado = False
+        estado = getattr(self, "home_xy_estado", None)
+        if estado is not None:
+            estado.update({"concluido": False})
+            if not estado.get("ativo"):
+                estado.update({"fase": "Nao referenciado", "erro": motivo})
+
+    def _estado_home_xy(self, fase, eixo="", passos=None):
+        self.home_xy_estado.update({"fase": fase, "eixo": eixo})
+        if passos is not None:
+            self.home_xy_estado["passos"] = passos
+
+    def _status_home_xy(self):
+        if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
+            raise RuntimeError("Home XY cancelado pelo operador.")
+        if _job_pausado:
+            raise RuntimeError("Home XY interrompido pelo Hold.")
+        status = self.ler_status_grbl(timeout=0.7)
+        if not status:
+            raise RuntimeError("Sem resposta ao consultar os sensores X/Y. Home bloqueado.")
+        if not status.startswith(("<Idle", "<Jog", "<Run")):
+            raise RuntimeError(f"Estado GRBL nao permite Home XY: {status}")
+        return status
+
+    def _jog_passo_home_xy(self, eixo, deslocamento, feed, passo_max=2.0,
+                          detectar_contato=True):
+        """Passo incremental: detecta chave na busca, mas a ignora durante recuo."""
+        if eixo not in ("X", "Y") or abs(deslocamento) > passo_max + 1e-6:
+            raise RuntimeError("Passo de Home XY excede o limite permitido.")
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL nao esta Idle antes do passo de Home XY.")
+        posicao_antes = self.mpos[0 if eixo == "X" else 1]
+        comando = f"$J=G91 G21 {eixo}{deslocamento:.3f} F{feed:.1f}"
+        ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
+        if not ok:
+            raise RuntimeError(f"GRBL rejeitou jog de {eixo}: {msg}")
+        prazo = time.monotonic() + max(5.0, abs(deslocamento) * 60.0 / feed + 4.0)
+        acionou = False
+        movimento_observado = False
+        while time.monotonic() < prazo:
+            estado = self._status_home_xy()
+            if estado.startswith(("<Jog", "<Run")):
+                movimento_observado = True
+            if abs(self.mpos[0 if eixo == "X" else 1] - posicao_antes) >= 0.005:
+                movimento_observado = True
+            if detectar_contato and eixo in pinos_ativos(estado):
+                if not acionou and estado.startswith(("<Jog", "<Run")):
+                    # Jog cancel e em tempo real, nao um comando de movimento adicional.
+                    if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
+                        raise RuntimeError("Falhou o envio de cancelamento de jog.")
+                acionou = True
+            if estado.startswith("<Idle") and movimento_observado:
+                return acionou or (detectar_contato and eixo in pinos_ativos(estado)), estado
+            time.sleep(0.025)
+        self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
+        raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
+
+    def _home_um_eixo(self, eixo, direcao, curso_max, passo, feed, recuo):
+        """Busca a chave fisica em passos curtos, com curso maximo verificavel."""
+        self._estado_home_xy(f"Buscando chave {eixo}", eixo)
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL precisa estar Idle antes da busca.")
+        # Caso a maquina ja esteja sobre o contato, libera primeiro sem buscar alem do limite.
+        if eixo in pinos_ativos(estado):
+            self._estado_home_xy(f"Liberando chave {eixo} inicialmente acionada", eixo)
+            self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
+                                    detectar_contato=False)
+            estado = self._status_home_xy()
+            if eixo in pinos_ativos(estado):
+                raise RuntimeError(f"Chave {eixo} continuou acionada apos liberar {recuo:.1f} mm.")
+
+        percorrido = 0.0
+        achou = False
+        while percorrido < curso_max - 1e-6:
+            incremento = min(passo, curso_max - percorrido)
+            achou, estado = self._jog_passo_home_xy(eixo, direcao * incremento, feed, passo_max=passo)
+            percorrido += incremento
+            self._estado_home_xy(f"Busca {eixo}: {percorrido:.1f}/{curso_max:.1f} mm", eixo)
+            if achou:
+                break
+        if not achou:
+            raise RuntimeError(f"Chave {eixo} nao encontrada no curso limitado de {curso_max:.1f} mm.")
+
+        # A chave deve continuar acionada apos o motor parar: evita referencia por ruido.
+        time.sleep(0.05)
+        estado = self._status_home_xy()
+        if eixo not in pinos_ativos(estado):
+            raise RuntimeError(f"Leitura da chave {eixo} instavel; nao foi possivel confirmar o contato.")
+        self._estado_home_xy(f"Recuando {recuo:.1f} mm da chave {eixo}", eixo)
+        self._jog_passo_home_xy(eixo, -direcao * recuo, feed, passo_max=recuo,
+                                detectar_contato=False)
+        time.sleep(0.05)
+        estado = self._status_home_xy()
+        if eixo in pinos_ativos(estado):
+            raise RuntimeError(f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm.")
+        registrar_log(f"Home XY: eixo {eixo} referenciado pela chave e recuado {recuo:.1f} mm.", "ok")
+
+    def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
+                               coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
+                               recuo=2.0, seguranca_confirmada=False):
+        """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
+        self.invalidar_home_xy("Iniciando nova referencia XY")
+        self.home_xy_estado.update({
+            "ativo": True, "concluido": False, "erro": "",
+            "fase": "Validando configuracao GRBL", "eixo": "", "passos": 0,
+        })
+        try:
+            if not seguranca_confirmada:
+                raise ValueError("Confirme parada de emergencia fisica independente antes de iniciar.")
+            if not self.ser or (not SIMULADO and not self.conexao_real):
+                raise RuntimeError("Controladora GRBL fisica nao conectada.")
+            if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
+                raise ValueError("Defina expressamente a direcao de busca X e Y em coordenadas GRBL.")
+            for nome, valor in (("curso X", curso_x), ("curso Y", curso_y), ("coordenada X", coord_x),
+                                ("coordenada Y", coord_y), ("passo", passo), ("feed", feed)):
+                if not math.isfinite(valor):
+                    raise ValueError(f"{nome} deve ser finito.")
+            if not 0.1 <= passo <= 0.5 or not 20.0 <= feed <= 150.0:
+                raise ValueError("Home requer passo 0.1..0.5 mm e feed 20..150 mm/min.")
+            if not 1.0 <= curso_x <= 320.0 or not 1.0 <= curso_y <= 320.0:
+                raise ValueError("Cursos de busca devem estar no intervalo de 1..320 mm.")
+            if recuo != 2.0:
+                raise ValueError("Esta rotina usa recuo fixo de 2.0 mm.")
+            if fora_dos_limites(coord_x, coord_y):
+                raise ValueError("Posicao declarada apos o recuo nao pertence aos limites A/B/C/D.")
+
+            ok_cfg, msg_cfg, cfg = self.consultar_configuracoes_grbl()
+            if not ok_cfg or "$21" not in cfg or "$22" not in cfg:
+                raise RuntimeError(f"Nao foi possivel confirmar $21 e $22 do firmware: {msg_cfg}")
+            if float(cfg["$22"]) != 0.0:
+                raise RuntimeError("Desative o homing do firmware ($22=0), conferindo pelo comando $ antes.")
+            if float(cfg["$21"]) != 0.0:
+                raise RuntimeError(
+                    "$21=1 causaria ALARM nas chaves X/Y. Home por software requer $21=0, "
+                    "com parada fisica independente. O programa NAO desabilita limites automaticamente."
+                )
+            if float(cfg.get("$20", "0")) != 0:
+                raise RuntimeError("$20=1 (soft limits) depende de referencia valida do GRBL; revise $20.")
+            self._status_home_xy()
+            self._home_um_eixo("X", direcao_x, curso_x, passo, feed, recuo)
+            self._home_um_eixo("Y", direcao_y, curso_y, passo, feed, recuo)
+            if _job_abortar or abortar_job_evento.is_set():
+                raise RuntimeError("Home cancelado antes de gravar origem.")
+            estado = self._status_home_xy()
+            if not estado.startswith("<Idle") or any(eixo in pinos_ativos(estado) for eixo in "XY"):
+                raise RuntimeError("Home XY nao pode definir origem com fins de curso acionados.")
+            self._estado_home_xy("Gravando origem G54 (sem G92)")
+            # Limpa offsets temporarios G92 legados, depois registra somente G54.
+            for comando in ("G21", "G90", "G54", "G92.1",
+                            f"G10 L20 P1 X{coord_x:.3f} Y{coord_y:.3f}"):
+                ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
+                if not ok:
+                    raise RuntimeError(f"GRBL recusou {comando}: {msg}")
+            estado = self._status_home_xy()
+            if abs(self.wpos[0] - coord_x) > 0.15 or abs(self.wpos[1] - coord_y) > 0.15:
+                raise RuntimeError(
+                    f"Origem nao confirmada pelo GRBL: WPos={self.wpos[:2]}, esperado=({coord_x},{coord_y})."
+                )
+            self.home_xy_referenciado = True
+            self.home_xy_estado.update({"concluido": True, "fase": "Home XY concluido", "erro": "", "eixo": ""})
+            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo de 2.0 mm em ambos; "
+                   f"G54 definido em X{coord_x:.3f} Y{coord_y:.3f}.")
+            registrar_log(msg, "ok")
+            return True, msg
+        except Exception as exc:
+            self.home_xy_referenciado = False
+            erro = str(exc)
+            self.home_xy_estado.update({"concluido": False, "fase": "Home XY interrompido", "erro": erro})
+            registrar_log(f"HOME XY NAO CONCLUIDO: {erro}", "erro")
+            # O jog eh finito; um cancelamento adicional evita que a proxima etapa prossiga.
+            try:
+                if self.ser:
+                    self.enviar_byte_tempo_real(b"\x85", "Home XY cancelado/interrompido")
+            except Exception:
+                pass
+            return False, erro
+        finally:
+            self.home_xy_estado["ativo"] = False
+
     def executar_homing(self):
-        registrar_log("Executando ciclo de Homing físico ($H)...", "info")
-        ok, msg = self.enviar_comando("$H", timeout=45.0, logar=False)
-        if ok:
-            self.aguardar_grbl_idle(timeout=45.0)
-            self.zerar_eixo("XY")
-            registrar_log("Homing ($H) concluido e origem (0,0,0) calibrada!", "ok")
-        else:
-            registrar_log(f"Falha no Homing ($H): {msg}", "erro")
-        return ok
+        registrar_log("Home $H desabilitado nesta instalacao: exige Z. Use Home XY por chaves.", "erro")
+        return False
 
     def calibrar_home(
         self,
@@ -1956,7 +2156,7 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
             "  [ORIGEM 0,0]  ORIGEM_DIREITA (Define ponto 0,0 na extremidade direita da matriz)\n"
             "                ORIGEM_ESQUERDA (Define ponto 0,0 na extremidade esquerda da matriz)\n"
             "                SINAL_X=-1 ou SINAL_X=1 (Define se para ir para a esquerda o GRBL usa X- ou X+)\n"
-            "                HOME_CAL (Calibra Home 0,0,0 na posicao atual + salva G28.1)\n"
+            "                HOME_CAL (Apenas origem manual; NAO referencia sensores nem libera jobs)\n"
             "  [PINOS Z]     PINOS (Mostra sequencia GPIO [5, 6, 16, 27, 23, 17, 24, 25] e pulsos)\n"
             "                Z1 a Z8 (Dispara nivel Z) | TESTE_Z (Testa reles 1 a 8) | SEQ_Z (Sequencia 1..8)\n"
             "                MS=10 ou MS=15,10,10 (Configura duracao do pulso ON, OFF e Pausa em ms)\n"
@@ -2104,6 +2304,33 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
     ok, resp = ctrl_grbl.enviar_comando(cmd, timeout=timeout_cmd, logar=True, registrar_no_terminal=True)
     ctrl_grbl.atualizar_status()
     return {"ok": ok, "resposta": resp}
+
+
+def iniciar_home_xy_em_background(grbl, **parametros):
+    """Reserva a maquina durante todo o Home XY. Abort continua disponivel."""
+    global _operacao_manual, _job_abortar, _job_pausado
+    with _job_lock:
+        if _job_em_execucao or _operacao_manual:
+            return False, "Maquina ocupada com job ou comando manual."
+        _operacao_manual = True
+        _job_abortar = False
+        _job_pausado = False
+        abortar_job_evento.clear()
+    def _worker():
+        global _operacao_manual
+        try:
+            grbl.executar_home_xy_chaves(**parametros)
+        finally:
+            with _job_lock:
+                _operacao_manual = False
+    try:
+        threading.Thread(target=_worker, daemon=True, name="home-xy-chaves").start()
+    except Exception as exc:
+        with _job_lock:
+            _operacao_manual = False
+        return False, f"Nao foi possivel iniciar Home XY: {exc}"
+    return True, "Home XY iniciou; acompanhe o estado e use Abortar para interromper."
+
 # ==============================================================================
 # SECAO 3: CONTROLADOR ARDUINO DE RESET SUPERIOR (4 ATUADORES + EIXO X')
 # ==============================================================================
@@ -2871,6 +3098,9 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
+    if hasattr(grbl, "home_xy_referenciado") and not SIMULADO and not grbl.home_xy_referenciado:
+        registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
+        return False
     try:
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:
@@ -3150,7 +3380,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌖ Calibrar Home / (0,0)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -3285,8 +3515,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
       <div class="grid-4">
-        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ Home ($H)</button>
-        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌖ Calibrar (0,0)</button>
+        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
+        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home por sensores X/Y</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -3325,7 +3555,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <button class="jog-btn" onclick="jog(1, -1)">↘</button>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
-          <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ Definir Ponto Atual = (0,0)</button>
+          <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home XY (automatico)</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
             <button class="btn" onclick="acaoUGS('zerar_x')">Zerar X0</button>
             <button class="btn" onclick="acaoUGS('zerar_y')">Zerar Y0</button>
@@ -3466,19 +3696,56 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
 <div class="modal-backdrop" id="modal-home">
   <div class="modal">
     <div class="modal-header">
-      <span>⌖ Calibracao de Home e Ponto (0,0) na Extremidade Direita da Matriz</span>
+      <span>⌂ Home XY automatico nas chaves — recuo de 2 mm (sem eixo Z)</span>
       <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
     </div>
     <div class="modal-body">
       <div class="coord-banner">
-        <strong>Como funciona a correcao do (0,0) na extremidade direita:</strong><br>
-        • Na matriz fisica, o cabecote inicia na <strong>extremidade direita (X = 0.0 mm, Y = 0.0 mm)</strong>.<br>
-        • Com <strong>Origem X na Direita</strong> ativada, a borda direita da imagem (coluna 99) e plotada em <strong>X = 0.0 mm</strong> e o cabecote varre da direita para a esquerda ate <strong>X = 247.5 mm</strong> (coluna 0), mantendo a imagem na orientacao correta (sem espelhar!).
+        <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
+        O SmartV42 busca a chave X e depois a Y, avanca em passos de ate 0,5 mm,
+        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.<br>
+        <strong>Atencao:</strong> Com $21=1, atingir as chaves causa alarme. Esta rotina exige
+        $22=0 e $21=0 confirmados pelo GRBL, sem alterar a EEPROM automaticamente.
+        Nesse modo as chaves NAO funcionam como limites rigidos: uma parada de emergencia
+        eletrica independente e protecao mecanica sao obrigatorias. O deslocamento
+        maximo so limita o software; nao impede colisoes se houver falha de comunicacao.
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;gap:7px;">
+        <div class="card-title">Parametros da busca X/Y</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <label>Direcao X no GRBL
+            <select id="home-dir-x" style="width:95px;">
+              <option value="">Escolher</option><option value="-1">X negativo</option><option value="1">X positivo</option>
+            </select>
+          </label>
+          <label>Direcao Y no GRBL
+            <select id="home-dir-y" style="width:95px;">
+              <option value="">Escolher</option><option value="-1">Y negativo</option><option value="1">Y positivo</option>
+            </select>
+          </label>
+          <label>Curso max X (mm) <input id="home-curso-x" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
+          <label>Curso max Y (mm) <input id="home-curso-y" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
+        </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
+          <label>Feed (mm/min) <input id="home-feed" type="number" min="20" max="150" step="10" value="120" style="width:75px;"></label>
+          <label>G54 X apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 Y apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
+        </div>
+        <label style="font-size:11px;display:flex;gap:6px;align-items:flex-start;">
+          <input type="checkbox" id="home-confirmacao-seguranca" style="width:auto;">
+          Confirmo que ha parada de emergencia fisica independente e protecoes
+          que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
+        </label>
+        <div class="row">
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home X e Y — recuo 2 mm</button>
+          <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
+        </div>
+        <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
       </div>
       <div class="grid-3">
-        <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ 1. Definir Posicao Atual como (0,0)</button>
-        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ 2. Executar Homing Hardware ($H)</button>
-        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ 3. Mover Cabecote ao Ponto A (0,0)</button>
+        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ Ir ao ponto A (apos Home)</button>
+        <button class="btn" onclick="abrirModal('modal-terminal')">⌨ Verificar $21, $22 e Pn:</button>
       </div>
       <div class="card">
         <div class="card-title"><span>Ajuste Fino de Direcao e Limites Fisicos (250 mm x 250 mm)</span></div>
@@ -3504,7 +3771,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <div style="font-size:11px;color:var(--muted);">
-        Comandos: <code>$$</code>, <code>$X</code>, <code>$H</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
+        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
       </div>
       <div class="log-box" id="term-historico" style="height:280px;font-size:11.5px;"></div>
       <div class="row">
@@ -3630,6 +3897,29 @@ async function jog(dxSign, dySign) {
 async function acaoUGS(tipo) {
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
+  atualizarStatus();
+}
+
+async function iniciarHomeXY() {
+  const x = document.getElementById('home-dir-x').value;
+  const y = document.getElementById('home-dir-y').value;
+  const seguro = document.getElementById('home-confirmacao-seguranca').checked;
+  if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
+  if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
+  if (!confirm('A CNC vai movimentar X e Y ATE as chaves selecionadas.\n' +
+               'Verifique direcoes, percurso livre, limites maximos, parada fisica e $21=0 / $22=0.\n' +
+               'Continuar?')) return;
+  const valor = id => Number(document.getElementById(id).value);
+  const resp = await apiPost('iniciar_home_xy', {
+    direcao_x: Number(x), direcao_y: Number(y),
+    curso_x: valor('home-curso-x'), curso_y: valor('home-curso-y'),
+    passo: valor('home-passo'), feed: valor('home-feed'),
+    coord_x: valor('home-coord-x'), coord_y: valor('home-coord-y'),
+    seguranca_confirmada: seguro
+  });
+  document.getElementById('home-confirmacao-seguranca').checked = false;
+  if (!resp.ok) alert(resp.erro || 'Falha ao iniciar Home XY.');
+  else document.getElementById('home-xy-status').textContent = resp.mensagem;
   atualizarStatus();
 }
 
@@ -3860,6 +4150,8 @@ async function carregarEstadoInicial() {
     if (d.coord.ponto_a) {
       document.getElementById('inp-xa').value = d.coord.ponto_a[0];
       document.getElementById('inp-ya').value = d.coord.ponto_a[1];
+      document.getElementById('home-coord-x').value = d.coord.ponto_a[0];
+      document.getElementById('home-coord-y').value = d.coord.ponto_a[1];
       document.getElementById('inp-xb').value = d.coord.ponto_b[0];
       document.getElementById('inp-yb').value = d.coord.ponto_b[1];
       document.getElementById('inp-xc').value = d.coord.ponto_c[0];
@@ -3904,7 +4196,16 @@ async function atualizarStatus() {
     };
     document.getElementById('dro-pn').textContent = `Pn:${st.pinos_ativos || 'Nenhum'} | Col:${posCabecote.x_idx},Lin:${posCabecote.y_idx}`;
 
-    if (st.job && st.job.ativo) {
+    if (st.home_xy) {
+      const h = st.home_xy;
+      const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
+          : h.referenciado ? 'Home XY referenciado (recuo 2 mm)'
+          : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
+      document.getElementById('home-xy-status').textContent = resumo;
+    }
+    if (st.home_xy && st.home_xy.ativo) {
+      document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
+    } else if (st.job && st.job.ativo) {
       document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
       document.getElementById('info-progresso').textContent =
@@ -4003,6 +4304,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "coord": obter_estado_coordenadas(),
                 "idx": list(mm_fisico_para_indice(_grbl_global.wpos[0], _grbl_global.wpos[1])),
                 "job": _job_progresso,
+                "home_xy": dict(_grbl_global.home_xy_estado, referenciado=_grbl_global.home_xy_referenciado),
                 "logs": list(ESTADO_ESTUDIO["logs"])[:35],  # mais recentes primeiro
             })
             return
@@ -4026,7 +4328,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         acao = dados.get("action", "")
         # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
         # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
-        simultanea = acao == "iniciar_job" or (
+        simultanea = acao in ("iniciar_job", "iniciar_home_xy") or (
             acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
         )
         if simultanea:
@@ -4175,6 +4477,37 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": ok})
             return
 
+        if acao == "iniciar_home_xy":
+            if dados.get("seguranca_confirmada") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirme a parada de emergencia fisica independente."}, 400)
+                return
+            direcao_x = int(dados.get("direcao_x", 0))
+            direcao_y = int(dados.get("direcao_y", 0))
+            if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
+                self._enviar_json({"ok": False, "erro": "Selecione o sentido de busca GRBL de X e Y."}, 400)
+                return
+            curso_x = float(dados.get("curso_x", 30))
+            curso_y = float(dados.get("curso_y", 30))
+            passo = float(dados.get("passo", 0.5))
+            feed = float(dados.get("feed", 120))
+            coord_x = float(dados.get("coord_x", PONTO_A[0]))
+            coord_y = float(dados.get("coord_y", PONTO_A[1]))
+            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
+                self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
+                return
+            if not _grbl_global.ser or (not SIMULADO and not _grbl_global.conexao_real):
+                self._enviar_json({"ok": False, "erro": "Conecte a CNC fisica antes de iniciar Home XY."}, 409)
+                return
+            ok, mensagem = iniciar_home_xy_em_background(
+                _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
+                curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
+                coord_x=coord_x, coord_y=coord_y, recuo=2.0,
+                seguranca_confirmada=True,
+            )
+            self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
+                              200 if ok else 409)
+            return
+
         if acao == "ugs_cmd":
             cmd = dados.get("cmd", "")
             if cmd == "hold":
@@ -4196,9 +4529,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "soft_reset":
                 _grbl_global.soft_reset()
             elif cmd == "home_grbl":
-                _grbl_global.executar_homing()
+                self._enviar_json({"ok": False, "erro": "Home $H desabilitado: use Home XY por chaves sem Z."}, 409)
+                return
             elif cmd == "definir_home_manual":
-                _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+                ok_manual = _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+                self._enviar_json({
+                    "ok": bool(ok_manual), "erro": None if ok_manual else "Falha ao definir referencia manual.",
+                    "aviso": "Origem manual nao substitui Home XY por chaves.",
+                })
+                return
             elif cmd == "zerar_x":
                 _grbl_global.zerar_eixo("X")
             elif cmd == "zerar_y":
@@ -4260,6 +4599,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "iniciar_job":
+            if not SIMULADO and not _grbl_global.home_xy_referenciado:
+                self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
+                return
             if estado_importacao_gcode["programa"] is not None:
                 ok = executar_job_gcode_em_background(
                     _grbl_global, estado_importacao_gcode["programa"],
