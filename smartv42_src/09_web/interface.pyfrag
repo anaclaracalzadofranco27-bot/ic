@@ -550,7 +550,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="modal-body">
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
+        O SmartV42 busca X e Y simultaneamente em trechos coordenados de ate 10 mm
+        por eixo (padrao 5 mm, 10 vezes maior que antes). A leitura do sensor
+        continua ativa durante o movimento, para cancelar o jog ao detectar contato.
+        Trechos maiores exigem espaco livre e chave funcionando: a USB nao garante
+        parada instantanea no batente.
         Quando uma chave aciona, o Home interrompe o jog conjunto,
         confirma o contato, recua o eixo correspondente na distancia configurada
         e continua com o eixo pendente.
@@ -591,7 +595,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
-          <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
+          <label title="Distancia de cada segmento da busca, nao o recuo apos o contato. Padrao 5 mm; ate 10 mm se o curso livre for confirmado.">Trecho de busca (mm) <input id="home-passo" type="number" min="0.1" max="10" step="0.5" value="5" style="width:70px;"></label>
           <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
           <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
           <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
@@ -807,9 +811,12 @@ async function iniciarHomeXY() {
   const cursoX = Number(document.getElementById('home-curso-x').value);
   const cursoY = Number(document.getElementById('home-curso-y').value);
   const feedHome = Number(document.getElementById('home-feed').value);
+  const trechoBusca = Number(document.getElementById('home-passo').value);
   if (!(cursoX >= 1 && cursoX <= 300 && cursoY >= 1 && cursoY <= 300 &&
-        feedHome >= 20 && feedHome <= 600)) {
-    alert('Configure curso de busca entre 1 e 300 mm e feed entre 20 e 600 mm/min.');
+        feedHome >= 20 && feedHome <= 600 &&
+        trechoBusca >= 0.1 && trechoBusca <= 10)) {
+    document.getElementById('home-xy-status').textContent =
+      'Configure busca 1..300 mm, trecho 0,1..10 mm e feed 20..600 mm/min.';
     return;
   }
   const recuoX = Number(document.getElementById('home-recuo-x').value);
