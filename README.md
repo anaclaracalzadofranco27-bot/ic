@@ -367,3 +367,9 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 **Atenção ao limite de 300 mm:** ele se refere à **busca da chave**, não ao recuo. O recuo depois do acionamento continua em 5 mm. Como o curso nominal da bancada é aproximadamente 299 mm, confira fisicamente se 300 mm são seguros e não aumente a busca antes dessa verificação. Com hard limits desabilitados ($21=0), o software não substitui uma parada elétrica independente.
 
 **Direção física do Y:** a interface sugere Y negativo no Home. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
+
+### Modo de bancada: ajustes de interface sem bypass de seguranca
+
+O Home XY agora aceita **recuo X/Y configurado separadamente** na janela (2 a 10 mm, padrao 5 mm para cada eixo). O formulario mantem a verificacao explicita de parada eletrica, mas nao repete a mesma confirmacao em `confirm()`. A remocao do G-code importado em memoria e a importacao bem-sucedida tambem nao exibem popups redundantes.
+
+**Continuam obrigatorios:** chaves livres para concluir Home e gravar G54; erros GRBL e status confiavel; bloqueio de Z fisico antes do Home validado; abortamento em tempo real; limite fisico e geometria valida da matriz. O arquivo de bancada que desativa esses elementos nao deve ser tratado como substituto direto do controlador real.
