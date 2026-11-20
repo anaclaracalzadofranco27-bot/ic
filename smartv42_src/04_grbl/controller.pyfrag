@@ -1170,7 +1170,8 @@ class ControladorGRBL:
             raise RuntimeError(
                 "Recuo conjunto Home XY nao confirmado: " +
                 "; ".join(falhas) +
-                ". Confira fisicamente os sentidos e o acionamento das chaves."
+                ". Confira fisicamente os sentidos e o acionamento das chaves. "
+                "Home XY interrompido sem referencia valida."
             )
         registrar_log("Home XY: ambas as chaves liberadas apos recuo conjunto.", "ok")
 
