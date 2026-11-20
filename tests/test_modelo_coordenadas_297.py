@@ -121,6 +121,23 @@ class Modelo297(unittest.TestCase):
         self.assertEqual(respostas[-1][1], 409)
         movimento.assert_not_called()
 
+    def test_perimetro_nao_retorna_sucesso_se_grbl_parou_em_c(self):
+        ctrl = mod.ControladorGRBL()
+        respostas = []
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        handler._enviar_json = lambda corpo, status=200: respostas.append((corpo, status))
+        with patch.object(mod, "BORDA_Y_OPOSTA_CALIBRADA", True), \
+             patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(ctrl, "mover_xy_sincrono",
+                          side_effect=[(True, "ok"), (True, "ok"), (False, "GRBL em ALARM")]) as mover:
+            handler._executar_acao_POST(
+                "calibrar_caixa_fisica", {"etapa": "testar_perimetro"}
+            )
+        self.assertFalse(respostas[-1][0]["ok"])
+        self.assertEqual(respostas[-1][1], 409)
+        self.assertIn("C", respostas[-1][0]["erro"])
+        self.assertEqual(mover.call_count, 3)
+
     def test_grade_100_pontos_99_passos(self):
         self.assertEqual(mod.TAMANHO_MATRIZ, (100,100))
         self.assertEqual(mod.PASSO_NOMINAL_MALHA_MM, 3.0)
