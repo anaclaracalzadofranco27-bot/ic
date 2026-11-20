@@ -172,7 +172,7 @@ O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qua
 
 No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
 
-O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de 4 mm na chave 2, perímetro a **F500** e busca da chave 2 a F400 (aproximação) / F240 (perto da chave). Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
+O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de 4 mm na chave 2, perímetro a **F1000** e busca da chave 2 a F800 (aproximação) / F480 (perto da chave). O GRBL limita a velocidade real pelo `$110`/`$111`. Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
 
 ### Etapa D — Testar XY sem movimentar Z
 

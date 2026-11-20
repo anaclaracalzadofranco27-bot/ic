@@ -1414,12 +1414,12 @@ class ControladorGRBL:
         valores = (curso, feed, recuo, passo, feed_aproximacao)
         if not all(math.isfinite(v) for v in valores):
             raise ValueError("Parametros de sonda Y2 precisam ser finitos.")
-        if not 50.0 <= feed_aproximacao <= 600.0:
-            raise ValueError("Sonda Y2: feed de aproximacao 50..600 mm/min.")
-        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
+        if not 50.0 <= feed_aproximacao <= 1000.0:
+            raise ValueError("Sonda Y2: feed de aproximacao 50..1000 mm/min.")
+        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 500.0 and
                 2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
             raise ValueError(
-                "Sonda Y2: busca final 1..20 mm, feed 50..250, "
+                "Sonda Y2: busca final 1..20 mm, feed 50..500, "
                 "recuo 2..10 mm, trecho 0,2..2 mm."
             )
         bloquear_z_fisico("Sonda Y2 automatica: Z proibido")

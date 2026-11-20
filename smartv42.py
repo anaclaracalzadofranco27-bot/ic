@@ -2445,12 +2445,12 @@ class ControladorGRBL:
         valores = (curso, feed, recuo, passo, feed_aproximacao)
         if not all(math.isfinite(v) for v in valores):
             raise ValueError("Parametros de sonda Y2 precisam ser finitos.")
-        if not 50.0 <= feed_aproximacao <= 600.0:
-            raise ValueError("Sonda Y2: feed de aproximacao 50..600 mm/min.")
-        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
+        if not 50.0 <= feed_aproximacao <= 1000.0:
+            raise ValueError("Sonda Y2: feed de aproximacao 50..1000 mm/min.")
+        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 500.0 and
                 2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
             raise ValueError(
-                "Sonda Y2: busca final 1..20 mm, feed 50..250, "
+                "Sonda Y2: busca final 1..20 mm, feed 50..500, "
                 "recuo 2..10 mm, trecho 0,2..2 mm."
             )
         bloquear_z_fisico("Sonda Y2 automatica: Z proibido")
@@ -5796,9 +5796,9 @@ HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 15.0   # a chave Y precisa de ~15 mm para soltar
-HOME_AUTO_FEED_PERIMETRO = 500.0     # A->B, C->D, D->A
-HOME_AUTO_FEED_CHAVE2_APROX = 400.0  # B->C ate 25 mm antes de 297
-HOME_AUTO_FEED_CHAVE2_BUSCA = 240.0  # B->C perto da chave 2 (ate Y=350)
+HOME_AUTO_FEED_PERIMETRO = 1000.0    # A->B, C->D, D->A
+HOME_AUTO_FEED_CHAVE2_APROX = 800.0  # B->C ate 25 mm antes de 297
+HOME_AUTO_FEED_CHAVE2_BUSCA = 480.0  # B->C perto da chave 2 (ate Y=350)
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
@@ -5851,8 +5851,13 @@ def iniciar_home_automatico(grbl):
     def _mover(nome, ponto):
         if _abortado():
             raise RuntimeError("Home automatico abortado pelo operador.")
+        # Timeout calculado como se fosse F250: se o GRBL limitar a
+        # velocidade ($110/$111 menores que o feed pedido), nao estoura.
+        dist = math.hypot(ponto[0] - grbl.wpos[0], ponto[1] - grbl.wpos[1])
+        timeout = max(TIMEOUT_IDLE_GRBL,
+                      dist / 250.0 * 60.0 * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
         ok, info = grbl.mover_xy_sincrono(
-            ponto[0], ponto[1], feed=min(FEED_RATE, HOME_AUTO_FEED_PERIMETRO)
+            ponto[0], ponto[1], feed=HOME_AUTO_FEED_PERIMETRO, timeout=timeout
         )
         if not ok:
             raise RuntimeError(f"Movimento ate {nome} falhou: {info}.")
