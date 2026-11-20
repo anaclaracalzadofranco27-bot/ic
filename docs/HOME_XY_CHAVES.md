@@ -25,7 +25,7 @@ O recuo **comandado** eh de 5,0 mm apos a deteccao, nao uma medida metrologica d
 
 ## Uso na interface
 
-Abra Home XY (chaves), escolha as direcoes reais de busca X e Y, cursos maximos, velocidade 20..150 mm/min e passo 0,1..0,5 mm. Informe G54 X/Y **da posicao final apos recuo**. O padrao e PONTO_A da calibracao; use outra coordenada se a posicao fisica dos sensores nao coincidir com esse ponto. Marque a confirmacao da parada eletrica e inicie.
+Abra Home XY (chaves), escolha os sentidos reais no GRBL e os cursos maximos de **busca** (1..300 mm por eixo). O padrao de curso e 30 mm por seguranca; aumente somente apos medir o espaco livre. A velocidade de busca tem padrao **500 mm/min** e permite 20..600 mm/min; o passo por segmento e 0,1..0,5 mm. O Y tem **Y negativo preselecionado** por relato de inversao fisica, mas deve ser conferido na bancada. O recuo apos contato continua **5 mm**, nunca 300 mm. Informe G54 X/Y **da posicao final apos recuo**. O padrao e PONTO_A da calibracao; use outra coordenada se a posicao fisica dos sensores nao coincidir com esse ponto. Marque a confirmacao da parada eletrica e inicie.
 
 A rotina roda em background, com progresso e motivos de erro exibidos na interface. O botao Abortar/Reset GRBL permanece disponivel. Apos qualquer erro, Home nao e marcado como concluido.
 
@@ -62,3 +62,15 @@ Nao pule a confirmacao do sensor nem continue movimentos depois de uma falha. An
 ### Teste antes da primeira execucao fisica com recuo de 5 mm
 
 O operador confirmou que 2 mm eram insuficientes para a chave X deixar de ser pressionada, mas **5 mm ainda nao foram validados nesta maquina**. Com a CNC desenergizada, verifique a folga mecanica no sentido de afastamento de cada chave e a trajetoria completa ate 5 mm. Teste os sensores individualmente com a USB, sem energia nos motores. So execute movimentos reais apos confirmar area livre, sentidos X/Y e parada de emergencia eletrica independente. O Home por USB com $21=0 nao substitui hard limits.
+
+## Inversao do motor Y no GRBL
+
+O seletor Y+ / Y- do Home altera o sinal da **busca da chave**, sem alterar o sentido fisico do motor para outros comandos. Se todo comando Y (inclusive Jog) desloca para o lado fisico contrario ao esperado, a interface disponibiliza **Inverter Direcao do Motor Y no GRBL ($3)**, apenas apos confirmacao explicita e com GRBL Idle. A acao alterna o **bit 1 (valor decimal 2)** na mascara $3, preservando os bits dos outros motores, invalida Home e exige teste manual curto (0,5 mm) antes de novo Home e revisao dos quatro cantos.
+
+**Nao aplique inversao dupla:** se ja corrigiu $3, reveja qual sinal de Y realmente aponta para a chave; nao confie cegamente na selecao inicial Y-. O indicador MPos registra a posicao contabilizada pelo GRBL e nao confirma movimento mecanico real.
+
+## Feed 500 e curso de busca de ate 300 mm
+
+A velocidade de **Home** foi alterada para 500 mm/min por padrao (faixa permitida 20..600 mm/min); nao altera automaticamente a velocidade de plotagem. O limite de busca configuravel foi ajustado para ate 300 mm por eixo. Como a matriz nominal tem 299 mm de deslocamento e 297 mm entre os centros extremos, **300 mm so pode ser escolhido se houver distancia mecanica real suficiente, margem de parada e protecao independente**. O formulario continua com padrao inicial de 30 mm; isso nao significa que o eixo so possa ir ate 30 mm. Com $21=0, se a chave falhar, o software nao garante evitar colisao.
+
+Quando as duas chaves sao detectadas no mesmo passo de busca, o sistema tenta recuar ambas juntas; quando apenas uma aciona, recua apenas essa e depois continua o eixo pendente. Logs `HOME XY COMANDO CONJUNTO`, `HOME XY MPos do primeiro jog conjunto` e `Home XY CONFIG` permitem confirmar os comandos enviados e o sentido configurado.
