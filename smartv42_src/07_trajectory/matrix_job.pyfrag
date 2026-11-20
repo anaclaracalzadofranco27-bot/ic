@@ -145,8 +145,11 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
         registrar_log("Matriz vazia: nao ha pontos para plotar.", "erro")
         return False
     try:
-        linhas, _, _ = compilar_matriz_para_estudio(matriz)
-        programa = analisar_gcode_hibrido("\n".join(linhas))
+        with _estado_projeto_lock:
+            matriz_copia = np.array(matriz, dtype=np.uint8, copy=True)
+            linhas, _, _ = compilar_matriz_para_estudio(matriz_copia)
+            config_job = capturar_snapshot_parametros_job()
+            programa = analisar_gcode_hibrido("\n".join(linhas))
         # Bloqueia todas as coordenadas antes de criar a thread.
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:
@@ -155,4 +158,5 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
     return executar_job_gcode_em_background(
         grbl, programa, reset_ctrl=reset_ctrl,
         origem="matriz", usar_parametros_arquivo=True,
+        parametros_job=config_job, nome_programa="Matriz 100x100",
     )
