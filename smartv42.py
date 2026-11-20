@@ -36,6 +36,7 @@ import threading
 import time
 import webbrowser
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
@@ -3142,17 +3143,66 @@ def assinatura_geometria_execucao():
     )
 
 
+@dataclass(frozen=True)
+class ConfiguracaoExecucao:
+    """Contrato imutavel do job, independente dos campos editaveis da interface.
+
+    Suporta acesso por chave para compatibilidade com o motor e testes legados.
+    O mapeamento de GPIO e a calibracao sao assinaturas de verificacao, nunca
+    fontes de movimentacao dinamica.
+    """
+    feed_rate: float
+    pulsos_por_nivel: tuple
+    on_ms: float
+    off_ms: float
+    pausa_ms: float
+    auto_reset_apos_plot: bool
+    assinatura_geometria: tuple
+
+    def __getitem__(self, chave):
+        return getattr(self, chave)
+
+    def get(self, chave, default=None):
+        return getattr(self, chave, default)
+
+    def to_dict(self):
+        return {
+            "feed_rate": self.feed_rate,
+            "pulsos_por_nivel": list(self.pulsos_por_nivel),
+            "on_ms": self.on_ms,
+            "off_ms": self.off_ms,
+            "pausa_ms": self.pausa_ms,
+            "auto_reset_apos_plot": self.auto_reset_apos_plot,
+            "assinatura_geometria": self.assinatura_geometria,
+        }
+
+    @classmethod
+    def de_snapshot(cls, valores):
+        if isinstance(valores, cls):
+            return valores
+        # Aceita o antigo dicionario como interface de transicao, sem alias.
+        assinatura = copy.deepcopy(tuple(valores["assinatura_geometria"]))
+        return cls(
+            feed_rate=float(valores["feed_rate"]),
+            pulsos_por_nivel=tuple(int(v) for v in valores["pulsos_por_nivel"]),
+            on_ms=float(valores["on_ms"]), off_ms=float(valores["off_ms"]),
+            pausa_ms=float(valores["pausa_ms"]),
+            auto_reset_apos_plot=bool(valores["auto_reset_apos_plot"]),
+            assinatura_geometria=assinatura,
+        )
+
+
 def capturar_snapshot_parametros_job():
-    """Fotografia dos parametros da UI ao iniciar, usada ate terminar ou abortar."""
+    """Cria uma ConfiguracaoExecucao imutavel antes da reserva do motor."""
     z = obter_estado_config_z()
-    return {
-        "feed_rate": float(FEED_RATE),
-        "pulsos_por_nivel": tuple(int(v) for v in z["pulsos_por_nivel"]),
-        "on_ms": float(z["z_on_ms"]), "off_ms": float(z["z_off_ms"]),
-        "pausa_ms": float(z["pausa_z_ms"]),
-        "auto_reset_apos_plot": bool(AUTO_RESET_APOS_PLOT),
-        "assinatura_geometria": assinatura_geometria_execucao(),
-    }
+    return ConfiguracaoExecucao(
+        feed_rate=float(FEED_RATE),
+        pulsos_por_nivel=tuple(int(v) for v in z["pulsos_por_nivel"]),
+        on_ms=float(z["z_on_ms"]), off_ms=float(z["z_off_ms"]),
+        pausa_ms=float(z["pausa_z_ms"]),
+        auto_reset_apos_plot=bool(AUTO_RESET_APOS_PLOT),
+        assinatura_geometria=assinatura_geometria_execucao(),
+    )
 
 
 def validar_snapshot_geometria_job(snapshot):
@@ -3227,55 +3277,88 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
     raise RuntimeError(f"Tipo de instrucao invalido: {tipo}")
 
 
-def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
-                                      usar_parametros_arquivo=False, parametros_job=None,
-                                      nome_programa=None):
-    """Motor UNICO de comandos XY/Z, usado por matriz e G-code externo."""
-    global _job_em_execucao, _job_pausado, _job_abortar
-    if not programa:
-        return False
-    # Protege contra edicoes simultaneas do arquivo em memoria apos o inicio.
-    programa = copy.deepcopy(list(programa))
-    config_job = copy.deepcopy(parametros_job if parametros_job is not None
-                               else capturar_snapshot_parametros_job())
-    try:
-        validar_snapshot_geometria_job(config_job)
-    except RuntimeError as exc:
-        registrar_log(str(exc), "erro")
-        return False
-    if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
-        registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
-        return False
-    if config_job["auto_reset_apos_plot"] and origem == "matriz" and reset_ctrl is not None:
-        if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
-            registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
-            return False
-    if any(bloco.get("tipo") == "z" for bloco in programa):
-        modo_z = obter_modo_z_efetivo()
-        if modo_z not in ("simulacao", "completo"):
-            registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
-            return False
-    try:
-        validar_programa_antes_movimento(grbl, programa)
-    except (ValueError, RuntimeError) as exc:
-        registrar_log(f"Programa rejeitado antes de movimentar: {exc}", "erro")
-        return False
-    with _job_lock:
-        if _job_em_execucao or _operacao_manual:
-            registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
-            return False
-        _job_em_execucao = True
-        _job_pausado = False
-        _job_abortar = False
-        abortar_job_evento.clear()
+class MotorExecucaoGCode:
+    """Executor unico: controla preflight, reserva, progresso, blocos e reset.
 
-    def _worker_gcode():
+    Nunca recebe a matriz ou referencias para programas da interface: somente
+    um programa copiado e uma ConfiguracaoExecucao congelada.
+    O GRBL e o controlador Z continuam responsaveis pelos intertravamentos.
+    """
+    def __init__(self, grbl, programa, reset_ctrl=None, origem="gcode",
+                 usar_parametros_arquivo=False, parametros_job=None,
+                 nome_programa=None):
+        self.grbl = grbl
+        self.programa = copy.deepcopy(list(programa)) if programa is not None else []
+        self.reset_ctrl = reset_ctrl
+        self.origem = origem
+        self.usar_parametros_arquivo = bool(usar_parametros_arquivo)
+        self.config_job = ConfiguracaoExecucao.de_snapshot(
+            parametros_job if parametros_job is not None else capturar_snapshot_parametros_job()
+        )
+        self.nome_programa = nome_programa or origem
+
+    def validar_antes_de_reservar(self):
+        if not self.programa:
+            return False
+        try:
+            validar_snapshot_geometria_job(self.config_job)
+            if (hasattr(self.grbl, "home_xy_referenciado")
+                    and not getattr(self.grbl, "modo_simulacao", False)
+                    and not self.grbl.home_xy_referenciado):
+                registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
+                return False
+            if (self.config_job["auto_reset_apos_plot"] and self.origem == "matriz"
+                    and self.reset_ctrl is not None
+                    and bool(getattr(self.grbl, "modo_simulacao", False)) != bool(self.reset_ctrl.simulado)):
+                registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
+                return False
+            if any(b.get("tipo") == "z" for b in self.programa):
+                modo_z = obter_modo_z_efetivo()
+                if modo_z not in ("simulacao", "completo"):
+                    registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
+                    return False
+            validar_programa_antes_movimento(self.grbl, self.programa)
+        except (ValueError, RuntimeError) as exc:
+            registrar_log(f"Programa rejeitado antes de movimentar: {exc}", "erro")
+            return False
+        return True
+
+    def iniciar(self):
+        """Faz uma unica reserva para todos os tipos de programa."""
+        global _job_em_execucao, _job_pausado, _job_abortar
+        if not self.validar_antes_de_reservar():
+            return False
+        with _job_lock:
+            if _job_em_execucao or _operacao_manual:
+                registrar_log("Ja existe um job ou operacao manual em execucao.", "erro")
+                return False
+            _job_em_execucao = True
+            _job_pausado = False
+            _job_abortar = False
+            abortar_job_evento.clear()
+        try:
+            threading.Thread(target=self.executar, daemon=True).start()
+        except Exception as exc:
+            with _job_lock:
+                _job_em_execucao = False
+            registrar_log(f"Nao foi possivel iniciar thread do job: {exc}", "erro")
+            return False
+        return True
+
+    def executar(self):
+        """Rotina unica para matriz e G-code externo; nao inicia novas threads."""
         global _job_em_execucao, _job_pausado
+        grbl = self.grbl
+        programa = self.programa
+        reset_ctrl = self.reset_ctrl
+        origem = self.origem
+        config_job = self.config_job
+        usar_parametros_arquivo = self.usar_parametros_arquivo
         _job_progresso.update({
             "ativo": True, "pausado": False, "atual": 0, "total": len(programa),
             "inicio_ts": time.monotonic(), "nivel_z": 0,
-            "origem": origem, "nome_programa": nome_programa or origem,
-            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+            "origem": origem, "nome_programa": self.nome_programa,
+            "usar_parametros_arquivo": usar_parametros_arquivo,
             "parametros_job": {
                 "feed_rate": config_job["feed_rate"], "on_ms": config_job["on_ms"],
                 "off_ms": config_job["off_ms"], "pausa_ms": config_job["pausa_ms"],
@@ -3289,15 +3372,16 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             if not ok_cal:
                 raise RuntimeError(erro_cal)
             validar_snapshot_geometria_job(config_job)
-            if any(bloco.get("tipo") == "z" for bloco in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
-                raise RuntimeError("Modo Z alterado antes do job; relés Z bloqueados.")
+            if any(b.get("tipo") == "z" for b in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
+                raise RuntimeError("Modo Z alterado antes do job; reles Z bloqueados.")
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
-            # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
             validar_programa_antes_movimento(grbl, programa)
             validar_snapshot_geometria_job(config_job)
-            contexto = {"usar_parametros_arquivo": bool(usar_parametros_arquivo),
-                        "config_job": config_job}
+            contexto = {
+                "usar_parametros_arquivo": usar_parametros_arquivo,
+                "config_job": config_job,
+            }
             for pos, bloco in enumerate(programa, 1):
                 if _job_abortar or abortar_job_evento.is_set() or not sistema_ativo.is_set():
                     raise RuntimeError("Execucao interrompida pelo operador.")
@@ -3328,8 +3412,16 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             with _job_lock:
                 _job_em_execucao = False
 
-    threading.Thread(target=_worker_gcode, daemon=True).start()
-    return True
+
+def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gcode",
+                                      usar_parametros_arquivo=False, parametros_job=None,
+                                      nome_programa=None):
+    """Interface compativel: ambos os tipos de trabalho usam MotorExecucaoGCode."""
+    return MotorExecucaoGCode(
+        grbl, programa, reset_ctrl=reset_ctrl, origem=origem,
+        usar_parametros_arquivo=usar_parametros_arquivo,
+        parametros_job=parametros_job, nome_programa=nome_programa,
+    ).iniciar()
 # ==============================================================================
 # SECAO 6: INTERFACE WEB STUDIO v1.9 (UGS + CALIBRACAO DE HOME & ORIGEM DIREITA)
 # ==============================================================================
@@ -4495,147 +4587,225 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 _grbl_global = None
 _reset_global = None
+# Adaptadores legados para a API, telemetria e testes: centralizar MUTACOES
+# em RepositorioProjetoStudio, sem mudar o formato HTTP nem o HTML atual.
 _matriz_atual = None
 _gcode_atual = []
 _trajetoria_atual = []
 estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
 _imagem_origem = None
-# A edicao da matriz, o G-code externo e a fonte selecionada sao estados distintos.
-# Nenhum recálculo da matriz elimina o arquivo importado; a remocao e explicita.
 _estado_projeto_lock = threading.RLock()
-_fonte_job_ativa = "matriz"
-_revisao_estado_projeto = 0
+# Fonte e numero de revisao pertencem somente ao RepositorioProjetoStudio.
 
 
+class RepositorioProjetoStudio:
+    """Dono das transacoes de edicao da matriz, importacao e fonte ativa.
+
+    Os nomes globais antigos continuam apenas como ponte temporaria para
+    codigo externo: mutacoes de projeto sao concentradas neste componente.
+    O lock e compartilhado com a API para leitura consistente do preview.
+    """
+    def __init__(self, lock):
+        self.lock = lock
+        self._fonte = "matriz"
+        self._revisao = 0
+        self.importacao = estado_importacao_gcode
+
+    def resumo(self):
+        with self.lock:
+            importado = self.importacao["programa"] is not None
+            return {
+                "fonte_ativa": self._fonte,
+                "revisao": self._revisao,
+                "gcode_importado": importado,
+                "nome_gcode": self.importacao.get("nome") if importado else None,
+                "blocos_gcode": len(self.importacao["programa"] or []),
+                "usar_parametros_arquivo": bool(self.importacao.get("usar_parametros_arquivo", False)),
+                "matriz_disponivel": _matriz_atual is not None,
+            }
+
+    def fonte_ativa(self):
+        with self.lock:
+            return self._fonte
+
+    def selecionar(self, fonte):
+        if fonte not in ("matriz", "gcode"):
+            raise ValueError("Fonte deve ser matriz ou gcode.")
+        with self.lock:
+            if fonte == "gcode" and self.importacao["programa"] is None:
+                raise ValueError("Nenhum G-code importado selecionavel.")
+            if fonte == "matriz" and _matriz_atual is None:
+                raise ValueError("Nenhuma matriz disponivel.")
+            if fonte != self._fonte:
+                self._fonte = fonte
+                self._revisao += 1
+            return self.resumo()
+
+    def remover_importacao(self):
+        with self.lock:
+            self.importacao.update({
+                "linhas": None, "programa": None, "nome": None,
+                "usar_parametros_arquivo": False,
+            })
+            self._fonte = "matriz"
+            self._revisao += 1
+            return self.resumo()
+
+    def publicar_matriz(self, nova_matriz, modo_operacao, selecionar_matriz):
+        global _matriz_atual, _gcode_atual, _trajetoria_atual
+        nova = np.array(nova_matriz, dtype=np.uint8, copy=True)
+        if nova.shape != TAMANHO_MATRIZ:
+            raise ValueError(f"Matriz deve ter dimensoes {TAMANHO_MATRIZ}.")
+        with self.lock:
+            # O resultado e publicado somente se toda a compilacao concluir.
+            linhas, trajetoria, _ = compilar_matriz_para_estudio(nova, modo_operacao)
+            _matriz_atual = nova
+            _gcode_atual = list(linhas)
+            _trajetoria_atual = list(trajetoria)
+            if selecionar_matriz:
+                self._fonte = "matriz"
+            self._revisao += 1
+
+    def importar(self, conteudo, nome, usar_parametros_arquivo=False):
+        with self.lock:
+            # Uma importacao invalida jamais substitui o arquivo anterior.
+            programa = analisar_gcode_hibrido(conteudo)
+            linhas = tuple(conteudo.splitlines())
+            self.importacao.update({
+                "linhas": linhas,
+                "programa": tuple(copy.deepcopy(programa)),
+                "nome": str(nome or "arquivo.gcode")[:120],
+                "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+            })
+            self._fonte = "gcode"
+            self._revisao += 1
+            return self.resumo()
+
+    def definir_preferencia_gcode(self, valor):
+        if not isinstance(valor, bool):
+            raise ValueError("A preferencia deve ser um booleano.")
+        with self.lock:
+            if self.importacao["programa"] is None:
+                raise ValueError("Importe um G-code antes de definir seus parametros.")
+            if self.importacao["usar_parametros_arquivo"] != valor:
+                self.importacao["usar_parametros_arquivo"] = valor
+                self._revisao += 1
+            return self.resumo()
+
+    def preparar_plano(self, fonte_esperada=None, revisao_esperada=None):
+        """Copia programacao e parametros sem fazer qualquer movimento."""
+        with self.lock:
+            fonte = self._fonte
+            if fonte_esperada is not None and fonte_esperada != fonte:
+                return None, "Fonte alterada na interface. Atualize o painel antes de iniciar."
+            if revisao_esperada is not None and int(revisao_esperada) != self._revisao:
+                return None, "O projeto foi modificado depois da ultima visualizacao. Confira programa e parametros."
+            if fonte == "gcode":
+                programa_fonte = self.importacao["programa"]
+                if not programa_fonte:
+                    return None, "Arquivo G-code selecionado nao esta disponivel."
+                programa = copy.deepcopy(list(programa_fonte))
+                nome = self.importacao.get("nome") or "arquivo.gcode"
+                usar_arquivo = bool(self.importacao["usar_parametros_arquivo"])
+            else:
+                if _matriz_atual is None or not np.any(_matriz_atual):
+                    return None, "Matriz vazia ou indisponivel."
+                if not _gcode_atual:
+                    return None, "G-code da matriz ainda nao foi compilado."
+                programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
+                nome = "Matriz 100x100"
+                usar_arquivo = False
+            snapshot = capturar_snapshot_parametros_job()
+            return PlanoJobStudio.criar(fonte, nome, usar_arquivo, programa, snapshot), ""
+
+
+@dataclass(frozen=True)
+class PlanoJobStudio:
+    """Plano puramente de dados: nao guarda ponteiros para um projeto editavel."""
+    origem: str
+    nome_programa: str
+    usar_parametros_arquivo: bool
+    blocos: tuple
+    configuracao: ConfiguracaoExecucao
+
+    @classmethod
+    def criar(cls, origem, nome, usar_arquivo, programa, configuracao):
+        # Blocos do parser possuem apenas valores escalares imutaveis.
+        # Tuplas de pares evitam aliasing com a lista original importada.
+        blocos = tuple(tuple(sorted(b.items())) for b in programa)
+        return cls(
+            origem=origem, nome_programa=nome, usar_parametros_arquivo=bool(usar_arquivo),
+            blocos=blocos, configuracao=ConfiguracaoExecucao.de_snapshot(configuracao),
+        )
+
+    def programa(self):
+        return [dict(b) for b in self.blocos]
+
+
+_repositorio_projeto = RepositorioProjetoStudio(_estado_projeto_lock)
+
+
+# Funcoes antigas permanecem como ADAPTADORES. Novos caminhos usam
+# RepositorioProjetoStudio + PlanoJobStudio + MotorExecucaoGCode.
 def obter_fonte_job_ativa():
-    with _estado_projeto_lock:
-        return _fonte_job_ativa
+    return _repositorio_projeto.fonte_ativa()
 
 
 def obter_estado_fontes_job():
-    with _estado_projeto_lock:
-        importado = estado_importacao_gcode["programa"] is not None
-        return {
-            "fonte_ativa": _fonte_job_ativa,
-            "revisao": _revisao_estado_projeto,
-            "gcode_importado": importado,
-            "nome_gcode": estado_importacao_gcode.get("nome") if importado else None,
-            "blocos_gcode": len(estado_importacao_gcode["programa"] or []),
-            "usar_parametros_arquivo": bool(estado_importacao_gcode.get("usar_parametros_arquivo", False)),
-            "matriz_disponivel": _matriz_atual is not None,
-        }
+    return _repositorio_projeto.resumo()
 
 
 def selecionar_fonte_job(fonte):
-    global _fonte_job_ativa, _revisao_estado_projeto
-    if fonte not in ("matriz", "gcode"):
-        raise ValueError("Fonte deve ser matriz ou gcode.")
-    with _estado_projeto_lock:
-        if fonte == "gcode" and estado_importacao_gcode["programa"] is None:
-            raise ValueError("Nenhum G-code importado selecionavel.")
-        if fonte == "matriz" and _matriz_atual is None:
-            raise ValueError("Nenhuma matriz disponivel.")
-        if fonte != _fonte_job_ativa:
-            _fonte_job_ativa = fonte
-            _revisao_estado_projeto += 1
-        return obter_estado_fontes_job()
+    return _repositorio_projeto.selecionar(fonte)
 
 
 def remover_gcode_importado():
-    global _fonte_job_ativa, _revisao_estado_projeto
-    with _estado_projeto_lock:
-        estado_importacao_gcode.update({
-            "linhas": None, "programa": None, "nome": None,
-            "usar_parametros_arquivo": False,
-        })
-        _fonte_job_ativa = "matriz"
-        _revisao_estado_projeto += 1
-        return obter_estado_fontes_job()
+    return _repositorio_projeto.remover_importacao()
 
 
 def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
-    """Compila uma COPIA e publica matriz + preview atomicamente.
-
-    descartar_importacao e um nome legado: passa a significar apenas selecionar
-    a matriz como fonte. O G-code importado so sai por remover_gcode_importado().
-    """
-    global _matriz_atual, _gcode_atual, _trajetoria_atual, _fonte_job_ativa, _revisao_estado_projeto
-    nova = np.array(nova_matriz, dtype=np.uint8, copy=True)
-    if nova.shape != TAMANHO_MATRIZ:
-        raise ValueError(f"Matriz deve ter dimensoes {TAMANHO_MATRIZ}.")
-    with _estado_projeto_lock:
-        linhas, trajetoria, _ = compilar_matriz_para_estudio(nova, modo_operacao)
-        _matriz_atual = nova
-        _gcode_atual = list(linhas)
-        _trajetoria_atual = list(trajetoria)
-        if descartar_importacao:
-            _fonte_job_ativa = "matriz"
-        _revisao_estado_projeto += 1
+    """descartar_importacao e um alias historico de selecionar_matriz."""
+    return _repositorio_projeto.publicar_matriz(nova_matriz, modo_operacao, descartar_importacao)
 
 
 def carregar_gcode_importado(conteudo, nome, usar_parametros_arquivo=False):
-    """Substitui importacao apenas DEPOIS de analisar arquivo completo."""
-    global _fonte_job_ativa, _revisao_estado_projeto
-    with _estado_projeto_lock:
-        programa = analisar_gcode_hibrido(conteudo)
-        linhas = tuple(conteudo.splitlines())
-        estado_importacao_gcode.update({
-            "linhas": linhas,
-            "programa": tuple(copy.deepcopy(programa)),
-            "nome": str(nome or "arquivo.gcode")[:120],
-            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
-        })
-        _fonte_job_ativa = "gcode"
-        _revisao_estado_projeto += 1
-        return obter_estado_fontes_job()
+    return _repositorio_projeto.importar(conteudo, nome, usar_parametros_arquivo)
 
 
 def definir_preferencia_parametros_gcode(valor):
-    global _revisao_estado_projeto
-    if not isinstance(valor, bool):
-        raise ValueError("A preferencia deve ser um booleano.")
-    with _estado_projeto_lock:
-        if estado_importacao_gcode["programa"] is None:
-            raise ValueError("Importe um G-code antes de definir seus parametros.")
-        if estado_importacao_gcode["usar_parametros_arquivo"] != valor:
-            estado_importacao_gcode["usar_parametros_arquivo"] = valor
-            _revisao_estado_projeto += 1
-        return obter_estado_fontes_job()
+    return _repositorio_projeto.definir_preferencia_gcode(valor)
 
+
+class PreparadorJobStudio:
+    """Faz a ponte entre plano de dados e unico executor de hardware."""
+    def __init__(self, repositorio):
+        self.repositorio = repositorio
+
+    def iniciar(self, grbl, reset_ctrl, fonte_esperada=None, revisao_esperada=None):
+        # Preserva lock da fonte ate confirmar a reserva do executor,
+        # evitando um job de outra revisao por corrida entre requests.
+        with self.repositorio.lock:
+            plano, erro = self.repositorio.preparar_plano(fonte_esperada, revisao_esperada)
+            if plano is None:
+                return False, erro
+            ok = executar_job_gcode_em_background(
+                grbl, plano.programa(),
+                reset_ctrl=reset_ctrl if plano.origem == "matriz" else None,
+                origem=plano.origem,
+                usar_parametros_arquivo=plano.usar_parametros_arquivo,
+                parametros_job=plano.configuracao,
+                nome_programa=plano.nome_programa,
+            )
+            if not ok:
+                return False, "Job nao iniciado: maquina ocupada, nao referenciada ou validacao falhou."
+            return True, f"Job iniciado com snapshot do programa {plano.nome_programa} ({plano.origem})."
+
+
+_preparador_jobs = PreparadorJobStudio(_repositorio_projeto)
 
 
 def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esperada=None):
-    """Prepara programa e configuracao no mesmo instante, sem alterar fonte ativa."""
-    with _estado_projeto_lock:
-        fonte = _fonte_job_ativa
-        if fonte_esperada is not None and fonte_esperada != fonte:
-            return False, "Fonte alterada na interface. Atualize o painel antes de iniciar."
-        if revisao_esperada is not None and int(revisao_esperada) != _revisao_estado_projeto:
-            return False, "O projeto foi modificado depois da ultima visualizacao. Confira programa e parametros."
-        if fonte == "gcode":
-            programa_fonte = estado_importacao_gcode["programa"]
-            if not programa_fonte:
-                return False, "Arquivo G-code selecionado nao esta disponivel."
-            programa = copy.deepcopy(list(programa_fonte))
-            nome = estado_importacao_gcode.get("nome") or "arquivo.gcode"
-            usar_arquivo = bool(estado_importacao_gcode["usar_parametros_arquivo"])
-            reset = None
-        else:
-            if _matriz_atual is None or not np.any(_matriz_atual):
-                return False, "Matriz vazia ou indisponivel."
-            if not _gcode_atual:
-                return False, "G-code da matriz ainda nao foi compilado."
-            programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
-            nome, usar_arquivo, reset = "Matriz 100x100", False, reset_ctrl
-        snapshot = capturar_snapshot_parametros_job()
-        ok = executar_job_gcode_em_background(
-            grbl, programa, reset_ctrl=reset, origem=fonte,
-            usar_parametros_arquivo=usar_arquivo,
-            parametros_job=snapshot, nome_programa=nome,
-        )
-        if not ok:
-            return False, "Job nao iniciado: maquina ocupada, nao referenciada ou validacao falhou."
-        return True, f"Job iniciado com snapshot do programa {nome} ({fonte})."
+    return _preparador_jobs.iniciar(grbl, reset_ctrl, fonte_esperada, revisao_esperada)
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -4665,7 +4835,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             with _estado_projeto_lock:
                 fonte = obter_estado_fontes_job()
                 matriz = _matriz_atual.tolist() if _matriz_atual is not None else []
-                gcode = (list(estado_importacao_gcode["linhas"] or []) if _fonte_job_ativa == "gcode"
+                gcode = (list(estado_importacao_gcode["linhas"] or []) if _repositorio_projeto.fonte_ativa() == "gcode"
                          else list(_gcode_atual))
                 pins = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
                 linhas_importadas = len(estado_importacao_gcode["linhas"] or [])
