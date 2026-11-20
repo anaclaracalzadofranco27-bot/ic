@@ -111,14 +111,17 @@ class HomeXYChavesTeste(unittest.TestCase):
                     estado = estado.replace(">", "|Pn:X>", 1)
             return estado
 
-        with patch.object(ctrl, "_status_home_xy", side_effect=status_com_chave_x_presa):
+        with patch.object(ctrl, "_status_home_xy", side_effect=status_com_chave_x_presa), \
+             patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
             ok, erro = self.executar_simulado(ctrl)
         self.assertFalse(ok)
         self.assertIn("Chave X nao liberou", erro)
         self.assertIn("MPos informado", erro)
         self.assertIn("Pn final:X", erro)
         self.assertIn("Home XY interrompido", erro)
-        self.assertGreater(ctrl.mpos[1], 0.0)  # Y tambem participou da busca
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-0.500 Y0.500 " in c
+                            for c in comandos))  # X e Y participaram da busca
         self.assertFalse(ctrl.home_xy_referenciado)
 
     def test_busca_sincronizada_envia_x_e_y_no_mesmo_jog(self):
