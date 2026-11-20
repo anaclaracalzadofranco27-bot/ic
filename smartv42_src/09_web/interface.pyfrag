@@ -505,7 +505,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       <strong style="font-size:11px;">Fonte da próxima plotagem:</strong>
       <button id="bot-fonte-matriz" class="btn btn-sky" onclick="selecionarFonteJob('matriz')">Matriz 100 × 100</button>
       <button id="bot-fonte-gcode" class="btn" onclick="selecionarFonteJob('gcode')">G-code importado</button>
-      <span id="fonte-job-info" style="font-size:11px;flex:1;min-width:150px;">Matriz selecionada</span>
+      <span id="fonte-job-info" style="font-size:11px;flex:1;min-width:150px;" title="O G-code importado fica salvo na memoria ate ser removido ou o servidor reiniciar.">Matriz selecionada</span>
       <button id="bot-remover-gcode" class="btn btn-rose" onclick="removerGcodeSelecionado()">Remover G-code</button>
     </div>
 
@@ -1129,7 +1129,7 @@ async function atualizarStatus() {
     if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
     } else if (st.job && st.job.ativo) {
-      document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
+      document.getElementById('info-progresso').textContent = `${st.job.nome_programa || 'Job'}: ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
       document.getElementById('info-progresso').textContent =
         st.job.erro ? 'Falha: ' + st.job.erro : (st.job.concluido ? 'Concluido' : 'Pronto');

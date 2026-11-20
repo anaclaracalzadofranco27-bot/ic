@@ -85,9 +85,9 @@ def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", desc
 def carregar_gcode_importado(conteudo, nome, usar_parametros_arquivo=False):
     """Substitui importacao apenas DEPOIS de analisar arquivo completo."""
     global _fonte_job_ativa, _revisao_estado_projeto
-    programa = analisar_gcode_hibrido(conteudo)
-    linhas = tuple(conteudo.splitlines())
     with _estado_projeto_lock:
+        programa = analisar_gcode_hibrido(conteudo)
+        linhas = tuple(conteudo.splitlines())
         estado_importacao_gcode.update({
             "linhas": linhas,
             "programa": tuple(copy.deepcopy(programa)),
@@ -177,11 +177,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 gcode = (list(estado_importacao_gcode["linhas"] or []) if _fonte_job_ativa == "gcode"
                          else list(_gcode_atual))
                 pins = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+                linhas_importadas = len(estado_importacao_gcode["linhas"] or [])
                 coord = obter_estado_coordenadas()
             self._enviar_json({
                 "matriz": matriz, "gcode": gcode, "gcode_importado": fonte["gcode_importado"],
                 "usar_parametros_arquivo": fonte["usar_parametros_arquivo"],
-                "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
+                "linhas_importadas": linhas_importadas,
                 "pinos_ativos": pins, "coord": coord, "fontes_job": fonte,
             })
             return
