@@ -121,6 +121,8 @@ class HomeXYChavesTeste(unittest.TestCase):
 
     def test_job_real_sem_referencia_nao_inicia(self):
         ctrl = self.novo_controlador()
+        ctrl.modo_simulacao = False
+        ctrl.conexao_real = True
         with patch.object(mod, "SIMULADO", False):
             programa = mod.analisar_gcode_hibrido("G1 X258 Y-40 F900\nZ4")
             self.assertFalse(mod.executar_job_gcode_em_background(ctrl, programa))
