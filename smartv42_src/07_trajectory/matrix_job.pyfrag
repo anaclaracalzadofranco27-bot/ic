@@ -81,7 +81,8 @@ def compilar_matriz_para_estudio(matriz, modo_operacao="Domo Gaussiano 3D"):
         })
 
     if VOLTAR_ORIGEM and pontos:
-        linhas_gcode.append(f"G0 X{PONTO_A[0]:.3f} Y{PONTO_A[1]:.3f} ; retorna ao Ponto A")
+        inicio_home = ponto_home_xy()
+        linhas_gcode.append(f"G0 X{inicio_home[0]:.3f} Y{inicio_home[1]:.3f} ; retorna ao local Home G54 ({CANTO_HOME_XY})")
 
     dt_ms = (time.perf_counter() - t0) * 1000.0
     ESTADO_ESTUDIO["matriz"] = matriz.tolist()
