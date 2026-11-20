@@ -129,8 +129,7 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertTrue(ok, mensagem)
         comandos = [c.args[0] for c in enviar.call_args_list]
         self.assertTrue(any("$J=G91 G21 X-0.500 Y0.500 " in c for c in comandos))
-        self.assertTrue(any("$J=G91 G21 X5.000 " in c for c in comandos))
-        self.assertTrue(any("$J=G91 G21 Y-5.000 " in c for c in comandos))
+        self.assertTrue(any("$J=G91 G21 X5.000 Y-5.000 " in c for c in comandos))
 
     def test_y_chega_primeiro_x_continua_sem_mover_y(self):
         ctrl = self.novo_controlador()
