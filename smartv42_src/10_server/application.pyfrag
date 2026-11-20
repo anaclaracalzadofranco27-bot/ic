@@ -437,6 +437,46 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": ok, "mascara": nova_mascara})
             return
 
+        if acao == "inverter_motor_y_grbl":
+            # $3 bit 1 = Y. Aplicar somente apos confirmacao fisica explicita,
+            # preservando a inversao existente dos demais eixos.
+            if dados.get("confirmado") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirme a inversao fisica de Y."}, 400)
+                return
+            status = _grbl_global.ler_status_grbl()
+            if not status.startswith("<Idle"):
+                self._enviar_json({
+                    "ok": False, "erro": f"GRBL precisa estar Idle para alterar $3: {status}"
+                }, 409)
+                return
+            ok_cfg, resposta_cfg, cfg_eep = _grbl_global.consultar_configuracoes_grbl()
+            if not ok_cfg or "$3" not in cfg_eep:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": f"Falha ao ler valor atual de $3. EEPROM nao alterada: {resposta_cfg}"
+                }, 409)
+                return
+            try:
+                mascara_atual = int(float(cfg_eep["$3"]))
+                if not 0 <= mascara_atual <= 255:
+                    raise ValueError("Mascara fora do intervalo.")
+            except (TypeError, ValueError):
+                self._enviar_json({"ok": False, "erro": "Valor $3 invalido."}, 409)
+                return
+            nova_mascara = mascara_atual ^ 2
+            ok = _grbl_global.gravar_parametro_grbl("$3", nova_mascara)
+            if ok:
+                _grbl_global.invalidar_home_xy("Sentido do motor Y alterado na EEPROM: refaca Home XY.")
+                registrar_log(
+                    f"Motor Y invertido pelo operador: $3 {mascara_atual} -> {nova_mascara}. "
+                    "Confira com jog curto antes de novo Home.", "aviso"
+                )
+            self._enviar_json({
+                "ok": bool(ok), "mascara": nova_mascara if ok else mascara_atual,
+                "erro": None if ok else "GRBL recusou atualizar $3."
+            }, 200 if ok else 409)
+            return
+
         if acao == "conectar_portas":
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
@@ -485,7 +525,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             curso_x = float(dados.get("curso_x", 30))
             curso_y = float(dados.get("curso_y", 30))
             passo = float(dados.get("passo", 0.5))
-            feed = float(dados.get("feed", 120))
+            feed = float(dados.get("feed", 500))
             coord_x = float(dados.get("coord_x", PONTO_A[0]))
             coord_y = float(dados.get("coord_y", PONTO_A[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
