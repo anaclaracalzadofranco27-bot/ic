@@ -56,9 +56,9 @@ G-code importado ─────────────────────
 
 Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. A imagem é plotada dentro do retângulo A-B-C-D. Essas posições precisam corresponder à **bancada real**.
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
 
-Um `calibracao_matriz.json` antigo, com C/D em Y negativo, é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
+Um `calibracao_matriz.json` de versão anterior (Y negativo ou A à esquerda) é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
 
 ---
 
@@ -163,7 +163,7 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 
 Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emergência. O programa faz sozinho, sem mover nada com a mão:
 
-1. Busca as chaves **X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua 5 mm de cada uma e grava esse ponto como **A = (0, 0)** no G54.
+1. Busca as chaves **sempre em X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua **5 mm em X e 12 mm em Y** e grava esse ponto como **A = (0, 0)** no G54.
 2. Vai de **A até B** (X = 297).
 3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
 4. Vai até **D** e volta para **A**.

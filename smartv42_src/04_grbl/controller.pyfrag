@@ -1616,9 +1616,9 @@ class ControladorGRBL:
                 raise ValueError("Home requer passo 0.1..10 mm e feed 20..600 mm/min.")
             if not 1.0 <= curso_x <= 300.0 or not 1.0 <= curso_y <= 300.0:
                 raise ValueError("Cursos MAXIMOS de BUSCA devem estar em 1..300 mm; recuo apos contato permanece 5 mm.")
-            if not 2.0 <= recuo <= 10.0 or not 2.0 <= recuo_y <= 10.0:
+            if not 2.0 <= recuo <= 15.0 or not 2.0 <= recuo_y <= 15.0:
                 raise ValueError(
-                    "Recuos X/Y devem estar entre 2 e 10 mm. "
+                    "Recuos X/Y devem estar entre 2 e 15 mm. "
                     "Verifique fisicamente o espaco livre antes de aumentar."
                 )
             recuos = {"X": recuo, "Y": recuo_y}

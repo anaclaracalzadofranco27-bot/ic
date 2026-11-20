@@ -361,7 +361,8 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
 HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
-HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_RECUO_X_MM = 5.0
+HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
 
 
@@ -433,7 +434,7 @@ def iniciar_home_automatico(grbl):
                 )
             if isinstance(grbl.ser, PortaSimulada):
                 grbl.ser.configurar_chaves_bancada(
-                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                    recuo=HOME_AUTO_RECUO_Y_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
                 )
 
             # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
@@ -452,7 +453,7 @@ def iniciar_home_automatico(grbl):
                 curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
                 coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
                 passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
-                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                recuo=HOME_AUTO_RECUO_X_MM, recuo_y=HOME_AUTO_RECUO_Y_MM,
                 seguranca_confirmada=True,
             )
             if not ok:
@@ -886,7 +887,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
-            recuo_y = float(dados.get("recuo_y", 5.0))
+            recuo_y = float(dados.get("recuo_y", 12.0))
             coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
             coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):

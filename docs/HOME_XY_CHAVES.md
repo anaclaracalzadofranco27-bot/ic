@@ -125,7 +125,7 @@ O botão **⌂ Home** junta Home XY, sonda da chave 2 e perímetro, com parâmet
 
 1. Exige confirmação da parada elétrica independente, GRBL conectado e `Pn:Y` livre no início. As duas chaves Y usam a mesma entrada; com `Pn:Y` já acionado não há como saber qual delas está pressionada, então a rotina para e pede um Jog Y curto.
 2. Volta C/D ao Y nominal (297 mm) antes de medir, para que uma medição anterior não encurte a busca.
-3. Home XY por software: busca X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de 5 mm em cada eixo, e grava G54 = A = (0, 0).
+3. Home XY por software: busca sempre X− e Y− juntos, até 300 mm, F500, trechos de 5 mm, recuo de **5 mm em X e 12 mm em Y** (a chave Y precisa de ~12 mm para soltar), e grava G54 = A = (0, 0). O recuo aceito no Home vai de 2 a 15 mm por eixo.
 4. Vai de A até B (F250).
 5. Sonda a chave 2 a partir de B em Y+ (mesma rotina `sondar_chave_y_oposta`: aproximação F200 até 25 mm antes do nominal, busca final F120, recuo 4 mm) e grava o Y medido em C e D, preservando o Home.
 6. Vai até D e volta para A.

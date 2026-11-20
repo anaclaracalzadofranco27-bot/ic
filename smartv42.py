@@ -90,29 +90,34 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 #     para a esquerda no seu GRBL for necessário enviar X negativo, ou +1 se X+ já move para a esquerda).
 #   - INVERTER_JOG_X = False: Se True, inverte os botões "← X-" e "→ X+" na interface para bater com a visão frontal.
 # -----------------------------------------------------------------------------
-ORIGEM_X_NA_DIREITA = False
+ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
 SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
-INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
+INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
 # Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
-#   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
-#   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
-#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = 297.000
-#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = 297.000
+# Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
+# esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
+# imagem para ela nao sair invertida).
+#   - Ponto A (Inferior Direito  | col=99 da imagem): X = 0.000,   Y = 0.000
+#   - Ponto B (Inferior Esquerdo | col=0  da imagem): X = 297.000, Y = 0.000
+#   - Ponto C (Superior Esquerdo | col=0  da imagem): X = 297.000, Y = 297.000
+#   - Ponto D (Superior Direito  | col=99 da imagem): X = 0.000,   Y = 297.000
 # A imagem e plotada dentro do retangulo A-B-C-D.
 # =============================================================================
 ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
+# Arquivos de outra versao do modelo (Y negativo, A a esquerda) sao ignorados.
+MODELO_CALIBRACAO = "100x100_3mm_297mm_A_direita_Y_positivo"
 USAR_CALIBRACAO_4_PONTOS = True
 
-PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
-PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
-PONTO_C = [297.000, 297.000]    # Topo-Direita da matriz  (col 99, lin 0)
-PONTO_D = [0.000, 297.000]      # Topo-Esquerda da matriz (col 0,  lin 0)
+PONTO_A = [0.000, 0.000]        # Base-Direita  (Home nas chaves X/Y)
+PONTO_B = [297.000, 0.000]      # Base-Esquerda
+PONTO_C = [297.000, 297.000]    # Topo-Esquerda (borda da chave 2 de Y)
+PONTO_D = [0.000, 297.000]      # Topo-Direita  (borda da chave 2 de Y)
 
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
@@ -275,7 +280,7 @@ def salvar_calibracao_matriz():
         "inverter_jog_y": INVERTER_JOG_Y,
         "sinal_eixo_x": SINAL_EIXO_X,
         "sinal_eixo_y": SINAL_EIXO_Y,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -304,15 +309,14 @@ def carregar_calibracao_matriz():
         if not ok:
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
-        y_ab = 0.5 * (pontos[0][1] + pontos[1][1])
-        y_cd = 0.5 * (pontos[2][1] + pontos[3][1])
-        if y_cd < y_ab:
-            # Modelo antigo (D em Y negativo). Na bancada com $3=1, Y+ vai
-            # de A para D; usar esse arquivo mandaria o cabecote para fora.
+        if dados.get("modelo") != MODELO_CALIBRACAO:
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
-                "Calibracao salva IGNORADA: usa o modelo antigo com Y negativo "
-                f"(Y de C/D={y_cd:.1f}). Usando A=(0,0), B=(297,0), "
-                "C=(297,297), D=(0,297). Execute o Home automatico.", "aviso"
+                "Calibracao salva IGNORADA: arquivo de versao anterior "
+                f"({dados.get('modelo')}). Usando A=(0,0) embaixo a direita, "
+                "B=(297,0), C=(297,297), D=(0,297). Execute o Home automatico.",
+                "aviso"
             )
             return False
         origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
@@ -480,7 +484,7 @@ def obter_estado_coordenadas():
         "passo_nominal_mm": PASSO_NOMINAL_MALHA_MM,
         "extensao_util_mm": EXTENSAO_UTIL_MALHA_MM,
         "curso_nominal_mm": CURSO_NOMINAL_DESLOCAMENTO_MM,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
         "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
         "plot_x_min": PLOT_X_MIN,
         "plot_x_max": PLOT_X_MAX,
@@ -2643,9 +2647,9 @@ class ControladorGRBL:
                 raise ValueError("Home requer passo 0.1..10 mm e feed 20..600 mm/min.")
             if not 1.0 <= curso_x <= 300.0 or not 1.0 <= curso_y <= 300.0:
                 raise ValueError("Cursos MAXIMOS de BUSCA devem estar em 1..300 mm; recuo apos contato permanece 5 mm.")
-            if not 2.0 <= recuo <= 10.0 or not 2.0 <= recuo_y <= 10.0:
+            if not 2.0 <= recuo <= 15.0 or not 2.0 <= recuo_y <= 15.0:
                 raise ValueError(
-                    "Recuos X/Y devem estar entre 2 e 10 mm. "
+                    "Recuos X/Y devem estar entre 2 e 15 mm. "
                     "Verifique fisicamente o espaco livre antes de aumentar."
                 )
             recuos = {"X": recuo, "Y": recuo_y}
@@ -4502,28 +4506,28 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" style="padding:2px 7px;font-size:10.5px;" onclick="calibrarCantoMatriz('ir_meio')">🎯 Ir ao Centro (50,50)</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-a" style="width:28px;color:#34d399;font-weight:bold;">A(↙)</span>
+        <span id="rotulo-canto-a" style="width:28px;color:#34d399;font-weight:bold;">A(↘)</span>
         <input type="number" id="inp-xa" value="0.000" step="0.5" title="Ponto A (0,0) - X">
         <input type="number" id="inp-ya" value="0.000" step="0.5" title="Ponto A (0,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_a')">Ir A</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_a')">📍A</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-b" style="width:28px;color:#38bdf8;font-weight:bold;">B(↘)</span>
+        <span id="rotulo-canto-b" style="width:28px;color:#38bdf8;font-weight:bold;">B(↙)</span>
         <input type="number" id="inp-xb" value="297.000" step="0.5" title="Ponto B (297,0) - X">
         <input type="number" id="inp-yb" value="0.000" step="0.5" title="Ponto B (297,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_b')">Ir B</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_b')">📍B</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
+        <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↖)</span>
         <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,297) - X">
         <input type="number" id="inp-yc" value="297.000" step="0.5" title="Ponto C (297,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
+        <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↗)</span>
         <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,297) - X">
         <input type="number" id="inp-yd" value="297.000" step="0.5" title="Ponto D (0,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
@@ -4805,7 +4809,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         confirma o contato, recua o eixo correspondente na distancia configurada
         e continua com o eixo pendente.
         <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
-        <strong>Recuo independente X e Y: 2 a 10 mm. Confira o espaco livre antes de aumentar.</strong><br>
+        <strong>Recuo independente X e Y: 2 a 15 mm (padrao X 5 mm, Y 12 mm). Confira o espaco livre antes de aumentar.</strong><br>
         <strong>ATENCAO: os campos Busca max X e Busca max Y iniciam em apenas 30 mm.</strong>
         Se Y encontrar sua chave e X ainda estiver longe, X continuara ate atingir seu
         proprio limite de busca e parara, mesmo que o teto permitido seja 300 mm.
@@ -4848,8 +4852,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label title="Distancia de cada segmento da busca, nao o recuo apos o contato. Padrao 5 mm; ate 10 mm se o curso livre for confirmado.">Trecho de busca (mm) <input id="home-passo" type="number" min="0.1" max="10" step="any" value="5" style="width:70px;"></label>
           <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
-          <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
-          <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
+          <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="15" step="0.5" value="5" style="width:65px;"></label>
+          <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="15" step="0.5" value="12" style="width:65px;"></label>
           <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
           <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
@@ -5121,7 +5125,7 @@ async function acaoUGS(tipo) {
 async function homeAutomatico() {
   if (!confirm(
     'HOME AUTOMÁTICO\n' +
-    '1) Busca as chaves X- e Y- e define o canto A = (0,0)\n' +
+    '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 12 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
     '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
     '4) Vai até D e volta para A\n\n' +
@@ -5155,9 +5159,9 @@ async function iniciarHomeXY() {
   }
   const recuoX = Number(document.getElementById('home-recuo-x').value);
   const recuoY = Number(document.getElementById('home-recuo-y').value);
-  if (!(recuoX >= 2 && recuoX <= 10 && recuoY >= 2 && recuoY <= 10)) {
+  if (!(recuoX >= 2 && recuoX <= 15 && recuoY >= 2 && recuoY <= 15)) {
     document.getElementById('home-xy-status').textContent =
-      'Recuo X/Y deve estar entre 2 e 10 mm. Verifique o espaco livre.';
+      'Recuo X/Y deve estar entre 2 e 15 mm. Verifique o espaco livre.';
     return;
   }
   const valor = id => Number(document.getElementById(id).value);
@@ -5419,11 +5423,13 @@ function desenharMatriz() {
       const pb = configCoord.ponto_b || [297, 0];
       const pc = configCoord.ponto_c || [297, 297];
       const pd = configCoord.ponto_d || [0, 297];
-      const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
-      const supEsq = trocados ? ['C', pc] : ['D', pd];
-      const supDir = trocados ? ['D', pd] : ['C', pc];
-      const infEsq = trocados ? ['B', pb] : ['A', pa];
-      const infDir = trocados ? ['A', pa] : ['B', pb];
+      // A a direita quando a origem X esta na direita (bancada padrao);
+      // a troca antiga de rotulos A/B inverte novamente.
+      const aDireita = !!configCoord.origem_x_na_direita !== !!configCoord.cantos_x_corrigidos_fisicamente;
+      const supEsq = aDireita ? ['C', pc] : ['D', pd];
+      const supDir = aDireita ? ['D', pd] : ['C', pc];
+      const infEsq = aDireita ? ['B', pb] : ['A', pa];
+      const infDir = aDireita ? ['A', pa] : ['B', pb];
       ctx.fillStyle = '#f43f5e';
       ctx.fillText(`${supEsq[0]}(${supEsq[1][0]}, ${supEsq[1][1]})`, pad + 2, 18);
       ctx.fillStyle = '#fbbf24';
@@ -5490,10 +5496,11 @@ async function carregarEstadoInicial() {
       document.getElementById('inp-yd').value = d.coord.ponto_d[1];
     }
     const corrigidos = !!d.coord.cantos_x_corrigidos_fisicamente;
-    document.getElementById('rotulo-canto-a').textContent = corrigidos ? 'A(↘)' : 'A(↙)';
-    document.getElementById('rotulo-canto-b').textContent = corrigidos ? 'B(↙)' : 'B(↘)';
-    document.getElementById('rotulo-canto-c').textContent = corrigidos ? 'C(↖)' : 'C(↗)';
-    document.getElementById('rotulo-canto-d').textContent = corrigidos ? 'D(↗)' : 'D(↖)';
+    const aDireita = !!d.coord.origem_x_na_direita !== corrigidos;
+    document.getElementById('rotulo-canto-a').textContent = aDireita ? 'A(↘)' : 'A(↙)';
+    document.getElementById('rotulo-canto-b').textContent = aDireita ? 'B(↙)' : 'B(↘)';
+    document.getElementById('rotulo-canto-c').textContent = aDireita ? 'C(↖)' : 'C(↗)';
+    document.getElementById('rotulo-canto-d').textContent = aDireita ? 'D(↗)' : 'D(↖)';
     document.getElementById('btn-corrigir-rotulos-cantos').disabled = corrigidos;
     document.getElementById('status-rotulos-cantos').textContent = corrigidos
       ? 'Nomes físicos corrigidos: A↔B e C↔D; Home em B.'
@@ -6004,7 +6011,8 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
 HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
-HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_RECUO_X_MM = 5.0
+HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
 
 
@@ -6076,7 +6084,7 @@ def iniciar_home_automatico(grbl):
                 )
             if isinstance(grbl.ser, PortaSimulada):
                 grbl.ser.configurar_chaves_bancada(
-                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                    recuo=HOME_AUTO_RECUO_Y_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
                 )
 
             # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
@@ -6095,7 +6103,7 @@ def iniciar_home_automatico(grbl):
                 curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
                 coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
                 passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
-                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                recuo=HOME_AUTO_RECUO_X_MM, recuo_y=HOME_AUTO_RECUO_Y_MM,
                 seguranca_confirmada=True,
             )
             if not ok:
@@ -6529,7 +6537,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
-            recuo_y = float(dados.get("recuo_y", 5.0))
+            recuo_y = float(dados.get("recuo_y", 12.0))
             coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
             coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):

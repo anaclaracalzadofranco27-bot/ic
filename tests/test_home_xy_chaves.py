@@ -367,13 +367,13 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertFalse(ctrl.home_xy_referenciado)
         self.assertGreater(ctrl.mpos[0], 0.0)
 
-    def test_recuo_fora_da_faixa_2_a_10_mm_nao_e_aceito(self):
+    def test_recuo_fora_da_faixa_2_a_15_mm_nao_e_aceito(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
-        for kwargs in ({"recuo": 1.0}, {"recuo_y": 11.0}):
+        for kwargs in ({"recuo": 1.0}, {"recuo_y": 16.0}):
             ok, mensagem = self.executar_simulado(ctrl, **kwargs)
             self.assertFalse(ok)
-            self.assertIn("entre 2 e 10 mm", mensagem)
+            self.assertIn("entre 2 e 15 mm", mensagem)
 
     def test_recuo_y_independente_do_x(self):
         ctrl = self.novo_controlador()
