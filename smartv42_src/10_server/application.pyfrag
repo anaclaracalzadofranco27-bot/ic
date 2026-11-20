@@ -68,6 +68,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 "coord": obter_estado_coordenadas(),
                 "idx": list(mm_fisico_para_indice(_grbl_global.wpos[0], _grbl_global.wpos[1])),
                 "job": _job_progresso,
+                "home_xy": dict(_grbl_global.home_xy_estado, referenciado=_grbl_global.home_xy_referenciado),
                 "logs": list(ESTADO_ESTUDIO["logs"])[:35],  # mais recentes primeiro
             })
             return
@@ -91,7 +92,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         acao = dados.get("action", "")
         # Serializa acoes manuais/mutacoes e reserva a maquina ate a sua conclusao.
         # Hold, resume, abort e iniciar_job nao podem depender dessa reserva.
-        simultanea = acao == "iniciar_job" or (
+        simultanea = acao in ("iniciar_job", "iniciar_home_xy") or (
             acao == "ugs_cmd" and dados.get("cmd") in ("hold", "resume", "abort")
         )
         if simultanea:
@@ -240,6 +241,37 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": ok})
             return
 
+        if acao == "iniciar_home_xy":
+            if dados.get("seguranca_confirmada") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirme a parada de emergencia fisica independente."}, 400)
+                return
+            direcao_x = int(dados.get("direcao_x", 0))
+            direcao_y = int(dados.get("direcao_y", 0))
+            if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
+                self._enviar_json({"ok": False, "erro": "Selecione o sentido de busca GRBL de X e Y."}, 400)
+                return
+            curso_x = float(dados.get("curso_x", 30))
+            curso_y = float(dados.get("curso_y", 30))
+            passo = float(dados.get("passo", 0.5))
+            feed = float(dados.get("feed", 120))
+            coord_x = float(dados.get("coord_x", PONTO_A[0]))
+            coord_y = float(dados.get("coord_y", PONTO_A[1]))
+            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
+                self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
+                return
+            if not _grbl_global.ser or (not SIMULADO and not _grbl_global.conexao_real):
+                self._enviar_json({"ok": False, "erro": "Conecte a CNC fisica antes de iniciar Home XY."}, 409)
+                return
+            ok, mensagem = iniciar_home_xy_em_background(
+                _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
+                curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
+                coord_x=coord_x, coord_y=coord_y, recuo=2.0,
+                seguranca_confirmada=True,
+            )
+            self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
+                              200 if ok else 409)
+            return
+
         if acao == "ugs_cmd":
             cmd = dados.get("cmd", "")
             if cmd == "hold":
@@ -261,9 +293,15 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "soft_reset":
                 _grbl_global.soft_reset()
             elif cmd == "home_grbl":
-                _grbl_global.executar_homing()
+                self._enviar_json({"ok": False, "erro": "Home $H desabilitado: use Home XY por chaves sem Z."}, 409)
+                return
             elif cmd == "definir_home_manual":
-                _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+                ok_manual = _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+                self._enviar_json({
+                    "ok": bool(ok_manual), "erro": None if ok_manual else "Falha ao definir referencia manual.",
+                    "aviso": "Origem manual nao substitui Home XY por chaves.",
+                })
+                return
             elif cmd == "zerar_x":
                 _grbl_global.zerar_eixo("X")
             elif cmd == "zerar_y":
@@ -325,6 +363,9 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "iniciar_job":
+            if not SIMULADO and not _grbl_global.home_xy_referenciado:
+                self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
+                return
             if estado_importacao_gcode["programa"] is not None:
                 ok = executar_job_gcode_em_background(
                     _grbl_global, estado_importacao_gcode["programa"],

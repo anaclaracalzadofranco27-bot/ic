@@ -200,6 +200,9 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
+    if hasattr(grbl, "home_xy_referenciado") and not SIMULADO and not grbl.home_xy_referenciado:
+        registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
+        return False
     try:
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:

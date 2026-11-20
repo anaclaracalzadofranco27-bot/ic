@@ -492,3 +492,11 @@ As correções da auditoria foram implementadas nas oito etapas propostas, com t
 - Mesmo com intertravamentos de software, é obrigatório ter uma **parada elétrica de emergência independente**, e validar os GPIOs, a polaridade dos relés e o movimento físico antes de iniciar uma plotagem.
 - Os testes do GitHub Actions são simulados: **não comprovam segurança elétrica ou mecânica**, nem validam uma Raspberry Pi conectada à máquina.
 
+
+## 12. Home XY automatico por chaves (sem Z)
+
+A nova interface executa Home XY (chaves): busca X e Y pelo campo Pn: do GRBL conectado a Raspberry Pi, recua 2 mm de cada sensor e entao grava a origem G54. Esse Home nao envia $H e nao necessita eixo Z fisico.
+
+A funcionalidade verifica $22=0 e $21=0 e **nao altera automaticamente esses parametros**. Como $21=0 desabilita a protecao por hard limits, so deve ser utilizada com parada eletrica de emergencia independente, protecao mecanica, sentidos e cursos verificados. O uso de chaves X/Y pela USB nao equivale a uma funcao de parada de seguranca. Sem referencia XY valida, jobs e deslocamentos absolutos ficam bloqueados.
+
+Veja [docs/HOME_XY_CHAVES.md](docs/HOME_XY_CHAVES.md) para instrucoes e restricoes. A validacao fisica ainda precisa ser realizada na bancada.
