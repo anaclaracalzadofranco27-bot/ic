@@ -365,6 +365,7 @@ HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
 def validar_layout_home_automatico():
@@ -439,14 +440,48 @@ def iniciar_home_automatico(grbl):
                 )
 
             # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
-            # acionada, nao ha como saber qual delas e para onde recuar.
+            # acionada, anda Y+10 mm: se soltar era a chave 1 (lado A);
+            # se continuar acionada e a chave 2 (lado C/D), entao volta em Y-
+            # os 10 mm mais o recuo de Y para solta-la antes do Home.
             estado_inicial = grbl._status_home_xy()
             if "Y" in pinos_ativos(estado_inicial):
-                raise RuntimeError(
-                    "Pn:Y ja acionado antes do Home: nao da para saber se e a "
-                    "chave 1 (lado A) ou a chave 2 (lado C/D). Use o Jog Y de "
-                    "1 mm para soltar a chave e tente de novo."
+                _fase(
+                    "Home 1/4: Pn:Y acionado no inicio; "
+                    f"Y+{HOME_AUTO_TESTE_PNY_MM:.0f} mm para identificar a chave"
                 )
+                grbl._jog_passo_home_xy(
+                    "Y", HOME_AUTO_TESTE_PNY_MM, HOME_AUTO_FEED,
+                    passo_max=HOME_AUTO_TESTE_PNY_MM, detectar_contato=False,
+                )
+                liberada, _, _ = grbl._confirmar_chave_liberada_home("Y")
+                if liberada:
+                    registrar_log(
+                        "HOME AUTOMATICO: Pn:Y soltou com Y+: era a chave Y1 (lado A).",
+                        "info",
+                    )
+                else:
+                    volta = HOME_AUTO_TESTE_PNY_MM + HOME_AUTO_RECUO_Y_MM
+                    _fase(
+                        "Home 1/4: Pn:Y continua acionado: chave Y2 (lado C/D); "
+                        f"Y-{volta:.0f} mm para solta-la"
+                    )
+                    grbl._jog_passo_home_xy(
+                        "Y", -volta, HOME_AUTO_FEED,
+                        passo_max=volta, detectar_contato=False,
+                    )
+                    liberada, estado_y, _ = grbl._confirmar_chave_liberada_home("Y")
+                    if not liberada:
+                        raise RuntimeError(
+                            "Pn:Y continua acionado depois de Y+10 mm e de "
+                            f"Y-{volta:.0f} mm. Verifique as chaves Y. "
+                            f"Ultimo status: {estado_y}"
+                        )
+                    registrar_log(
+                        "HOME AUTOMATICO: chave Y2 liberada; seguindo para o Home.",
+                        "info",
+                    )
+                if _abortado():
+                    raise RuntimeError("Home automatico abortado pelo operador.")
 
             _fase("Home 1/4: buscando chaves X- e Y- (canto A)")
             ok, msg = grbl.executar_home_xy_chaves(
