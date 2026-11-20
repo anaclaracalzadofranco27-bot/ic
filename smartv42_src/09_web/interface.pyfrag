@@ -345,7 +345,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" onclick="acaoUGS('resume')">▶‖ Resume (~)</button>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
-      <div class="grid-2">
+      <div class="grid-3">
+        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
