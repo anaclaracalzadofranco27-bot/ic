@@ -1112,6 +1112,7 @@ class PortaSimulada:
         self.home_simulado_x = -3.0
         self.home_simulado_y = 3.0
         self.home_simulado_y_sentido = 1  # -1: chave virtual em Y negativo
+        self.home_simulado_y_oposto = None  # outra chave Y, somente no simulador
         self.settings = {
             0: ("10", "Step pulse time, microseconds"),
             1: ("25", "Step idle delay, milliseconds"),
@@ -1165,9 +1166,15 @@ class PortaSimulada:
                 if self.home_simulado_y_sentido < 0
                 else self.mpos[1] >= self.home_simulado_y
             )
+            y_oposto_ativo = (
+                self.home_simulado_y_oposto is not None and
+                (self.mpos[1] <= self.home_simulado_y_oposto
+                 if self.home_simulado_y_sentido > 0
+                 else self.mpos[1] >= self.home_simulado_y_oposto)
+            )
             pn_simulado = (
                 ("X" if self.mpos[0] <= self.home_simulado_x else "") +
-                ("Y" if y_chave_ativa else "")
+                ("Y" if (y_chave_ativa or y_oposto_ativo) else "")
             )
             campo_pn = f"|Pn:{pn_simulado}" if pn_simulado else ""
             status = (
@@ -2365,6 +2372,120 @@ class ControladorGRBL:
                 ("/".join(e for e in ("X", "Y") if e not in encontrados) or "nenhum"),
                 "info",
             )
+
+    def sondar_chave_y_oposta(self, curso=15.0, feed=120.0,
+                             recuo=4.0, passo=1.0):
+        """Mede somente a chave Y da extremidade oposta ao Home.
+
+        Exige Home valido e inicio perto de C, sobre o mesmo X de B.
+        Move um trecho curto em direcao a C e cancela a fila ao ler Pn:Y.
+        Recuo no sentido de B define um Y util seguro para C e D,
+        sem extrapolar o limite e sem alterar G54 neste metodo.
+        """
+        if not self.home_xy_referenciado:
+            raise RuntimeError(
+                "Calibre a chave Y oposta somente apos refazer o Home XY."
+            )
+        if not self.ser or self.conexao_real == self.modo_simulacao:
+            raise RuntimeError("Conexao GRBL ausente ou inconsistente.")
+        valores = (curso, feed, recuo, passo)
+        if not all(math.isfinite(v) for v in valores):
+            raise ValueError("Parametros de sonda Y precisam ser finitos.")
+        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
+                2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
+            raise ValueError(
+                "Sonda Y: busca 1..20 mm, feed 50..250 mm/min, "
+                "recuo 2..10 mm, passo 0,2..2 mm."
+            )
+        bloquear_z_fisico("Calibracao da chave Y oposta: somente XY")
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle") or "Y" in pinos_ativos(estado):
+            raise RuntimeError(
+                "A sonda Y precisa iniciar em Idle e com Pn:Y livre. "
+                "Se houve ALARM, resolva-o e execute Home antes de repetir."
+            )
+        ok_cfg, msg_cfg, cfg = self.consultar_configuracoes_grbl()
+        if not ok_cfg or any(cfg.get(k) != "0" for k in ("$20", "$21", "$22")):
+            raise RuntimeError(
+                "Sonda software exige $20=$21=$22=0; "
+                "nao altera EEPROM nem destrava alarmes. " + msg_cfg
+            )
+        _, y_atual = self.wpos[:2]
+        x_atual = self.wpos[0]
+        direcao = 1 if PONTO_C[1] > PONTO_B[1] else -1
+        distancia_ate_c = direcao * (float(PONTO_C[1]) - y_atual)
+        if not (0.0 <= distancia_ate_c <= 35.0 and
+                abs(x_atual - float(PONTO_B[0])) <= 8.0):
+            raise RuntimeError(
+                "Posicione manualmente o cabecote perto de C, do lado de dentro "
+                "da malha, no mesmo X de B (ate 8 mm), e a no maximo 35 mm "
+                "do Y previsto para C. Nao inicie a sonda desde A ou B."
+            )
+        registrar_log(
+            f"SONDA Y OPOSTA: de Y={y_atual:.3f}, "
+            f"direcao {'+' if direcao > 0 else '-'}, "
+            f"curso max {curso:.1f} mm, F{feed:.1f}; "
+            "identificacao pelo sentido oposto ao Home.", "info"
+        )
+        try:
+            contatos, estado = self._buscar_xy_em_fluxo_home(
+                ("Y",), {"Y": direcao}, {"Y": curso},
+                {"Y": 0.0}, passo, feed
+            )
+            if "Y" not in contatos:
+                raise RuntimeError(
+                    f"Chave Y oposta nao encontrada em ate {curso:.1f} mm. "
+                    "Nao foram alterados os cantos C/D."
+                )
+            y_contato = float(self.wpos[1])
+            self._recuar_chave_home(
+                "Y", direcao, feed, recuo,
+                f"Recuando {recuo:.1f} mm da chave Y oposta"
+            )
+            estado = self._status_home_xy()
+            if "Y" in pinos_ativos(estado) or not estado.startswith("<Idle"):
+                raise RuntimeError(
+                    "A chave Y oposta nao liberou: nao gravar C/D."
+                )
+            y_util = float(self.wpos[1])
+            if -direcao * (y_util - y_contato) < 0.5:
+                raise RuntimeError(
+                    "O recuo de Y nao ocorreu no sentido de B. "
+                    "Nao atualizar C/D."
+                )
+            candidatos = (
+                list(PONTO_A), list(PONTO_B),
+                [float(PONTO_C[0]), y_util],
+                [float(PONTO_D[0]), y_util],
+            )
+            ok_cantos, motivo = validar_calibracao_cantos(candidatos)
+            if not ok_cantos:
+                raise RuntimeError(
+                    "Limite Y oposto medido, mas coordenada interna nao e "
+                    "compativel com 100 pontos a 3 mm: " + motivo +
+                    ". Verifique distancia entre chaves, calibracao e offset."
+                )
+            registrar_log(
+                f"SONDA Y OPOSTA: contato em Y={y_contato:.3f}, "
+                f"livre em Y={y_util:.3f}; aplicar esta coordenada a C/D. "
+                "MPos/WPos sao estimativas do GRBL, nao encoder.", "ok"
+            )
+            return {
+                "y_contato": round(y_contato, 3),
+                "y_cd": round(y_util, 3),
+                "ponto_c": candidatos[2],
+                "ponto_d": candidatos[3],
+                "recuo": recuo,
+            }
+        except Exception:
+            # Nao liberar alarme nem repetir busca automaticamente.
+            self.enviar_byte_tempo_real(
+                b"\x85", "Sonda Y oposta interrompida: cancelar jog"
+            )
+            self.invalidar_home_xy(
+                "Sonda Y oposta nao concluida. Confirme sensores e refaca Home."
+            )
+            raise
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=5.0, feed=500.0,
@@ -4227,6 +4348,16 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <input type="checkbox" id="cfg-inv-jog-x" onchange="aplicarConfigCoordenadas()"> Inv. Jog X
         </label>
       </div>
+      <div class="row" style="gap:5px;margin-top:7px;flex-wrap:wrap;">
+        <button class="btn btn-amber" onclick="calibrarYOposto()">⇅ Calibrar C/D pela 2ª chave Y</button>
+        <span id="estado-borda-y-oposta" style="font-size:10.5px;color:#fbbf24;">Borda C/D ainda não medida pela chave Y oposta.</span>
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin:4px 0;">
+        Após Home, leve o cabeçote com Jog a até 35 mm do C previsto, no mesmo X de B, SEM encostar na chave.
+        A medição procura Pn:Y por até 15 mm, em F120, recua 4 mm e usa o Y liberado para C e D.
+        São necessárias duas chaves Y fisicamente funcionais e parada elétrica independente.
+        Depois de salvar, refaça Home antes de testar o perímetro.
+      </div>
     </div>
 
     <!-- EXECUCAO & COMANDOS USUAIS DO UGS -->
@@ -4654,6 +4785,33 @@ async function calibrarCantoMatriz(etapa) {
   await atualizarStatus();
 }
 
+async function calibrarYOposto() {
+  const aceito = confirm(
+    'CALIBRACAO DA SEGUNDA CHAVE Y (extremidade C/D)\\n' +
+    '1. Confirme Home XY recente e GRBL Idle.\\n' +
+    '2. Com JOG, posicione perto de C, no mesmo X de B, a menos de 35 mm ' +
+    'do C previsto, MAS SEM pressionar a chave.\\n' +
+    '3. Busca supervisionada Y de ate 15 mm, F120, trecho 1 mm e recuo 4 mm.\\n' +
+    '4. Exige $20=$21=$22=0 e parada eletrica independente.\\n' +
+    '5. Se medir a chave, define o Y de C e D apos recuo e invalida o Home.\\n' +
+    'Nao acione se o GRBL estiver em Alarm ou se a direcao da chave for incerta. Continuar?'
+  );
+  if (!aceito) return;
+  const info = document.getElementById('estado-borda-y-oposta');
+  info.textContent = 'Sondando segunda chave Y... use Abortar se necessario.';
+  const resposta = await apiPost('calibrar_y_oposto', {
+    confirmado: true, curso: 15, feed: 120, recuo: 4, passo: 1
+  });
+  if (!resposta.ok) {
+    info.textContent = resposta.erro || 'Calibracao Y oposta nao concluida.';
+    return;
+  }
+  info.textContent = resposta.mensagem || 'C/D calibrados pela chave Y oposta.';
+  await carregarEstadoInicial();
+  await atualizarStatus();
+  alert(resposta.mensagem);
+}
+
 async function inverterMotorXGrbl() {
   await apiPost('inverter_motor_x_grbl');
   atualizarStatus();
@@ -5062,6 +5220,13 @@ async function carregarEstadoInicial() {
     document.getElementById('janela-matriz-info').textContent = d.coord.usar_janela_plotagem
       ? `Recorte: X[${d.coord.plot_x_min},${d.coord.plot_x_max}], Y[${d.coord.plot_y_min},${d.coord.plot_y_max}] · passo físico não muda`
       : 'Malha completa 100 × 100 · passo 3 mm · 297 mm entre centros extremos · faixa nominal 299 mm';
+    const estadoBorda = document.getElementById('estado-borda-y-oposta');
+    if (estadoBorda) {
+      estadoBorda.textContent = d.coord.borda_y_oposta_calibrada
+        ? 'Borda C/D calibrada pela segunda chave Y (refazer Home após nova medição).'
+        : 'Borda C/D não calibrada pela segunda chave Y; não executar perímetro.';
+      estadoBorda.style.color = d.coord.borda_y_oposta_calibrada ? '#34d399' : '#fbbf24';
+    }
     const av = document.getElementById('lbl-avisos');
     av.style.display = (d.coord.avisos && d.coord.avisos.length) ? 'block' : 'none';
     av.textContent = (d.coord.avisos || []).map(a => '⚠ ' + a).join('\n');
@@ -5564,6 +5729,43 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": True, "coord": estado})
             return
 
+        if acao == "calibrar_y_oposto":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Confirme os sensores e a parada eletrica independente."
+                }, 400)
+                return
+            if _job_em_execucao or not _grbl_global.home_xy_referenciado:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Finalize o job e refaca Home XY antes de medir a chave Y oposta."
+                }, 409)
+                return
+            medicao = _grbl_global.sondar_chave_y_oposta(
+                curso=float(dados.get("curso", 15.0)),
+                feed=float(dados.get("feed", 120.0)),
+                recuo=float(dados.get("recuo", 4.0)),
+                passo=float(dados.get("passo", 1.0)),
+            )
+            estado = configurar_sistema_coordenadas(
+                ponto_c=medicao["ponto_c"],
+                ponto_d=medicao["ponto_d"],
+                medicao_chave_y_oposta=True,
+            )
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({
+                "ok": True, "coord": estado, "medicao": medicao,
+                "mensagem": (
+                    "Segunda chave Y encontrada e liberada. "
+                    f"Y de C e D = {medicao['y_cd']:.3f} mm, "
+                    f"contato em Y = {medicao['y_contato']:.3f} mm. "
+                    "Nova geometria salva. Refaca Home XY antes de percorrer o perimetro."
+                ),
+            })
+            return
+
         if acao == "calibrar_caixa_fisica":
             etapa = dados.get("etapa", "")
             _grbl_global.atualizar_status()
@@ -5595,18 +5797,39 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
                 return
             if etapa == "testar_perimetro":
-                def _rodar_perimetro():
-                    rota = [("A", PONTO_A), ("B", PONTO_B), ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
-                    registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
-                    for nome_p, pt in rota:
-                        registrar_log(f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})")
-                        ok_p, st_p = _grbl_global.mover_xy_sincrono(pt[0], pt[1], feed=FEED_RATE)
-                        if not ok_p:
-                            registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
-                            return
-                    registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                # Executa enquanto a reserva da maquina esta ativa.
-                _rodar_perimetro()
+                if not BORDA_Y_OPOSTA_CALIBRADA:
+                    self._enviar_json({
+                        "ok": False,
+                        "erro": (
+                            "Perimetro bloqueado antes de B->C: existe uma segunda "
+                            "chave Y na extremidade C/D. Meça a borda pelo botao "
+                            "'Calibrar C/D pela chave Y oposta' antes do teste. "
+                            "O ponto C padrao pode ultrapassar o batente."
+                        ),
+                    }, 409)
+                    return
+                rota = [("A", PONTO_A), ("B", PONTO_B),
+                        ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
+                registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
+                for nome_p, pt in rota:
+                    registrar_log(
+                        f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})"
+                    )
+                    ok_p, st_p = _grbl_global.mover_xy_sincrono(
+                        pt[0], pt[1], feed=FEED_RATE
+                    )
+                    if not ok_p:
+                        registrar_log(
+                            f"Perimetro interrompido em {nome_p}: {st_p}", "erro"
+                        )
+                        self._enviar_json({
+                            "ok": False,
+                            "erro": f"Perimetro parou em {nome_p}: {st_p}. "
+                                    "Confira GRBL, Pn:Y e chaves antes de repetir.",
+                            "coord": obter_estado_coordenadas(),
+                        }, 409)
+                        return
+                registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
                 self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
                 return
 
