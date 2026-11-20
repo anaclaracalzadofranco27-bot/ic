@@ -68,8 +68,14 @@ NOME_MODELO = "deeplabv3plus_int8.onnx"
 LIMIAR_IA_PADRAO = 0.42
 
 TAMANHO_MATRIZ = (100, 100)
-LIMITE_X_MM = 297.0
-LIMITE_Y_MM = 297.0
+PASSO_NOMINAL_MALHA_MM = 3.0
+# 100 pontos geram 99 intervalos; extremos fisicos separados por 297 mm.
+EXTENSAO_UTIL_MALHA_MM = (TAMANHO_MATRIZ[1] - 1) * PASSO_NOMINAL_MALHA_MM
+# Faixa nominal 0..299 do mecanismo NAO significa 300 pontos e nao
+# autoriza extrapolar o centro dos pinos para alem dos cantos medidos.
+CURSO_NOMINAL_DESLOCAMENTO_MM = 299.0
+LIMITE_X_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
+LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 
 # -----------------------------------------------------------------------------
 # SINCRONIZAÇÃO DO SISTEMA DE COORDENADAS COM A BANCADA FÍSICA:
@@ -110,16 +116,14 @@ X_FIM_FISICO = 297.000
 Y_FIM_FISICO = -297.000
 
 # =============================================================================
-# JANELA DE DELIMITAÇÃO DE PLOTAGEM DA IMAGEM (mm — COM EIXO Y NEGATIVO)
-# A imagem inteira é delimitada e plotada EXCLUSIVAMENTE nesta região:
-#   - Eixo X: 246.0 <= X <= 270.0 (largura = 24.0 mm)
-#   - Eixo Y: -50.0 <= Y <= -29.0 (29 <= |Y| <= 50, altura = 21.0 mm)
+# JANELA OPCIONAL DE RECORTE: mascara pontos sem reescalar o passo fisico.
+# Padrao: 100x100 pinos sobre a area inteira entre os centros 0..297 mm.
 # =============================================================================
-USAR_JANELA_PLOTAGEM = True
-PLOT_X_MIN = 246.0
-PLOT_X_MAX = 270.0
-PLOT_Y_MIN = -50.0   # Topo da imagem (|Y| = 50 mm)
-PLOT_Y_MAX = -29.0   # Base da imagem (|Y| = 29 mm)
+USAR_JANELA_PLOTAGEM = False
+PLOT_X_MIN = 0.0
+PLOT_X_MAX = 297.0
+PLOT_Y_MIN = -297.0
+PLOT_Y_MAX = 0.0
 
 TIMEOUT_OK_GRBL = 5.0
 TIMEOUT_IDLE_GRBL = 10.0
@@ -253,6 +257,7 @@ def salvar_calibracao_matriz():
         "inverter_jog_y": INVERTER_JOG_Y,
         "sinal_eixo_x": SINAL_EIXO_X,
         "sinal_eixo_y": SINAL_EIXO_Y,
+        "modelo": "100x100_3mm_297mm",
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -288,69 +293,119 @@ def carregar_calibracao_matriz():
         return False
 
 
+def validar_calibracao_cantos(pontos=None, tolerancia_extensao_mm=12.0):
+    """Exige quatro cantos medidos compativeis com a malha 100x100 de ~3 mm."""
+    pontos = (PONTO_A, PONTO_B, PONTO_C, PONTO_D) if pontos is None else pontos
+    try:
+        pts = [(float(p[0]), float(p[1])) for p in pontos]
+        if len(pts) != 4 or any(not all(math.isfinite(v) for v in p) for p in pts):
+            return False, "Quatro cantos finitos A/B/C/D sao obrigatorios."
+    except (ValueError, TypeError, IndexError):
+        return False, "Coordenadas XY invalidas nos quatro cantos."
+    a, b, c, d = pts
+    edges = [(b[0]-a[0], b[1]-a[1]), (c[0]-b[0], c[1]-b[1]),
+             (d[0]-c[0], d[1]-c[1]), (a[0]-d[0], a[1]-d[1])]
+    distancias = [math.hypot(*e) for e in edges]
+    for i, dist in enumerate(distancias):
+        if abs(dist - EXTENSAO_UTIL_MALHA_MM) > tolerancia_extensao_mm:
+            return False, (
+                f"Calibracao antiga/incompativel: aresta {i+1} tem {dist:.2f} mm; "
+                f"esperado aproximadamente {EXTENSAO_UTIL_MALHA_MM:.1f} mm "
+                "para 100 pinos espacados 3 mm."
+            )
+    cruzamentos = [edges[i][0]*edges[(i+1)%4][1] -
+                   edges[i][1]*edges[(i+1)%4][0] for i in range(4)]
+    if any(abs(c) < 1.0 for c in cruzamentos) or not (
+        all(c > 0 for c in cruzamentos) or all(c < 0 for c in cruzamentos)
+    ):
+        return False, "Cantos degenerados, cruzados ou com orientacao inconsistente."
+    return True, ""
+
+
+def _interpolar_cantos(u, v, pontos=None):
+    """Coordenadas no G54: topo D->C; base A->B; passo real pelos cantos."""
+    a, b, c, d = (PONTO_A, PONTO_B, PONTO_C, PONTO_D) if pontos is None else pontos
+    return (
+        (1-u)*(1-v)*d[0] + u*(1-v)*c[0] + (1-u)*v*a[0] + u*v*b[0],
+        (1-u)*(1-v)*d[1] + u*(1-v)*c[1] + (1-u)*v*a[1] + u*v*b[1],
+    )
+
+
+def _inverter_cantos(x_mm, y_mm):
+    """Inversa numerica da mesma bilinear, inclusive para leve desalinhamento."""
+    if not math.isfinite(float(x_mm)) or not math.isfinite(float(y_mm)):
+        raise ValueError("Coordenadas fisicas nao finitas.")
+    a, b, c, d = [(float(p[0]), float(p[1])) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
+    ex = (c[0]-d[0], c[1]-d[1])
+    ey = (a[0]-d[0], a[1]-d[1])
+    cruz = (d[0]-c[0]-a[0]+b[0], d[1]-c[1]-a[1]+b[1])
+    det = ex[0]*ey[1]-ex[1]*ey[0]
+    if abs(det) < 1e-9:
+        raise ValueError("Calibracao degenerada: eixo XY nao invertivel.")
+    tx, ty = float(x_mm)-d[0], float(y_mm)-d[1]
+    u = (tx*ey[1]-ty*ey[0])/det
+    v = (ex[0]*ty-ex[1]*tx)/det
+    for _ in range(15):
+        rx = d[0]+ex[0]*u+ey[0]*v+cruz[0]*u*v-float(x_mm)
+        ry = d[1]+ex[1]*u+ey[1]*v+cruz[1]*u*v-float(y_mm)
+        ju = (ex[0]+cruz[0]*v, ex[1]+cruz[1]*v)
+        jv = (ey[0]+cruz[0]*u, ey[1]+cruz[1]*u)
+        determinant = ju[0]*jv[1]-ju[1]*jv[0]
+        if abs(determinant) < 1e-9:
+            raise ValueError("Calibracao bilinear nao invertivel.")
+        du = (rx*jv[1]-ry*jv[0])/determinant
+        dv = (ju[0]*ry-ju[1]*rx)/determinant
+        u -= du
+        v -= dv
+        if max(abs(du), abs(dv)) < 1e-12:
+            break
+    px, py = _interpolar_cantos(u, v)
+    if math.hypot(px-float(x_mm),py-float(y_mm)) > 0.001:
+        raise ValueError("Coordenada fisica incompativel com bilinear.")
+    return u, v
+
+
 def indice_para_mm_fisico(x_idx, y_idx):
-    """
-    Converte o pino (x_idx=coluna [0..99], y_idx=linha [0..99]) do grafico para a coordenada
-    (X_GRBL, Y_GRBL) com eixo Y invertido negativo.
-    Se USAR_JANELA_PLOTAGEM=True, delimita a imagem EXCLUSIVAMENTE em:
-      -  246.0 <= X <= 270.0
-      -  -50.0 <= Y <= -29.0  (lin=0 topo -> Y=-50.0, lin=99 base -> Y=-29.0)
-    Caso contrario, usa a interpolacao bilinear completa dos 4 cantos (PONTO_A..D).
-    """
-    cols = TAMANHO_MATRIZ[1]
-    rows = TAMANHO_MATRIZ[0]
-    u = max(0.0, min(1.0, float(x_idx) / float(max(1, cols - 1))))  # 0.0 (Esquerda) -> 1.0 (Direita)
-    v = max(0.0, min(1.0, float(y_idx) / float(max(1, rows - 1))))  # 0.0 (Topo)     -> 1.0 (Base)
-
-    # Uma unica orientacao X para o mapeamento e sua inversa.
-    # A janela e uma subregiao ABSOLUTA da caixa calibrada; A..D a delimitam.
-    # O sinal X muda a orientacao da imagem, nao multiplica coordenadas absolutas.
-    inverter_u = bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0)
-    if inverter_u:
-        u = 1.0 - u
-
-    if USAR_JANELA_PLOTAGEM:
-        x_min, x_max = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-        # Com Y negativo (SINAL_EIXO_Y < 0): topo (lin=0) fica em y_lo (-50.0) e base (lin=99) em y_hi (-29.0)
-        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
-        x_grbl = x_min + u * (x_max - x_min)
-        y_grbl = y_topo + v * (y_base - y_topo)
-        x_grbl = max(x_min, min(x_max, x_grbl))
-        y_grbl = max(y_lo, min(y_hi, y_grbl))
-        return float(x_grbl), float(y_grbl)
-
-    xa, ya = float(PONTO_A[0]), float(PONTO_A[1])
-    xb, yb = float(PONTO_B[0]), float(PONTO_B[1])
-    xc, yc = float(PONTO_C[0]), float(PONTO_C[1])
-    xd, yd = float(PONTO_D[0]), float(PONTO_D[1])
-
-    x_grbl = (1.0 - u) * (1.0 - v) * xd + u * (1.0 - v) * xc + (1.0 - u) * v * xa + u * v * xb
-    y_grbl = (1.0 - u) * (1.0 - v) * yd + u * (1.0 - v) * yc + (1.0 - u) * v * ya + u * v * yb
-    return float(x_grbl), float(y_grbl)
+    """Um indice logico [0..99] vira sempre um centro fisico da malha."""
+    x_idx, y_idx = float(x_idx), float(y_idx)
+    if not (math.isfinite(x_idx) and math.isfinite(y_idx) and
+            0 <= x_idx <= TAMANHO_MATRIZ[1]-1 and
+            0 <= y_idx <= TAMANHO_MATRIZ[0]-1):
+        raise ValueError("Indice fora da matriz 100x100 (0..99).")
+    u = x_idx/(TAMANHO_MATRIZ[1]-1)
+    v = y_idx/(TAMANHO_MATRIZ[0]-1)
+    if ORIGEM_X_NA_DIREITA:
+        u = 1.0-u
+    return tuple(float(z) for z in _interpolar_cantos(u,v))
 
 
 def mm_fisico_para_indice(x_grbl, y_grbl):
-    """Converte a posicao atual (X_GRBL, Y_GRBL) para (x_idx, y_idx) [0..99] na tela."""
-    cols = TAMANHO_MATRIZ[1]
-    rows = TAMANHO_MATRIZ[0]
-    if USAR_JANELA_PLOTAGEM:
-        x_esq, x_dir = min(PLOT_X_MIN, PLOT_X_MAX), max(PLOT_X_MIN, PLOT_X_MAX)
-        y_lo, y_hi = min(PLOT_Y_MIN, PLOT_Y_MAX), max(PLOT_Y_MIN, PLOT_Y_MAX)
-        y_topo, y_base = (y_lo, y_hi) if SINAL_EIXO_Y < 0 else (y_hi, y_lo)
-    else:
-        x_esq = 0.5 * (PONTO_A[0] + PONTO_D[0])
-        x_dir = 0.5 * (PONTO_B[0] + PONTO_C[0])
-        y_topo = 0.5 * (PONTO_D[1] + PONTO_C[1])
-        y_base = 0.5 * (PONTO_A[1] + PONTO_B[1])
+    """Inversa exata da transformacao de centros, independente do recorte."""
+    u, v = _inverter_cantos(x_grbl, y_grbl)
+    if ORIGEM_X_NA_DIREITA:
+        u = 1.0-u
+    return (int(round(max(0, min(1, u))*(TAMANHO_MATRIZ[1]-1))),
+            int(round(max(0, min(1, v))*(TAMANHO_MATRIZ[0]-1))))
 
-    u = ((float(x_grbl) - x_esq) / (x_dir - x_esq)) if abs(x_dir - x_esq) > 1e-6 else 0.0
-    if bool(ORIGEM_X_NA_DIREITA) != bool(SINAL_EIXO_X < 0):
-        u = 1.0 - u
-    v = ((float(y_grbl) - y_topo) / (y_base - y_topo)) if abs(y_base - y_topo) > 1e-6 else 0.0
-    u = max(0.0, min(1.0, u))
-    v = max(0.0, min(1.0, v))
-    return int(round(u * (cols - 1))), int(round(v * (rows - 1)))
+
+def ponto_na_janela_plotagem(x_mm, y_mm, tolerancia_mm=1e-6):
+    """Janela e uma mascara; nao muda nunca as coordenadas dos 100x100 centros."""
+    if not USAR_JANELA_PLOTAGEM:
+        return True
+    return (min(PLOT_X_MIN,PLOT_X_MAX)-tolerancia_mm <= x_mm <=
+            max(PLOT_X_MIN,PLOT_X_MAX)+tolerancia_mm and
+            min(PLOT_Y_MIN,PLOT_Y_MAX)-tolerancia_mm <= y_mm <=
+            max(PLOT_Y_MIN,PLOT_Y_MAX)+tolerancia_mm)
+
+
+def desvio_centro_malha_mm(x_mm, y_mm):
+    """Distancia ao centro fisico mais proximo para validar pressionamentos Z."""
+    u, v = _inverter_cantos(x_mm, y_mm)
+    if not (-0.001 <= u <= 1.001 and -0.001 <= v <= 1.001):
+        return float("inf")
+    idx_x, idx_y = mm_fisico_para_indice(x_mm, y_mm)
+    px, py = indice_para_mm_fisico(idx_x, idx_y)
+    return math.hypot(x_mm-px, y_mm-py)
 
 
 def obter_estado_coordenadas():
@@ -378,6 +433,10 @@ def obter_estado_coordenadas():
         "y_fim_fisico": round(float(PONTO_C[1]), 3),
         "limite_x_mm": LIMITE_X_MM,
         "limite_y_mm": LIMITE_Y_MM,
+        "passo_nominal_mm": PASSO_NOMINAL_MALHA_MM,
+        "extensao_util_mm": EXTENSAO_UTIL_MALHA_MM,
+        "curso_nominal_mm": CURSO_NOMINAL_DESLOCAMENTO_MM,
+        "modelo": "100x100_3mm_297mm",
         "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
         "plot_x_min": PLOT_X_MIN,
         "plot_x_max": PLOT_X_MAX,
