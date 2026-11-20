@@ -145,7 +145,8 @@ class TestarModosZ(unittest.TestCase):
         self.grbl_fisico_falso()
         with patch.object(mod, "SIMULADO", False), patch.object(mod, "GPIO_DISPONIVEL", True), patch.object(mod, "OutputDevice", ReleFake, create=True), patch.object(mod.time, "sleep"):
             self.assertTrue(mod.habilitar_z_fisico()[0])
-            self.assertTrue(mod.testar_reles_um_a_um())
+            with patch.object(mod.abortar_job_evento, "wait", return_value=False):
+                self.assertTrue(mod.testar_reles_um_a_um())
         self.assertEqual([x.on_calls for x in ReleFake.criados], [1] * 8)
 
     def test_modo_global_inconsistente_com_GRBL_real_bloqueia(self):
@@ -262,6 +263,20 @@ class TestarModosZ(unittest.TestCase):
             self.assertGreaterEqual(rele.off_calls, 1)
             self.assertEqual(info["pulsos"], 0)
             espera.assert_called_once()
+
+    def test_abort_interrompe_teste_manual_de_reles_sem_esperar_meio_segundo(self):
+        self.grbl_fisico_falso()
+        with patch.object(mod, "SIMULADO", False), \
+             patch.object(mod, "GPIO_DISPONIVEL", True), \
+             patch.object(mod, "OutputDevice", ReleFake, create=True):
+            self.assertTrue(mod.habilitar_z_fisico()[0])
+            def abortar_no_rele(tempo):
+                mod.abortar_job_evento.set()
+                return True
+            with patch.object(mod.abortar_job_evento, "wait", side_effect=abortar_no_rele):
+                self.assertFalse(mod.testar_reles_um_a_um())
+            self.assertEqual([x.on_calls for x in ReleFake.criados], [1] + [0] * 7)
+            self.assertTrue(all(x.off_calls > 0 for x in ReleFake.criados))
 
 
 if __name__ == "__main__":

@@ -388,11 +388,14 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
                 rele = reles_z[i - 1]
                 try:
                     rele.on()
-                    time.sleep(tempo_ligado_s)
+                    # Teste manual Z tambem precisa desligar ao receber Abortar.
+                    interrompeu = abortar_job_evento.wait(tempo_ligado_s)
                 finally:
                     rele.off()
-                if i < NIVEIS_MAX:
-                    time.sleep(0.3)
+                if interrompeu or _job_abortar or not sistema_ativo.is_set():
+                    return False
+                if i < NIVEIS_MAX and abortar_job_evento.wait(0.3):
+                    return False
         finally:
             if modo == "completo":
                 for rele in reles_z:
