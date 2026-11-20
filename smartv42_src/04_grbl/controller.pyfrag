@@ -980,22 +980,28 @@ class ControladorGRBL:
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
             raise RuntimeError("GRBL nao esta Idle antes do passo de Home XY.")
+        posicao_antes = self.mpos[0 if eixo == "X" else 1]
         comando = f"$J=G91 G21 {eixo}{deslocamento:.3f} F{feed:.1f}"
         ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
         if not ok:
             raise RuntimeError(f"GRBL rejeitou jog de {eixo}: {msg}")
         prazo = time.monotonic() + max(5.0, abs(deslocamento) * 60.0 / feed + 4.0)
         acionou = False
+        movimento_observado = False
         while time.monotonic() < prazo:
             estado = self._status_home_xy()
+            if estado.startswith(("<Jog", "<Run")):
+                movimento_observado = True
+            if abs(self.mpos[0 if eixo == "X" else 1] - posicao_antes) >= 0.005:
+                movimento_observado = True
             if detectar_contato and eixo in pinos_ativos(estado):
                 if not acionou and estado.startswith(("<Jog", "<Run")):
                     # Jog cancel e em tempo real, nao um comando de movimento adicional.
                     if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
                         raise RuntimeError("Falhou o envio de cancelamento de jog.")
                 acionou = True
-            if estado.startswith("<Idle"):
-                return acionou or eixo in pinos_ativos(estado), estado
+            if estado.startswith("<Idle") and movimento_observado:
+                return acionou or (detectar_contato and eixo in pinos_ativos(estado)), estado
             time.sleep(0.025)
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
         raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
@@ -1091,7 +1097,9 @@ class ControladorGRBL:
             if not estado.startswith("<Idle") or any(eixo in pinos_ativos(estado) for eixo in "XY"):
                 raise RuntimeError("Home XY nao pode definir origem com fins de curso acionados.")
             self._estado_home_xy("Gravando origem G54 (sem G92)")
-            for comando in ("G21", "G90", "G54", f"G10 L20 P1 X{coord_x:.3f} Y{coord_y:.3f}"):
+            # Limpa offsets temporarios G92 legados, depois registra somente G54.
+            for comando in ("G21", "G90", "G54", "G92.1",
+                            f"G10 L20 P1 X{coord_x:.3f} Y{coord_y:.3f}"):
                 ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
                 if not ok:
                     raise RuntimeError(f"GRBL recusou {comando}: {msg}")
