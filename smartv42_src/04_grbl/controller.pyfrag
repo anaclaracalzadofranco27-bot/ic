@@ -1003,6 +1003,12 @@ class ControladorGRBL:
         partes = [f"{eixo}{deslocamentos[eixo]:.3f}" for eixo in ("X", "Y")
                   if eixo in deslocamentos]
         comando = f"$J=G91 G21 {' '.join(partes)} F{feed:.1f}"
+        if len(deslocamentos) == 2 and not getattr(self, "_home_duplo_registrado", False):
+            registrar_log(
+                "HOME XY COMANDO CONJUNTO: " + comando +
+                " (um jog GRBL com X e Y no mesmo bloco)", "info"
+            )
+            self._home_duplo_registrado = True
         ok, msg = self.enviar_comando(comando, timeout=5.0, logar=False)
         if not ok:
             raise RuntimeError(f"GRBL rejeitou jog de Home XY: {msg}")
@@ -1106,18 +1112,79 @@ class ControladorGRBL:
             )
         registrar_log(f"Home XY: chave {eixo} liberada em leituras consecutivas. {diagnostico}", "ok")
 
+    def _recuar_chaves_home(self, eixos, direcoes, feed, recuo, fase):
+        """Recua juntas as duas chaves quando ambas estiverem acionadas.
+
+        Se so uma chave foi detectada, preserva recuo exclusivamente daquele
+        eixo. Validacao de Pn e MPos permanece individual e obrigatoria.
+        """
+        eixos = tuple(e for e in ("X", "Y") if e in eixos)
+        if not eixos:
+            raise RuntimeError("Recuo Home sem eixo selecionado.")
+        if len(eixos) == 1:
+            eixo = eixos[0]
+            self._recuar_chave_home(eixo, direcoes[eixo], feed, recuo, fase)
+            return
+        self._estado_home_xy(fase + " (X e Y juntos)", "XY")
+        estado = self._status_home_xy()
+        if not estado.startswith("<Idle"):
+            raise RuntimeError("GRBL nao esta Idle antes do recuo XY.")
+        antes = {"X": self.mpos[0], "Y": self.mpos[1]}
+        deslocamentos = {e: -direcoes[e] * recuo for e in eixos}
+        registrar_log(
+            "HOME XY RECUO CONJUNTO: " +
+            " ".join(f"{e}{deslocamentos[e]:+.3f}" for e in eixos) +
+            f" F{feed:.1f}", "info",
+        )
+        self._jog_passo_xy_home(
+            deslocamentos, feed, passo_max=recuo, detectar_contato=False
+        )
+        falhas = []
+        for eixo in eixos:
+            liberada, estado, leituras = self._confirmar_chave_liberada_home(eixo)
+            delta = self.mpos[0 if eixo == "X" else 1] - antes[eixo]
+            esperado = deslocamentos[eixo]
+            registrar_log(
+                f"Recuo {eixo}: comando {esperado:+.2f} mm, "
+                f"MPos reportado {delta:+.2f} mm, "
+                f"Pn: {' / '.join(leituras)}", "info",
+            )
+            if abs(delta - esperado) > 0.35:
+                falhas.append(
+                    f"{eixo}: MPos {delta:+.2f} mm, esperado {esperado:+.2f} mm"
+                )
+            if not liberada:
+                falhas.append(
+                    f"{eixo}: chave ainda acionada apos 5 mm; "
+                    f"Pn final={pinos_ativos(estado) or 'livre'}"
+                )
+        if falhas:
+            raise RuntimeError(
+                "Recuo conjunto Home XY nao confirmado: " +
+                "; ".join(falhas) +
+                ". Confira fisicamente os sentidos e o acionamento das chaves."
+            )
+        registrar_log("Home XY: ambas as chaves liberadas apos recuo conjunto.", "ok")
+
     def _home_xy_busca_sincronizada(self, direcoes, cursos, passo, feed, recuo):
         """Busca X/Y juntos; ao achar uma chave, recua seu eixo e o retira da busca."""
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
             raise RuntimeError("GRBL precisa estar Idle antes da busca XY.")
-        for eixo in ("X", "Y"):
-            if eixo in pinos_ativos(estado):
-                self._recuar_chave_home(
-                    eixo, direcoes[eixo], feed, recuo,
-                    f"Liberando chave {eixo} inicialmente acionada",
-                )
-                estado = self._status_home_xy()
+        pinos_iniciais = pinos_ativos(estado)
+        registrar_log(
+            "Home XY: inicio em " + estado.split("|", 1)[0] +
+            "; chaves iniciais: " + (pinos_iniciais or "livres") +
+            ". Comandos conjuntos exigem ambos os eixos sem chave pressionada.",
+            "info",
+        )
+        iniciais_acionadas = {e for e in ("X", "Y") if e in pinos_iniciais}
+        if iniciais_acionadas:
+            self._recuar_chaves_home(
+                iniciais_acionadas, direcoes, feed, recuo,
+                "Liberando chaves inicialmente acionadas",
+            )
+            estado = self._status_home_xy()
 
         percorrido = {"X": 0.0, "Y": 0.0}
         encontrados = set()
@@ -1154,16 +1221,19 @@ class ControladorGRBL:
                             f"Leitura da chave {eixo} instavel: contato nao "
                             "persistiu apos a parada."
                         )
-                for eixo in sorted(contatos):
-                    self._recuar_chave_home(
-                        eixo, direcoes[eixo], feed, recuo,
-                        f"Recuando {recuo:.1f} mm da chave {eixo}",
-                    )
-                    encontrados.add(eixo)
-                    registrar_log(
-                        f"Home XY: {eixo} encontrado e recuado {recuo:.1f} mm.",
-                        "ok",
-                    )
+                self._recuar_chaves_home(
+                    contatos, direcoes, feed, recuo,
+                    f"Recuando {recuo:.1f} mm das chaves detectadas",
+                )
+                encontrados.update(contatos)
+                registrar_log(
+                    "Home XY: referencia parcial " +
+                    "/".join(sorted(encontrados)) +
+                    "; pendentes " +
+                    ("/".join(e for e in ("X", "Y") if e not in encontrados)
+                     or "nenhum"),
+                    "info",
+                )
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
@@ -1171,6 +1241,7 @@ class ControladorGRBL:
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
         bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
+        self._home_duplo_registrado = False
         self.home_xy_estado.update({
             "ativo": True, "concluido": False, "erro": "",
             "fase": "Validando configuracao GRBL", "eixo": "", "passos": 0,
