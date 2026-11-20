@@ -551,10 +551,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
         O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
-        Quando qualquer chave aciona, cancela o jog conjunto, confirma o contato,
-        recua somente o eixo correspondente em 5,0 mm e continua com o eixo pendente.
+        Quando uma chave aciona, o Home interrompe o jog conjunto,
+        confirma o contato, recua o eixo correspondente na distancia configurada
+        e continua com o eixo pendente.
         <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
-        <strong>Verifique o espaco mecanico livre para 5 mm de recuo em ambos os eixos.</strong><br>
+        <strong>Recuo independente X e Y: 2 a 10 mm. Confira o espaco livre antes de aumentar.</strong><br>
         O curso maximo de BUSCA pode chegar a 300 mm, mas inicia em 30 mm por seguranca:
         nao e o recuo apos acionar a chave. Antes de aumentar, confira a distancia
         fisica livre, pois os hard limits estao desativados neste modo.<br>
@@ -589,6 +590,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
           <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
+          <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
+          <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
           <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
           <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
@@ -598,7 +601,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
         </label>
         <div class="row">
-          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado — recuo 5 mm</button>
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado</button>
           <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
         </div>
         <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
@@ -806,24 +809,26 @@ async function iniciarHomeXY() {
     alert('Configure curso de busca entre 1 e 300 mm e feed entre 20 e 600 mm/min.');
     return;
   }
-  if (!confirm('Home XY: busca X' + (Number(x) > 0 ? '+' : '-') +
-               ' e Y' + (Number(y) > 0 ? '+' : '-') +
-               ', F' + feedHome + ' mm/min.\n' +
-               'Cursos MAXIMOS de BUSCA: X=' + cursoX + ' mm, Y=' + cursoY + ' mm.\n' +
-               'O RECUO apos cada chave permanece 5 mm (NAO 300 mm).\n' +
-               'Confirme sentidos fisicos, espaco livre, parada eletrica e $21=0 / $22=0.\n' +
-               'Continuar?')) return;
+  const recuoX = Number(document.getElementById('home-recuo-x').value);
+  const recuoY = Number(document.getElementById('home-recuo-y').value);
+  if (!(recuoX >= 2 && recuoX <= 10 && recuoY >= 2 && recuoY <= 10)) {
+    document.getElementById('home-xy-status').textContent =
+      'Recuo X/Y deve estar entre 2 e 10 mm. Verifique o espaco livre.';
+    return;
+  }
   const valor = id => Number(document.getElementById(id).value);
   const resp = await apiPost('iniciar_home_xy', {
     direcao_x: Number(x), direcao_y: Number(y),
     curso_x: valor('home-curso-x'), curso_y: valor('home-curso-y'),
     passo: valor('home-passo'), feed: valor('home-feed'),
+    recuo_x: recuoX, recuo_y: recuoY,
     coord_x: valor('home-coord-x'), coord_y: valor('home-coord-y'),
     seguranca_confirmada: seguro
   });
   document.getElementById('home-confirmacao-seguranca').checked = false;
-  if (!resp.ok) alert(resp.erro || 'Falha ao iniciar Home XY.');
-  else document.getElementById('home-xy-status').textContent = resp.mensagem;
+  document.getElementById('home-xy-status').textContent =
+    resp.ok ? (resp.mensagem || 'Home XY iniciado.') :
+              (resp.erro || 'Falha ao iniciar Home XY.');
   atualizarStatus();
 }
 
@@ -891,7 +896,7 @@ async function selecionarFonteJob(fonte) {
 }
 
 async function removerGcodeSelecionado() {
-  if (!confirm('Remover o G-code importado da memoria? A matriz sera mantida.')) return;
+  // Remove somente o arquivo importado em memoria, sem movimentar motores.
   const resposta = await apiPost('remover_gcode_importado', { confirmado: true });
   if (!resposta.ok) { alert(resposta.erro || 'Nao foi possivel remover o G-code.'); return; }
   await carregarEstadoInicial();
@@ -945,8 +950,9 @@ async function importarGcodeHibrido(input) {
     return;
   }
   await carregarEstadoInicial();
-  alert('G-code validado: ' + resp.blocos + ' blocos. Parametros Z: ' +
-        (usar_parametros_arquivo ? 'arquivo' : 'configuracao atual') + '. Z nao sera enviado ao GRBL.');
+  const painel = document.getElementById('info-progresso');
+  if (painel) painel.textContent = 'G-code validado: ' + resp.blocos +
+    ' blocos. Z nao sera enviado ao GRBL.';
 }
 
 async function enviarImagemIA(input) {
