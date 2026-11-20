@@ -552,7 +552,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
         O SmartV42 busca a chave X e depois a Y, avanca em passos de ate 0,5 mm,
-        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.<br>
+        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.
+        <strong>Y so inicia se X detectar e liberar sua chave. Se X falhar, Y fica parado por seguranca.</strong><br>
+        Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
+        abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
+        Pn:X e Pn:Y devem aparecer somente durante cada acionamento.<br>
         <strong>Atencao:</strong> Com $21=1, atingir as chaves causa alarme. Esta rotina exige
         $22=0 e $21=0 confirmados pelo GRBL, sem alterar a EEPROM automaticamente.
         Nesse modo as chaves NAO funcionam como limites rigidos: uma parada de emergencia
