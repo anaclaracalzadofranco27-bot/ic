@@ -170,6 +170,44 @@ class HomeXYChavesTeste(unittest.TestCase):
                             for c in comandos))  # X e Y participaram da busca
         self.assertFalse(ctrl.home_xy_referenciado)
 
+    def test_trecho_cinco_mm_default_produz_um_jog_xy_conjunto(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, msg = self.executar_simulado(
+                ctrl, passo=5.0, feed=500.0, curso_x=30.0, curso_y=30.0
+            )
+        self.assertTrue(ok, msg)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-5.000 Y5.000 F500.0" in c
+                            for c in comandos))
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_trecho_dez_mm_permitido_com_supervisao_das_duas_chaves(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        # Uma simulacao que confirma a deteccao apenas no fim do segmento,
+        # nao a distancia de parada fisica real em uma CNC.
+        ctrl.ser.home_simulado_x = -10.0
+        ctrl.ser.home_simulado_y = 10.0
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, msg = self.executar_simulado(
+                ctrl, passo=10.0, feed=500.0, curso_x=30.0, curso_y=30.0
+            )
+        self.assertTrue(ok, msg)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-10.000 Y10.000 F500.0" in c
+                            for c in comandos))
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_trecho_superior_a_dez_mm_rejeitado_sem_movimento(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ok, msg = self.executar_simulado(ctrl, passo=11.0)
+        self.assertFalse(ok)
+        self.assertIn("0.1..10 mm", msg)
+        self.assertEqual(ctrl.mpos[:2], [0.0, 0.0])
+
     def test_busca_sincronizada_envia_x_e_y_no_mesmo_jog(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
