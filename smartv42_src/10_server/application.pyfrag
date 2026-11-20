@@ -370,6 +370,26 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": True, "fontes_job": estado})
             return
 
+        if acao == "corrigir_rotulos_fisicos_ab":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Confirme a troca A/B e C/D e a necessidade de refazer Home."
+                }, 400)
+                return
+            estado = corrigir_identificacao_fisica_ab_cd()
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({
+                "ok": True, "coord": estado,
+                "mensagem": (
+                    "A/B e C/D trocados apenas na calibracao. "
+                    "Home permanece na mesma extremidade fisica, agora canto B. "
+                    "Refaca Home XY antes do perimetro ou plotagem."
+                )
+            })
+            return
+
         if acao == "config_coordenadas":
             estado = configurar_sistema_coordenadas(
                 origem_x_na_direita=dados.get("origem_x_na_direita"),
@@ -595,8 +615,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
             recuo_y = float(dados.get("recuo_y", 5.0))
-            coord_x = float(dados.get("coord_x", PONTO_A[0]))
-            coord_y = float(dados.get("coord_y", PONTO_A[1]))
+            coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
+            coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
