@@ -113,6 +113,40 @@ def definir_preferencia_parametros_gcode(valor):
 
 
 
+def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esperada=None):
+    """Prepara programa e configuracao no mesmo instante, sem alterar fonte ativa."""
+    with _estado_projeto_lock:
+        fonte = _fonte_job_ativa
+        if fonte_esperada is not None and fonte_esperada != fonte:
+            return False, "Fonte alterada na interface. Atualize o painel antes de iniciar."
+        if revisao_esperada is not None and int(revisao_esperada) != _revisao_estado_projeto:
+            return False, "O projeto foi modificado depois da ultima visualizacao. Confira programa e parametros."
+        if fonte == "gcode":
+            programa_fonte = estado_importacao_gcode["programa"]
+            if not programa_fonte:
+                return False, "Arquivo G-code selecionado nao esta disponivel."
+            programa = copy.deepcopy(list(programa_fonte))
+            nome = estado_importacao_gcode.get("nome") or "arquivo.gcode"
+            usar_arquivo = bool(estado_importacao_gcode["usar_parametros_arquivo"])
+            reset = None
+        else:
+            if _matriz_atual is None or not np.any(_matriz_atual):
+                return False, "Matriz vazia ou indisponivel."
+            if not _gcode_atual:
+                return False, "G-code da matriz ainda nao foi compilado."
+            programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
+            nome, usar_arquivo, reset = "Matriz 100x100", True, reset_ctrl
+        snapshot = capturar_snapshot_parametros_job()
+        ok = executar_job_gcode_em_background(
+            grbl, programa, reset_ctrl=reset, origem=fonte,
+            usar_parametros_arquivo=usar_arquivo,
+            parametros_job=snapshot, nome_programa=nome,
+        )
+        if not ok:
+            return False, "Job nao iniciado: maquina ocupada, nao referenciada ou validacao falhou."
+        return True, f"Job iniciado com snapshot do programa {nome} ({fonte})."
+
+
 class StudioRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -480,15 +514,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if not _grbl_global.modo_simulacao and not _grbl_global.home_xy_referenciado:
                 self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
                 return
-            if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(
-                    _grbl_global, estado_importacao_gcode["programa"],
-                    origem="gcode",
-                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
-                )
-            else:
-                ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
-            self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
+            ok, mensagem = iniciar_job_selecionado(
+                _grbl_global, _reset_global,
+                fonte_esperada=dados.get("fonte_esperada"),
+                revisao_esperada=dados.get("revisao_esperada"),
+            )
+            self._enviar_json({"ok": ok, "mensagem": mensagem,
+                               "erro": None if ok else mensagem}, 200 if ok else 409)
             return
 
         if acao == "reset_mecanico":
