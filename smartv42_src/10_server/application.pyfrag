@@ -387,6 +387,43 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             self._enviar_json({"ok": True, "coord": estado})
             return
 
+        if acao == "calibrar_y_oposto":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Confirme os sensores e a parada eletrica independente."
+                }, 400)
+                return
+            if _job_em_execucao or not _grbl_global.home_xy_referenciado:
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Finalize o job e refaca Home XY antes de medir a chave Y oposta."
+                }, 409)
+                return
+            medicao = _grbl_global.sondar_chave_y_oposta(
+                curso=float(dados.get("curso", 15.0)),
+                feed=float(dados.get("feed", 120.0)),
+                recuo=float(dados.get("recuo", 4.0)),
+                passo=float(dados.get("passo", 1.0)),
+            )
+            estado = configurar_sistema_coordenadas(
+                ponto_c=medicao["ponto_c"],
+                ponto_d=medicao["ponto_d"],
+                medicao_chave_y_oposta=True,
+            )
+            if _matriz_atual is not None:
+                atualizar_matriz_global(_matriz_atual)
+            self._enviar_json({
+                "ok": True, "coord": estado, "medicao": medicao,
+                "mensagem": (
+                    "Segunda chave Y encontrada e liberada. "
+                    f"Y de C e D = {medicao['y_cd']:.3f} mm, "
+                    f"contato em Y = {medicao['y_contato']:.3f} mm. "
+                    "Nova geometria salva. Refaca Home XY antes de percorrer o perimetro."
+                ),
+            })
+            return
+
         if acao == "calibrar_caixa_fisica":
             etapa = dados.get("etapa", "")
             _grbl_global.atualizar_status()
@@ -418,18 +455,39 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
                 return
             if etapa == "testar_perimetro":
-                def _rodar_perimetro():
-                    rota = [("A", PONTO_A), ("B", PONTO_B), ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
-                    registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
-                    for nome_p, pt in rota:
-                        registrar_log(f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})")
-                        ok_p, st_p = _grbl_global.mover_xy_sincrono(pt[0], pt[1], feed=FEED_RATE)
-                        if not ok_p:
-                            registrar_log(f"Perimetro interrompido em {nome_p}: {st_p}", "erro")
-                            return
-                    registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
-                # Executa enquanto a reserva da maquina esta ativa.
-                _rodar_perimetro()
+                if not BORDA_Y_OPOSTA_CALIBRADA:
+                    self._enviar_json({
+                        "ok": False,
+                        "erro": (
+                            "Perimetro bloqueado antes de B->C: existe uma segunda "
+                            "chave Y na extremidade C/D. Meça a borda pelo botao "
+                            "'Calibrar C/D pela chave Y oposta' antes do teste. "
+                            "O ponto C padrao pode ultrapassar o batente."
+                        ),
+                    }, 409)
+                    return
+                rota = [("A", PONTO_A), ("B", PONTO_B),
+                        ("C", PONTO_C), ("D", PONTO_D), ("A", PONTO_A)]
+                registrar_log("Iniciando teste de perimetro: A -> B -> C -> D -> A...")
+                for nome_p, pt in rota:
+                    registrar_log(
+                        f"Perimetro -> {nome_p} (X={pt[0]:.3f}, Y={pt[1]:.3f})"
+                    )
+                    ok_p, st_p = _grbl_global.mover_xy_sincrono(
+                        pt[0], pt[1], feed=FEED_RATE
+                    )
+                    if not ok_p:
+                        registrar_log(
+                            f"Perimetro interrompido em {nome_p}: {st_p}", "erro"
+                        )
+                        self._enviar_json({
+                            "ok": False,
+                            "erro": f"Perimetro parou em {nome_p}: {st_p}. "
+                                    "Confira GRBL, Pn:Y e chaves antes de repetir.",
+                            "coord": obter_estado_coordenadas(),
+                        }, 409)
+                        return
+                registrar_log("Teste de perimetro A -> B -> C -> D -> A concluido!", "ok")
                 self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
                 return
 
