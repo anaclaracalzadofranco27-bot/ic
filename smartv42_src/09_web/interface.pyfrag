@@ -807,18 +807,31 @@ async function calibrarYOposto() {
   );
   if (!aceito) return;
   const info = document.getElementById('estado-borda-y-oposta');
+  info.style.whiteSpace = 'pre-wrap';
+  info.style.color = '#fbbf24';
   info.textContent = 'Sondando segunda chave Y... use Abortar se necessario.';
-  const resposta = await apiPost('calibrar_y_oposto', {
-    confirmado: true, curso: 15, feed: 120, recuo: 4, passo: 1
-  });
-  if (!resposta.ok) {
-    info.textContent = resposta.erro || 'Calibracao Y oposta nao concluida.';
+  let resposta;
+  try {
+    resposta = await apiPost('calibrar_y_oposto', {
+      confirmado: true, curso: 15, feed: 120, recuo: 4, passo: 1
+    });
+  } catch (e) {
+    info.textContent = 'Falha de comunicacao com SmartV42: ' +
+      (e && e.message ? e.message : String(e)) +
+      '. Verifique a conexao e o status GRBL antes de repetir.';
     return;
   }
+  if (!resposta.ok) {
+    info.textContent = 'Calibracao C/D nao concluida:\n' +
+      (resposta.erro || 'Sem diagnostico da sonda Y.') +
+      (resposta.orientacao ? '\n' + resposta.orientacao : '');
+    await atualizarStatus();
+    return;
+  }
+  info.style.color = '#34d399';
   info.textContent = resposta.mensagem || 'C/D calibrados pela chave Y oposta.';
   await carregarEstadoInicial();
   await atualizarStatus();
-  alert(resposta.mensagem);
 }
 
 async function inverterMotorXGrbl() {
