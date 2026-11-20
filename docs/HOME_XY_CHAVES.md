@@ -82,3 +82,9 @@ O modal agora permite **recuo X** e **recuo Y** separados entre **2 e 10 mm**, a
 O Home continua exigindo a confirmacao explicita da parada fisica, mas o segundo popup de confirmacao foi removido. A retirada de G-code importado em memoria tambem nao exibe confirmacao duplicada, e o aviso de importacao bem-sucedida aparece no painel. Alertas de falha e intertravamentos mecanicos permanecem.
 
 A referencia anexada `smartv42_2.py` foi analisada como exemplo de ergonomia, nao copiada integralmente: nao sao aplicados destravamento automatico `$X`, Z habilitado sem Home nem declaracao de referencia com chave presa. Uma execucao sem erro nao demonstra que os finais de curso e a parada funcionem em todos os casos.
+
+## Se Y encontra a chave e X para antes de encontra-la
+
+Os campos **Busca max X/Y** iniciam em **30 mm**, mesmo que o limite superior configuravel seja de 300 mm. Esse limite nao e o recuo de 5 mm. Quando Y conclui seu recuo, X continua sozinho; ao atingir seu limite de busca antes de ver `Pn:X`, o Home interrompe com o motivo `Busca do eixo X encerrada por limite: ...` e informa que Y ja havia sido encontrado. Amplie a busca de X somente depois de medir o deslocamento seguro na direcao correta e confirmar a parada eletrica independente; o limite maximo de 300 mm nao e garantia de curso mecanico protegido.
+
+Apos recuar uma chave, o controle agora pode consultar seu estado durante ate cerca de 2 segundos (duas leituras Idle consecutivas sem `Pn`), sem enviar deslocamento adicional. Se a chave continuar ativa, ou o GRBL entrar em alarme, a rotina nao prossegue para a origem G54. O painel exibe tambem o motivo exato da interrupcao.
