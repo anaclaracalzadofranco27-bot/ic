@@ -195,6 +195,55 @@ class TestarModosZ(unittest.TestCase):
                 self.assertFalse(mod.acionar_eixo_z(5)[0])
         self.assertEqual(sum(x.on_calls for x in ReleFake.criados), 0)
 
+    def test_alarme_invalida_permissao_fisica_z(self):
+        ctrl = self.grbl_fisico_falso()
+        mod.MODO_Z_FISICO_HABILITADO = True
+        ctrl._parse_status("<Alarm|MPos:0.000,0.000,0.000>")
+        self.assertFalse(ctrl.home_xy_referenciado)
+        self.assertFalse(mod.MODO_Z_FISICO_HABILITADO)
+        self.assertEqual(mod.obter_modo_z_efetivo(), "teste_xy")
+
+    def test_reset_fisico_arduino_bloqueado_durante_GRBL_virtual(self):
+        self.grbl_virtual()
+        class ArduinoReal:
+            simulado = False
+            chamadas = 0
+            def ciclo_completo_reset(self, *args):
+                self.chamadas += 1
+                return True, "OK"
+        arduino = ArduinoReal()
+        saidas = []
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        handler._enviar_json = lambda dados, status=200: saidas.append((dados, status))
+        with patch.object(mod, "_reset_global", arduino):
+            handler._executar_acao_POST("reset_mecanico", {"subcmd": "completo"})
+        self.assertEqual(arduino.chamadas, 0)
+        self.assertEqual(saidas[0][1], 409)
+        self.assertIn("REAL bloqueado", saidas[0][0]["erro"])
+
+    def test_job_simulado_nao_inicia_reset_arduino_fisico(self):
+        ctrl = self.grbl_virtual()
+        class ArduinoReal:
+            simulado = False
+            chamadas = 0
+            def ciclo_completo_reset(self, *args):
+                self.chamadas += 1
+                return True, "OK"
+        arduino = ArduinoReal()
+        programa = mod.analisar_gcode_hibrido("G1 X258 Y-40 F100")
+        with patch.object(mod, "AUTO_RESET_APOS_PLOT", True):
+            self.assertFalse(mod.executar_job_gcode_em_background(
+                ctrl, programa, reset_ctrl=arduino, origem="matriz"))
+        self.assertEqual(arduino.chamadas, 0)
+
+    def test_g92_externo_invalida_autorizacao_z(self):
+        ctrl = self.grbl_fisico_falso()
+        mod.MODO_Z_FISICO_HABILITADO = True
+        with patch.object(mod, "SIMULADO", False):
+            self.assertTrue(ctrl.enviar_comando("G92 X0 Y0")[0])
+        self.assertFalse(ctrl.home_xy_referenciado)
+        self.assertFalse(mod.MODO_Z_FISICO_HABILITADO)
+
 
 if __name__ == "__main__":
     unittest.main()

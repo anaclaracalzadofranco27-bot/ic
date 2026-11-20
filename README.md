@@ -500,3 +500,17 @@ A nova interface executa Home XY (chaves): busca X e Y pelo campo Pn: do GRBL co
 A funcionalidade verifica $22=0 e $21=0 e **nao altera automaticamente esses parametros**. Como $21=0 desabilita a protecao por hard limits, so deve ser utilizada com parada eletrica de emergencia independente, protecao mecanica, sentidos e cursos verificados. O uso de chaves X/Y pela USB nao equivale a uma funcao de parada de seguranca. Sem referencia XY valida, jobs e deslocamentos absolutos ficam bloqueados.
 
 Veja [docs/HOME_XY_CHAVES.md](docs/HOME_XY_CHAVES.md) para instrucoes e restricoes. A validacao fisica ainda precisa ser realizada na bancada.
+
+## 13. Isolamento de simulacao, teste XY e Z fisico
+
+Existem tres estados operacionais efetivos para os acionamentos Z, exibidos na interface:
+
+- **Simulacao integral**: GRBL selecionado como SIMULADO pela UI ou inicializado com --simulado. Os testes e pulsos de Z sao apenas virtuais; nao chamam OutputDevice.on(), mesmo com objetos antigos de reles em memoria.
+- **Teste fisico XY (padrao em conexao real)**: motores X/Y e Home XY podem operar; Z1..Z8 e testes de reles ficam bloqueados. Nenhuma saida GPIO fisica e inicializada nesse modo.
+- **Operacao fisica completa**: so pode ser habilitada pelo botao Habilitar Z fisico, com confirmacao explicita, GRBL real em Idle, Home XY concluido, sensores X/Y liberados e GPIO disponivel. O programa cria as saidas em repouso e verifica permissoes antes de cada pulso.
+
+A mudanca para SIMULADO, reconexao USB, soft reset ou inicio de um novo Home XY sempre desarma Z e fecha objetos GPIO. Alarmes e comandos que invalidam a referencia XY tambem revogam imediatamente a permissao de Z. Trabalhos que contem comandos Z sao rejeitados no modo Teste fisico XY; trabalhos de XY puro continuam possiveis apos Home XY. Os comandos de reset mecanico do Arduino nao sao encaminhados a hardware real se o GRBL for simulado.
+
+**Importante:** nao se deve confiar somente na Raspberry Pi para manter as bobinas desenergizadas em caso de falha. Contatos normalmente fechados de parada fisica, circuito de desligamento de potencia, fusivel e eletrica adequada sao necessarios. Caso os modulos sejam ativos em nivel baixo, utilize resistores de pull-up apropriados para evitar acionamento quando GPIO estiver em alta impedancia.
+
+Os testes de software usam objetos de rele falsos e executam no CI, sem comprovar a eletrica da bancada.
