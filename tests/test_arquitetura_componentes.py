@@ -247,6 +247,11 @@ class ComponentesArquitetura(unittest.TestCase):
         self.assertFalse(mod.MotorExecucaoGCode(grbl, programa).iniciar())
         self.assertFalse(grbl.chamadas)
 
+    def test_interface_legada_recusa_programa_vazio_sem_excecao(self):
+        self.assertFalse(mod.executar_job_gcode_em_background(CNCFalsa(), None))
+        self.assertFalse(mod.executar_job_gcode_em_background(CNCFalsa(), []))
+        self.assertFalse(mod._job_em_execucao)
+
 
 if __name__ == "__main__":
     unittest.main()

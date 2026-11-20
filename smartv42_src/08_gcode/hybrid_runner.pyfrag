@@ -301,7 +301,7 @@ class MotorExecucaoGCode:
                  usar_parametros_arquivo=False, parametros_job=None,
                  nome_programa=None):
         self.grbl = grbl
-        self.programa = copy.deepcopy(list(programa))
+        self.programa = copy.deepcopy(list(programa)) if programa is not None else []
         self.reset_ctrl = reset_ctrl
         self.origem = origem
         self.usar_parametros_arquivo = bool(usar_parametros_arquivo)
