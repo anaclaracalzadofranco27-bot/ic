@@ -80,9 +80,55 @@ class HomeXYChavesTeste(unittest.TestCase):
         ctrl.enviar_comando("$22=0")
         ok, motivo = self.executar_simulado(ctrl, direcao_x=1, curso_x=1.0)
         self.assertFalse(ok)
-        self.assertIn("Chave X nao encontrada", motivo)
+        self.assertIn("Busca do eixo X encerrada por limite", motivo)
         self.assertFalse(ctrl.home_xy_referenciado)
         self.assertLessEqual(ctrl.mpos[0], 1.01)
+
+    def test_y_liberado_x_ainda_pendente_parada_por_curso_x_de_30_mm(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_x = -50.0
+        ctrl.ser.home_simulado_y = 3.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, erro = self.executar_simulado(ctrl, curso_x=30.0, curso_y=30.0)
+        self.assertFalse(ok)
+        self.assertIn("Busca do eixo X encerrada por limite", erro)
+        self.assertIn("30.0/30.0 mm", erro)
+        self.assertIn("Eixos ja encontrados: Y", erro)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        indice_recuo_y = next(i for i, c in enumerate(comandos)
+                               if "$J=G91 G21 Y-5.000 " in c)
+        self.assertTrue(any("$J=G91 G21 X-0.500 " in c
+                            for c in comandos[indice_recuo_y + 1:]))
+        self.assertFalse(ctrl.home_xy_referenciado)
+
+    def test_y_encontrado_antes_x_continua_ate_chave_x_mais_distante(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_x = -8.0
+        ctrl.ser.home_simulado_y = 2.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(
+                ctrl, curso_x=12.0, curso_y=12.0
+            )
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        indice_recuo_y = next(i for i, c in enumerate(comandos)
+                               if "$J=G91 G21 Y-5.000 " in c)
+        self.assertTrue(any("$J=G91 G21 X-0.500 " in c
+                            for c in comandos[indice_recuo_y + 1:]))
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_leitura_de_chave_que_demora_a_liberar_nao_aborta(self):
+        ctrl = self.novo_controlador()
+        ativo = "<Idle|MPos:0,0,0|Pn:Y>"
+        livre = "<Idle|MPos:0,0,0>"
+        with patch.object(ctrl, "_status_home_xy",
+                          side_effect=[ativo] * 6 + [livre, livre]):
+            ok, estado, leituras = ctrl._confirmar_chave_liberada_home("Y")
+        self.assertTrue(ok)
+        self.assertEqual(len(leituras), 8)
+        self.assertEqual(estado, livre)
 
     def test_chave_inicialmente_acionada_primeiro_libera(self):
         ctrl = self.novo_controlador()
