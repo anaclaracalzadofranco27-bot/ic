@@ -517,6 +517,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="canvas-wrap">
           <canvas id="canvas-matriz" width="620" height="620"></canvas>
         </div>
+        <div id="preview-gcode-info" style="display:none;font-size:11px;line-height:1.5;color:#cbd5e1;padding:6px 8px;white-space:normal;"></div>
       </div>
 
       <div class="side-stack">
@@ -681,6 +682,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
 
 <script>
 let estadoMatriz = [];
+let previaGcode = null;
 let modoVista3D = false;
 let posCabecote = { x_mm: 0, y_mm: 0, x_idx: 99, y_idx: 0, nivel_z: 0 };
 let configCoord = { origem_x_na_direita: true, sinal_eixo_x: 1.0, inverter_jog_x: false };
@@ -1044,6 +1046,23 @@ function desenharMatriz() {
     const cellW = (W - pad * 2) / cols;
     const cellH = (H - pad * 2) / rows;
 
+    if (fonteJobAtiva === 'gcode' && previaGcode && Array.isArray(previaGcode.tracos)) {
+      // Trajetoria: apenas os quadrados coloridos representam acionamentos de Z.
+      ctx.save();
+      ctx.lineWidth = 1.1;
+      for (const segmento of previaGcode.tracos) {
+        const [x0, y0, x1, y1, tipo] = segmento;
+        if (![x0, y0, x1, y1].every(Number.isFinite)) continue;
+        ctx.beginPath();
+        ctx.strokeStyle = tipo === 1 ? 'rgba(34,211,238,.64)' : 'rgba(148,163,184,.17)';
+        ctx.setLineDash(tipo === 1 ? [] : [2, 4]);
+        ctx.moveTo(pad + (x0 + 0.5) * cellW, pad + (y0 + 0.5) * cellH);
+        ctx.lineTo(pad + (x1 + 0.5) * cellW, pad + (y1 + 0.5) * cellH);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     for (let y = 0; y < rows; y++) {
       for (let x = 0; x < cols; x++) {
         const nv = estadoMatriz[y][x] || 0;
@@ -1110,7 +1129,6 @@ function desenharMatriz() {
 async function carregarEstadoInicial() {
   const res = await fetch('/api/matrix');
   const d = await res.json();
-  estadoMatriz = d.matriz || [];
   if (d.fontes_job) {
     const f = d.fontes_job;
     fonteJobAtiva = f.fonte_ativa;
@@ -1149,8 +1167,31 @@ async function carregarEstadoInicial() {
     av.textContent = (d.coord.avisos || []).map(a => '⚠ ' + a).join('\n');
     document.getElementById('badge-origem').textContent = `⌖ Centro(50,50): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
   }
+  previaGcode = fonteJobAtiva === 'gcode' ? (d.gcode_preview || null) : null;
+  estadoMatriz = previaGcode ? previaGcode.matriz : (d.matriz || []);
+  const info = document.getElementById('preview-gcode-info');
+  const titulo = document.getElementById('titulo-mapa');
+  if (previaGcode) {
+    info.style.display = 'block';
+    const mensagens = [
+      'Prévia do G-code: ' + previaGcode.pinos_ativos + ' pinos distintos, ' +
+      previaGcode.acionamentos_z + ' acionamentos Z e ' +
+      previaGcode.movimentos_xy + ' movimentos XY.',
+      'Traços ciano: G1 (movimento). Traços cinza: G0 (deslocamento). ' +
+      'Apenas quadrados coloridos representam pinos acionados.',
+      ...(previaGcode.notas || [])
+    ];
+    info.textContent = mensagens.join(' ');
+    titulo.textContent = 'Malha 100 × 100 — G-code importado: ' + (nomeGcodeCarregado || 'arquivo');
+  } else {
+    info.textContent = '';
+    info.style.display = 'none';
+    titulo.textContent = 'Mapa Tátil 2D/3D — Matriz 100 × 100';
+  }
   document.getElementById('box-gcode').textContent = (d.gcode || []).slice(0, 180).join('\n');
-  document.getElementById('badge-qtd-pinos').textContent = d.gcode_importado ? String(d.linhas_importadas || 0) + ' linhas importadas' : String(d.pinos_ativos || 0) + ' pinos';
+  document.getElementById('badge-qtd-pinos').textContent = previaGcode
+    ? String(previaGcode.pinos_ativos) + ' pinos no G-code'
+    : String(d.pinos_ativos || 0) + ' pinos';
   if (d.gcode_importado) document.getElementById('usar-parametros-gcode').checked = !!d.usar_parametros_arquivo;
   desenharMatriz();
 }
