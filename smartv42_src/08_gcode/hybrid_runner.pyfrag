@@ -200,9 +200,14 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
-    if hasattr(grbl, "home_xy_referenciado") and not SIMULADO and not grbl.home_xy_referenciado:
+    if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
         registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
         return False
+    if any(bloco.get("tipo") == "z" for bloco in programa):
+        modo_z = obter_modo_z_efetivo()
+        if modo_z not in ("simulacao", "completo"):
+            registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
+            return False
     try:
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:
@@ -228,6 +233,8 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             ok_cal, erro_cal = validar_janela_calibrada()
             if not ok_cal:
                 raise RuntimeError(erro_cal)
+            if any(bloco.get("tipo") == "z" for bloco in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
+                raise RuntimeError("Modo Z alterado antes do job; relés Z bloqueados.")
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
             # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
@@ -248,7 +255,7 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
                 except Exception as exc:
                     raise RuntimeError(f"Linha {bloco['linha']}: {exc}") from exc
             if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
-                if not SIMULADO and reset_ctrl.simulado:
+                if not getattr(grbl, "modo_simulacao", False) and reset_ctrl.simulado:
                     raise RuntimeError("Reset fisico solicitado mas Arduino de reset esta simulado.")
                 ok_reset, detalhe_reset = reset_ctrl.ciclo_completo_reset()
                 if not ok_reset:

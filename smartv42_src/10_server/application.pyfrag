@@ -59,7 +59,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             _grbl_global.atualizar_status()
             self._enviar_json({
                 "porta_grbl": _grbl_global.porta_atual,
-                "simulado": _grbl_global.porta_atual == "SIMULADO",
+                "simulado": bool(_grbl_global.modo_simulacao and not _grbl_global.conexao_real),
+                "modo_z": obter_estado_modo_z(),
                 "estado_grbl": _grbl_global.estado,
                 "wpos": _grbl_global.wpos,
                 "mpos": _grbl_global.mpos,
@@ -227,10 +228,28 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
             ok_grbl = _grbl_global.conectar(p_grbl)
-            if ok_grbl and (SIMULADO or not reles_z):
-                inicializar_gpio_z()
+            # Conectar() desarma e fecha SEMPRE os GPIOs fisicos antes de trocar a porta.
             ok_reset = _reset_global.conectar(p_reset)
-            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl, "reset": ok_reset})
+            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl,
+                               "reset": ok_reset, "modo_z": obter_estado_modo_z()})
+            return
+
+        if acao == "definir_modo_z":
+            habilitar = dados.get("habilitar")
+            if not isinstance(habilitar, bool):
+                self._enviar_json({"ok": False, "erro": "Informe habilitar=true ou false."}, 400)
+                return
+            if habilitar:
+                if dados.get("confirmado") is not True:
+                    self._enviar_json({"ok": False, "erro": "Confirme explicitamente a habilitacao fisica de Z."}, 400)
+                    return
+                ok_z, mensagem = habilitar_z_fisico()
+            else:
+                ok_z = bloquear_z_fisico("Operador selecionou Teste fisico XY")
+                mensagem = "Teste fisico XY ativo: reles Z bloqueados."
+            self._enviar_json({"ok": ok_z, "mensagem": mensagem,
+                               "erro": None if ok_z else mensagem, "modo_z": obter_estado_modo_z()},
+                              200 if ok_z else 409)
             return
 
         if acao == "jog":
@@ -259,8 +278,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
-            if not _grbl_global.ser or (not SIMULADO and not _grbl_global.conexao_real):
-                self._enviar_json({"ok": False, "erro": "Conecte a CNC fisica antes de iniciar Home XY."}, 409)
+            if not _grbl_global.ser or (not _grbl_global.modo_simulacao and not _grbl_global.conexao_real):
+                self._enviar_json({"ok": False, "erro": "Conecte GRBL fisico ou simulador antes de iniciar Home XY."}, 409)
                 return
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
@@ -363,7 +382,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "iniciar_job":
-            if not SIMULADO and not _grbl_global.home_xy_referenciado:
+            if not _grbl_global.modo_simulacao and not _grbl_global.home_xy_referenciado:
                 self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
                 return
             if estado_importacao_gcode["programa"] is not None:
@@ -500,10 +519,11 @@ def main():
         registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
     _grbl_global = ControladorGRBL()
     grbl_conectado = _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
-    if grbl_conectado:
-        inicializar_gpio_z()
-    else:
-        registrar_log("GPIO nao inicializado: GRBL nao esta pronto; conecte a controladora antes.", "erro")
+    # Padrao seguro: Z permanece desarmado inclusive com GRBL fisico conectado.
+    # O operador habilita Z explicitamente na interface somente apos Home XY.
+    bloquear_z_fisico("Inicializacao: Z fisico desativado por padrao")
+    if not grbl_conectado:
+        registrar_log("GRBL nao esta pronto; Z mantido bloqueado.", "erro")
 
     _reset_global = ControladorResetArduino()
     _reset_global.conectar(PORTA_ARDUINO_RESET)
