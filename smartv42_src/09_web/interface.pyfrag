@@ -555,6 +555,12 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         recua somente o eixo correspondente em 5,0 mm e continua com o eixo pendente.
         <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
         <strong>Verifique o espaco mecanico livre para 5 mm de recuo em ambos os eixos.</strong><br>
+        O curso maximo de BUSCA pode chegar a 300 mm, mas inicia em 30 mm por seguranca:
+        nao e o recuo apos acionar a chave. Antes de aumentar, confira a distancia
+        fisica livre, pois os hard limits estao desativados neste modo.<br>
+        A direcao inicial do Y foi sugerida como negativa porque o sentido fisico
+        relatado estava invertido; confirme com um movimento curto antes do Home.
+        O feed inicial do Home e 500 mm/min, independente do feed de plotagem.<br>
         Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
         abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
         Pn:X e Pn:Y devem aparecer somente durante cada acionamento.<br>
@@ -572,17 +578,17 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
               <option value="">Escolher</option><option value="-1">X negativo</option><option value="1">X positivo</option>
             </select>
           </label>
-          <label>Direcao Y no GRBL
-            <select id="home-dir-y" style="width:95px;">
-              <option value="">Escolher</option><option value="-1">Y negativo</option><option value="1">Y positivo</option>
+          <label>Direcao Y no GRBL (invertido na bancada)
+            <select id="home-dir-y" style="width:110px;">
+              <option value="-1" selected>Y negativo</option><option value="1">Y positivo</option>
             </select>
           </label>
-          <label>Curso max X (mm) <input id="home-curso-x" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
-          <label>Curso max Y (mm) <input id="home-curso-y" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
+          <label>Busca max X (mm) <input id="home-curso-x" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
+          <label>Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
-          <label>Feed (mm/min) <input id="home-feed" type="number" min="20" max="150" step="10" value="120" style="width:75px;"></label>
+          <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
           <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
           <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
@@ -606,6 +612,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row">
           <span>Se ao mandar ir para a esquerda o motor andar para a direita:</span>
           <button class="btn btn-amber" onclick="inverterMotorXGrbl()">⇄ Inverter Direcao do Motor X no GRBL ($3)</button>
+          <button class="btn btn-amber" onclick="inverterMotorYGrbl()">⇄ Inverter Direcao do Motor Y no GRBL ($3)</button>
         </div>
         <div class="row" style="font-size:11px;color:var(--muted);">
           As coordenadas enviadas ao GRBL vem somente dos 4 cantos A, B, C, D (painel de calibracao).
@@ -648,6 +655,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" onclick="consultarSettingsGrbl()">↻ Ler Parametros Atuais ($$)</button>
         <button class="btn btn-amber" onclick="enviarRawGrbl('$21=0')">Desativar Hard Limits ($21=0)</button>
         <button class="btn btn-emerald" onclick="inverterMotorXGrbl()">⇄ Inverter Eixo X ($3)</button>
+        <button class="btn btn-amber" onclick="inverterMotorYGrbl()">⇄ Inverter Eixo Y ($3)</button>
       </div>
       <div class="code-box" id="box-grbl-settings" style="height:260px;">Clique em "Ler Parametros Atuais ($$)" para listar a EEPROM do GRBL.</div>
     </div>
@@ -732,6 +740,18 @@ async function inverterMotorXGrbl() {
   atualizarStatus();
 }
 
+async function inverterMotorYGrbl() {
+  if (!confirm('O bit Y do $3 sera invertido no GRBL (mudanca fisica permanente).\n' +
+               'Use somente com a CNC parada, Z desabilitado e com area livre.\n' +
+               'Depois teste jog Y de 0,5 mm e refaca Home XY e a calibracao.\n' +
+               'Nao inverta Y de novo se ja tiver corrigido o sentido no firmware. Continuar?')) return;
+  const r = await apiPost('inverter_motor_y_grbl', { confirmado: true });
+  if (!r.ok) alert(r.erro || 'Nao foi possivel inverter Y no GRBL.');
+  else alert('Direcao Y invertida em $3=' + r.mascara +
+             '. Confira o sentido com um jog curto antes de qualquer Home.');
+  atualizarStatus();
+}
+
 async function conectarPortas() {
   const pGrbl = document.getElementById('sel-porta-grbl').value;
   const pReset = document.getElementById('sel-porta-reset').value;
@@ -778,8 +798,20 @@ async function iniciarHomeXY() {
   const seguro = document.getElementById('home-confirmacao-seguranca').checked;
   if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
   if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
-  if (!confirm('A CNC buscara X e Y juntos, recuando cada eixo em 5 mm apos contato.\n' +
-               'Verifique direcoes, percurso livre, limites maximos, parada fisica e $21=0 / $22=0.\n' +
+  const cursoX = Number(document.getElementById('home-curso-x').value);
+  const cursoY = Number(document.getElementById('home-curso-y').value);
+  const feedHome = Number(document.getElementById('home-feed').value);
+  if (!(cursoX >= 1 && cursoX <= 300 && cursoY >= 1 && cursoY <= 300 &&
+        feedHome >= 20 && feedHome <= 600)) {
+    alert('Configure curso de busca entre 1 e 300 mm e feed entre 20 e 600 mm/min.');
+    return;
+  }
+  if (!confirm('Home XY: busca X' + (Number(x) > 0 ? '+' : '-') +
+               ' e Y' + (Number(y) > 0 ? '+' : '-') +
+               ', F' + feedHome + ' mm/min.\n' +
+               'Cursos MAXIMOS de BUSCA: X=' + cursoX + ' mm, Y=' + cursoY + ' mm.\n' +
+               'O RECUO apos cada chave permanece 5 mm (NAO 300 mm).\n' +
+               'Confirme sentidos fisicos, espaco livre, parada eletrica e $21=0 / $22=0.\n' +
                'Continuar?')) return;
   const valor = id => Number(document.getElementById(id).value);
   const resp = await apiPost('iniciar_home_xy', {
