@@ -159,17 +159,17 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 
 ### Etapa C — Fazer o Home XY pelas chaves
 
-1. Clique em **Home XY (chaves)**.
+1. Clique no único acesso **Home XY**, na barra de navegação.
 2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada.
 3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
 4. Escolha o passo da busca (**0,1 a 0,5 mm**) e o avanço (**20 a 150 mm/min**).
 5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
-6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home X e Y — recuo 2 mm**.
+6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home XY sincronizado — recuo 5 mm**.
 7. Aguarde a indicação **Home XY concluído**.
 
-O programa procura primeiro a chave **X** e depois a **Y**, observa `Pn:` e comanda um **recuo de 2 mm** após detectar cada sensor. Não utiliza `$H` nem movimenta Z.
+O programa começa procurando as chaves **X e Y juntas**, com um único jog coordenado por pequeno passo; interrompe o jog conjunto ao detectar uma chave, recua **somente o eixo detectado em 5 mm**, e continua buscando a outra. Quando as duas chaves acionarem e liberarem, define a origem G54. Não utiliza `$H` nem movimenta Z.
 
-**Importante:** a posição do cabeçote após recuar 2 mm **não é automaticamente o ponto A da matriz**. Só use G54 = (0, 0) se essa posição realmente coincidir com A; caso contrário, informe a posição medida. A repetibilidade do disparo e a precisão dos recuos precisam ser testadas mecanicamente.
+**Importante:** a posição do cabeçote após recuar 5 mm **não é automaticamente o ponto A da matriz**. Só use G54 = (0, 0) se essa posição realmente coincidir com A; caso contrário, informe a posição medida. A repetibilidade do disparo e a precisão dos recuos precisam ser testadas mecanicamente.
 
 Se o Home falhar, interrompa a operação e consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
 
@@ -218,7 +218,7 @@ Esse modo é destinado ao comissionamento dos motores; trabalhos que contenham a
 | **Portas USB → Conectar** | Seleciona o GRBL e o Arduino de reset | Ao iniciar ou reconectar dispositivos |
 | **Visor WPos / MPos** | Mostra posição de trabalho / máquina | Antes e durante movimentos |
 | **Terminal UGS** | Consulta estado, alarmes e parâmetros do GRBL | Diagnóstico e configuração |
-| **Home XY (chaves)** | Busca X/Y e recua 2 mm em cada eixo | Antes de movimentação automática real |
+| **Home XY (chaves)** | Busca X/Y e recua 5 mm em cada eixo | Antes de movimentação automática real |
 | **Jog Manual** | Move X/Y em pequenos incrementos | Verificar sentidos e calibração |
 | **Somente XY (bloquear Z)** | Proíbe pulsos nos GPIOs Z | Testes de movimento |
 | **Habilitar Z físico** | Autoriza o cabeçote real com validações | Somente após comissionamento e Home |
@@ -290,12 +290,12 @@ O código editável está em `smartv42_src/`. As **dez partes** são fragmentos 
 | A CNC não conecta ou dá `Permission denied` | Confira porta USB, cabo, acesso à serial e se outro programa mantém a porta aberta | `04_grbl` / `01_config` |
 | O servidor inicia, mas a interface não abre de outro computador | Está vinculado a `127.0.0.1`; abra no próprio host ou configure um acesso remoto apropriado separadamente | `10_server` |
 | GRBL não responde a `?` | Confira porta correta, baud `115200`, alimentação e firmware | `04_grbl` |
-| Home XY anda pouco no X e acusa ausência de sensores/status | A busca move até 0,5 mm por vez; a nova rotina tolera duas leituras `?` perdidas. Se persistir, teste USB/alimentação, `Pn:X` e `Pn:Y` sem potência nos motores | `04_grbl` / `docs/HOME_XY_CHAVES.md` |
+| Home XY anda pouco no X e acusa ausência de sensores/status | A busca sincronizada move até 0,5 mm por eixo por comando; a nova rotina tolera duas leituras `?` perdidas. Se persistir, teste USB/alimentação, `Pn:X` e `Pn:Y` sem potência nos motores | `04_grbl` / `docs/HOME_XY_CHAVES.md` |
 | Botão Abortar responde lentamente | Abortar envia `!` e `Ctrl+X` pela USB sem aguardar status; se não parar, use a **parada elétrica física**. O Home deve ser refeito | `04_grbl` / `10_server` |
 | `Pn:X` / `Pn:Y` não aparece ao pressionar a chave | Verifique o conector, estado elétrico, polaridade e relatório de status **com motores desenergizados** | Ligação / `04_grbl` |
 | Home XY não inicia com aviso de `$21`, `$22` ou `$20` | Verifique `$$` e a configuração exigida pelo Home; não desative limites sem parada elétrica independente | `04_grbl` |
 | O Home procura no sentido errado | Interrompa; confira físicamente o sentido X+/X− ou Y+/Y− antes de tentar novamente | `04_grbl` / interface |
-| A chave é detectada, mas não libera após 2 mm | Investigue mecânica do sensor, posição, folga e sentido de recuo; não force movimentos | `04_grbl` |
+| A chave é detectada, mas não libera após recuo de 5 mm | Investigue mecânica do sensor, posição, folga e sentido de recuo; não force movimentos | `04_grbl` |
 | Job bloqueado por ausência de Home | Execute Home XY pelas duas chaves; um reset/reconexão invalida a referência | `04_grbl` / `08_gcode` |
 | Cabeçote Z não responde | Confira se está em **Teste físico XY** e se o modo físico completo foi habilitado após Home | `03_actuators` |
 | GPIO não inicializa | Verifique `gpiozero`, suporte GPIO, pinagem BCM, permissões e polaridade | `03_actuators` / `01_config` |
@@ -355,7 +355,7 @@ ic/
 
 A máquina trabalha com motores, relés e atuadores que podem causar movimentos inesperados. O código foi testado em simulação, mas **não é uma função de segurança industrial**. Antes de usar o hardware, providencie e valide parada elétrica independente, proteções mecânicas, limites de percurso, alimentação, polaridade dos relés e funcionamento das chaves.
 
-- [Home XY por chaves: configuração, limites e recuo de 2 mm](docs/HOME_XY_CHAVES.md)
+- [Home XY por chaves: configuração, limites e recuo de 5 mm](docs/HOME_XY_CHAVES.md)
 - [Geometria e coordenadas: 100 × 100, 3 mm, 297 mm úteis](docs/MODELO_COORDENADAS_297.md)
 - [Separação entre simulação, XY físico e relés Z](docs/ISOLAMENTO_Z_SIMULACAO.md)
 - [Matriz, G-code importado e parâmetros de cada execução](docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md)
