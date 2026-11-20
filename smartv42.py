@@ -150,6 +150,8 @@ RELE_ATIVO_ALTO = False
 NIVEIS_MAX = 8
 MODO_PROFUNDIDADE = "distancia"
 SIMULADO = False
+# Armada somente via acao explicita da interface; o padrao da CNC real e teste XY sem Z.
+MODO_Z_FISICO_HABILITADO = False
 
 # Sequência EXATA dos pinos GPIO do cabeçote conforme a foto enviada:
 PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
@@ -564,51 +566,140 @@ def obter_estado_config_z():
     }
 
 
-def inicializar_gpio_z():
-    global reles_z
-    if SIMULADO or not GPIO_DISPONIVEL:
-        registrar_log(
-            f"Aviso: GPIO em modo simulado ou biblioteca ausente. Sequencia ativa: {PINOS_GPIO_Z}",
-            "info",
-        )
-        return
-    try:
-        for r in reles_z:
-            try:
-                r.close()
-            except Exception:
-                pass
-        reles_z.clear()
-        for pino in PINOS_GPIO_Z:
-            reles_z.append(OutputDevice(pino, active_high=RELE_ATIVO_ALTO, initial_value=False))
-        repouso = "0 V (modulo ativo em nivel ALTO)" if RELE_ATIVO_ALTO else "3,3 V (modulo ativo em nivel BAIXO)"
-        registrar_log(
-            f"GPIOs do Eixo Z inicializados na sequencia {PINOS_GPIO_Z}: reles DESLIGADOS, pinos em {repouso}.",
-            "ok",
-        )
-    except Exception as e:
-        for rele in reles_z:
-            try:
-                rele.off()
-                rele.close()
-            except Exception:
-                pass
-        reles_z.clear()
-        registrar_log(f"Falha critica ao inicializar GPIO: {e}", "erro")
-
-
+# Um unico intertravamento protege criacao, troca de modo, testes e todos os pulsos.
 trava_gpio_z = threading.RLock()
 
 
-def validar_conexao_fisica_z():
-    if SIMULADO:
-        return True, ""
+def obter_modo_z_efetivo():
+    """Estados exclusivos derivados da conexao efetiva; nunca de lista de objetos GPIO."""
     grbl = globals().get("_grbl_global")
-    if grbl is None or not getattr(grbl, "conexao_real", False):
-        return False, "Bloqueado: XY nao conectado ao GRBL fisico."
+    if grbl is None or getattr(grbl, "ser", None) is None:
+        return "desconectado"
+    virtual = bool(getattr(grbl, "modo_simulacao", False))
+    fisico = bool(getattr(grbl, "conexao_real", False))
+    porta_virtual = str(getattr(grbl, "porta_atual", "")).upper() == "SIMULADO"
+    if (virtual and fisico) or (SIMULADO and fisico) or (porta_virtual and fisico):
+        return "inconsistente"
+    if (virtual or porta_virtual) and not fisico:
+        return "simulacao"
+    if SIMULADO and not virtual:
+        return "inconsistente"
+    if not fisico:
+        return "desconectado"
+    return "completo" if MODO_Z_FISICO_HABILITADO else "teste_xy"
+
+
+def obter_estado_modo_z():
+    modo = obter_modo_z_efetivo()
+    return {
+        "modo": modo,
+        "fisico_habilitado": modo == "completo",
+        "gpio_inicializado": len(reles_z) == len(PINOS_GPIO_Z) and len(reles_z) > 0,
+        "simulado": modo == "simulacao",
+        "mensagem": {
+            "simulacao": "GRBL e Z virtuais: GPIOs nao podem ser acionados.",
+            "teste_xy": "Teste fisico XY: relés Z bloqueados.",
+            "completo": "Z fisico habilitado: operar somente apos Home XY.",
+            "desconectado": "GRBL desconectado; Z fisico bloqueado.",
+            "inconsistente": "Modo de simulacao e conexao fisica inconsistentes; Z bloqueado.",
+        }[modo],
+    }
+
+
+def _desligar_e_liberar_reles_z():
+    """Chamado apenas com trava_gpio_z adquirida."""
+    for rele in tuple(reles_z):
+        try:
+            rele.off()
+        except Exception as exc:
+            registrar_log(f"Nao foi possivel desligar rele Z: {exc}", "erro")
+        try:
+            rele.close()
+        except Exception as exc:
+            registrar_log(f"Nao foi possivel liberar GPIO Z: {exc}", "erro")
+    reles_z.clear()
+
+
+def bloquear_z_fisico(motivo="Modo Teste fisico XY: Z bloqueado"):
+    """Desarma e libera objetos fisicos; seguro mesmo se GRBL mudar para simulacao."""
+    global MODO_Z_FISICO_HABILITADO
+    with trava_gpio_z:
+        MODO_Z_FISICO_HABILITADO = False
+        _desligar_e_liberar_reles_z()
+    registrar_log(f"Z fisico desabilitado: {motivo}", "aviso")
+    return True
+
+
+def inicializar_gpio_z():
+    """Nunca configura saidas fisicas para GRBL virtual ou no modo Teste XY."""
+    with trava_gpio_z:
+        _desligar_e_liberar_reles_z()
+        modo = obter_modo_z_efetivo()
+        if modo != "completo":
+            registrar_log(f"GPIO Z nao inicializado (modo={modo}).", "info")
+            return False
+        if not GPIO_DISPONIVEL or OutputDevice is None:
+            registrar_log("GPIO fisico indisponivel; Z mantido bloqueado.", "erro")
+            return False
+        try:
+            for pino in PINOS_GPIO_Z:
+                reles_z.append(OutputDevice(pino, active_high=RELE_ATIVO_ALTO, initial_value=False))
+        except Exception as exc:
+            _desligar_e_liberar_reles_z()
+            registrar_log(f"Falha critica ao inicializar GPIO Z: {exc}", "erro")
+            return False
+        registrar_log(f"GPIO Z fisico inicializado, {len(reles_z)} reles em repouso.", "ok")
+        return True
+
+
+def habilitar_z_fisico():
+    """Arma Z apenas com CNC realmente conectada, Home XY valido e Idle confirmado."""
+    global MODO_Z_FISICO_HABILITADO
+    with trava_gpio_z:
+        grbl = globals().get("_grbl_global")
+        if (grbl is None or getattr(grbl, "ser", None) is None
+                or not getattr(grbl, "conexao_real", False)
+                or getattr(grbl, "modo_simulacao", False)
+                or str(getattr(grbl, "porta_atual", "")).upper() == "SIMULADO"
+                or SIMULADO):
+            return False, "Z fisico proibido sem conexao GRBL fisica nao simulada."
+        if not getattr(grbl, "home_xy_referenciado", False):
+            return False, "Execute Home XY por chaves antes de habilitar Z fisico."
+        if not GPIO_DISPONIVEL or OutputDevice is None:
+            return False, "Biblioteca/controlador GPIO indisponivel na Raspberry Pi."
+        if abortar_job_evento.is_set() or _job_abortar:
+            return False, "Operacao abortada: Z fisico nao habilitado."
+        status = grbl.ler_status_grbl(timeout=0.7)
+        if not status.startswith("<Idle"):
+            return False, f"GRBL precisa estar Idle para habilitar Z ({status})."
+        if any(p in pinos_ativos(status) for p in "XY"):
+            return False, "Chaves X/Y acionadas: Z fisico nao habilitado."
+        MODO_Z_FISICO_HABILITADO = True
+        if not inicializar_gpio_z():
+            MODO_Z_FISICO_HABILITADO = False
+            _desligar_e_liberar_reles_z()
+            return False, "Nao foi possivel inicializar fisicamente os reles Z."
+        return True, "Modo fisico completo habilitado; Z1..Z8 podem ser acionados com intertravamentos."
+
+
+def validar_conexao_fisica_z():
+    modo = obter_modo_z_efetivo()
+    if modo == "simulacao":
+        return True, ""
+    if modo == "inconsistente":
+        return False, "Modo simulado e GRBL fisico inconsistentes; relés Z bloqueados."
+    if modo == "desconectado":
+        return False, "Bloqueado: GRBL fisico nao conectado."
+    if modo == "teste_xy":
+        return False, "Teste fisico XY: Z fisico bloqueado; habilite-o expressamente apos Home XY."
+    grbl = globals()["_grbl_global"]
+    if not getattr(grbl, "home_xy_referenciado", False):
+        return False, "Home XY nao referenciado: Z bloqueado."
     status = grbl.ler_status_grbl(timeout=0.7)
     if not status.startswith("<Idle"):
         return False, f"Bloqueado: GRBL nao confirmou Idle ({status})."
+    if any(p in pinos_ativos(status) for p in "XY"):
+        return False, "Fim de curso X/Y acionado; Z bloqueado."
     if abortar_job_evento.is_set() or _job_abortar:
         return False, "Z bloqueado: operacao abortada."
     return True, ""
@@ -625,65 +716,46 @@ def acionar_eixo_z(nivel_z, pulsos_override=None, on_ms_override=None, off_ms_ov
     info = {"pulsos": 0, "tempo_ms": 0, "pino_gpio": None, "erro": ""}
     try:
         sensor = int(nivel_z)
-    except (TypeError, ValueError):
-        info["erro"] = f"nivel invalido: {nivel_z}"
+        if not 1 <= sensor <= NIVEIS_MAX:
+            raise ValueError(f"nivel fora de 1-{NIVEIS_MAX}: {sensor}")
+        num_batidas = int(pulsos_override) if pulsos_override is not None else obter_pulsos_para_nivel(sensor)
+        t_on = float(on_ms_override) / 1000.0 if on_ms_override is not None else TEMPO_ON_Z_S
+        t_off = float(off_ms_override) / 1000.0 if off_ms_override is not None else TEMPO_OFF_Z_S
+    except (TypeError, ValueError, OverflowError) as exc:
+        info["erro"] = f"Parametros de Z invalidos: {exc}"
         return False, info
-
-    if not (1 <= sensor <= NIVEIS_MAX):
-        info["erro"] = f"nivel fora de 1-{NIVEIS_MAX}: {sensor}"
+    info["pino_gpio"] = PINOS_GPIO_Z[sensor - 1]
+    if not 1 <= num_batidas <= 500 or not 0.001 <= t_on <= 2.0 or not 0 <= t_off <= 2.0:
+        info["erro"] = "Pulsos/tempos Z fora da faixa (1..500, ON 1..2000 ms, OFF 0..2000 ms)."
         return False, info
 
     t_inicio = time.perf_counter()
-    ESTADO_ESTUDIO["z_atual"] = sensor
-    pino_gpio_alvo = PINOS_GPIO_Z[sensor - 1]
-    info["pino_gpio"] = pino_gpio_alvo
-
-    num_batidas = int(pulsos_override) if pulsos_override is not None else obter_pulsos_para_nivel(sensor)
-    t_on = (float(on_ms_override) / 1000.0) if on_ms_override is not None else TEMPO_ON_Z_S
-    t_off = (float(off_ms_override) / 1000.0) if off_ms_override is not None else TEMPO_OFF_Z_S
-
-    permitido, motivo_bloqueio = validar_conexao_fisica_z()
-    if not permitido:
-        info["erro"] = motivo_bloqueio
-        return False, info
-    if not SIMULADO and (not GPIO_DISPONIVEL or len(reles_z) != len(PINOS_GPIO_Z)):
-        info["erro"] = "GPIO Z indisponivel: confira reles ou use --simulado"
-        return False, info
-    if not (1 <= num_batidas <= 500):
-        info["erro"] = "Pulsos Z fora do intervalo 1..500"
-        return False, info
-    if not (0.001 <= t_on <= 2.0 and 0 <= t_off <= 2.0):
-        info["erro"] = "Duracao Z invalida (ON 1..2000ms; OFF 0..2000ms)"
-        return False, info
-    pulsos_realizados = 0
     with trava_gpio_z:
-        return _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio)
+        permitido, motivo = validar_conexao_fisica_z()
+        if not permitido:
+            info["erro"] = motivo
+            return False, info
+        modo = obter_modo_z_efetivo()
+        if modo == "completo" and (not GPIO_DISPONIVEL or len(reles_z) != len(PINOS_GPIO_Z)):
+            info["erro"] = "GPIO fisico Z nao inicializado: acao bloqueada."
+            return False, info
+        if modo not in ("simulacao", "completo"):
+            info["erro"] = f"Modo Z nao autorizado: {modo}"
+            return False, info
 
-
-def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio):
-    pulsos_realizados = 0
-    if not SIMULADO and reles_z and len(reles_z) >= sensor:
-        pino_rele = reles_z[sensor - 1]
+        ESTADO_ESTUDIO["z_atual"] = sensor
         try:
-            ultimo_check = time.monotonic()
-            for i in range(num_batidas):
-                if not aguardar_liberacao_z():
-                    break
-                if (time.monotonic() - ultimo_check) >= 0.25:
-                    pronto, motivo = validar_conexao_fisica_z()
-                    ultimo_check = time.monotonic()
-                    if not pronto:
-                        info["erro"] = motivo
-                        break
-                pino_rele.on()
-                time.sleep(t_on)
-                pino_rele.off()
-                pulsos_realizados += 1
-                if i < num_batidas - 1:
-                    time.sleep(t_off)
+            return _acionar_pulsos_z_protegidos(
+                sensor, num_batidas, t_on, t_off, info, t_inicio, modo
+            )
         finally:
-            pino_rele.off()
-    else:
+            ESTADO_ESTUDIO["z_atual"] = 0
+
+
+def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inicio, modo):
+    """Somente modo COMPLETO possui ramo que chama OutputDevice.on()."""
+    pulsos_realizados = 0
+    if modo == "simulacao":
         for i in range(num_batidas):
             if not aguardar_liberacao_z():
                 break
@@ -691,11 +763,35 @@ def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inici
             pulsos_realizados += 1
             if i < num_batidas - 1:
                 time.sleep(t_off)
+    elif modo == "completo":
+        rele = reles_z[sensor - 1]
+        try:
+            for i in range(num_batidas):
+                if not aguardar_liberacao_z():
+                    break
+                # Reavaliar autorizacao imediatamente ANTES de cada pulso fisico.
+                pronto, motivo = validar_conexao_fisica_z()
+                if not pronto:
+                    info["erro"] = motivo
+                    break
+                rele.on()
+                try:
+                    time.sleep(t_on)
+                finally:
+                    rele.off()
+                pulsos_realizados += 1
+                if i < num_batidas - 1:
+                    time.sleep(t_off)
+        finally:
+            rele.off()
+    else:
+        info["erro"] = "Modo Z invalido: nenhum pulso realizado."
+        return False, info
 
     info["pulsos"] = pulsos_realizados
     info["tempo_ms"] = int((time.perf_counter() - t_inicio) * 1000)
     if pulsos_realizados != num_batidas:
-        info["erro"] = "Z interrompido ou pausado antes do fim da sequencia de pulsos"
+        info["erro"] = info["erro"] or "Z interrompido antes do fim da sequencia de pulsos."
         return False, info
     return True, info
 
@@ -732,50 +828,50 @@ def acionar_sequencia_cabecote(ate_nivel=8, pulsos_por_pino=None, on_ms=None, of
 
 
 def testar_reles_um_a_um(tempo_ligado_s=0.5):
-    pronto, erro = validar_conexao_fisica_z()
-    if not pronto:
-        registrar_log(f"Teste sequencial Z bloqueado: {erro}", "erro")
+    """Simulacao jamais percorre uma lista de objetos reais previamente inicializados."""
+    if not (0.01 <= float(tempo_ligado_s) <= 2.0):
+        registrar_log("Teste Z rejeitado: tempo fora de 0.01..2.0s.", "erro")
         return False
-    if not reles_z:
-        if not SIMULADO:
-            registrar_log("Teste Z bloqueado: reles fisicos indisponiveis.", "erro")
+    with trava_gpio_z:
+        permitido, erro = validar_conexao_fisica_z()
+        if not permitido:
+            registrar_log(f"Teste sequencial Z bloqueado: {erro}", "erro")
             return False
-        registrar_log(
-            f"[TESTE] Sem GPIO fisico (modo simulado). Testando na ordem exata {PINOS_GPIO_Z}...",
-            "aviso",
-        )
-        for i, pino in enumerate(PINOS_GPIO_Z, start=1):
-            if abortar_job_evento.is_set():
-                break
-            ESTADO_ESTUDIO["z_atual"] = i
-            msg = f"[TESTE SIMULADO] Ordem #{i} -> GPIO {pino} (Nivel Z{i}, {obter_pulsos_para_nivel(i)} pulsos) LIGADO por {tempo_ligado_s:.1f}s"
-            registrar_log(msg, "info")
-            registrar_terminal("TESTE-Z", msg, "info")
-            time.sleep(tempo_ligado_s)
-        ESTADO_ESTUDIO["z_atual"] = 0
-        return not abortar_job_evento.is_set()
-    try:
-        for i, (pino, rele) in enumerate(zip(PINOS_GPIO_Z, reles_z), start=1):
-            if abortar_job_evento.is_set():
-                break
-            pronto, erro = validar_conexao_fisica_z()
-            if not pronto:
-                registrar_log(f"Teste Z interrompido: {erro}", "erro")
-                return False
-            ESTADO_ESTUDIO["z_atual"] = i
-            msg = f"[TESTE] Ordem #{i} -> Rele {i} (GPIO {pino}) LIGADO por {tempo_ligado_s:.1f}s"
-            registrar_log(msg, "info")
-            registrar_terminal("TESTE-Z", msg, "info")
-            rele.on()
-            time.sleep(tempo_ligado_s)
-            rele.off()
-            time.sleep(0.3)
-    finally:
-        for rele in reles_z:
-            rele.off()
-        ESTADO_ESTUDIO["z_atual"] = 0
-    registrar_log("[TESTE] Fim. Sequencia verificada: [5, 6, 16, 27, 23, 17, 24, 25].", "ok")
-    return not abortar_job_evento.is_set()
+        modo = obter_modo_z_efetivo()
+        if modo not in ("simulacao", "completo"):
+            registrar_log(f"Teste sequencial Z rejeitado: modo {modo}.", "erro")
+            return False
+        if modo == "completo" and (not GPIO_DISPONIVEL or len(reles_z) != NIVEIS_MAX):
+            registrar_log("Teste Z bloqueado: relés fisicos nao inicializados.", "erro")
+            return False
+        try:
+            for i, pino in enumerate(PINOS_GPIO_Z, start=1):
+                if not aguardar_liberacao_z():
+                    return False
+                ESTADO_ESTUDIO["z_atual"] = i
+                if modo == "simulacao":
+                    registrar_log(f"[TESTE SIMULADO] Z{i} GPIO {pino}: sem energia fisica.", "info")
+                    time.sleep(tempo_ligado_s)
+                    continue
+                pronto, motivo = validar_conexao_fisica_z()
+                if not pronto:
+                    registrar_log(f"Teste Z interrompido: {motivo}", "erro")
+                    return False
+                rele = reles_z[i - 1]
+                try:
+                    rele.on()
+                    time.sleep(tempo_ligado_s)
+                finally:
+                    rele.off()
+                if i < NIVEIS_MAX:
+                    time.sleep(0.3)
+        finally:
+            if modo == "completo":
+                for rele in reles_z:
+                    rele.off()
+            ESTADO_ESTUDIO["z_atual"] = 0
+        registrar_log(f"Teste sequencial Z ({modo}) concluido.", "ok")
+        return True
 
 
 def perguntar_config_pulsos_interativo():
@@ -1267,6 +1363,7 @@ class ControladorGRBL:
         global SIMULADO
         porta = (porta or PORTA_GRBL).strip()
         baud = baud or BAUD
+        bloquear_z_fisico("Troca/reconexao da porta GRBL")
         self.invalidar_home_xy("Conexao USB reiniciada")
         with self.lock:
             if self.ser and getattr(self.ser, "is_open", False):
@@ -1428,8 +1525,8 @@ class ControladorGRBL:
 
     def preparar_grbl(self):
         """Nunca desbloqueia alarmes, ativa modo Check ou simula movimento silenciosamente."""
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            registrar_log("GRBL fisico nao conectado: job bloqueado.", "erro")
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            registrar_log("Conexao GRBL ausente ou estados fisico/simulado inconsistentes.", "erro")
             return ""
         status = self.ler_status_grbl()
         pronto, motivo = avaliar_status_para_mover(status)
@@ -1479,6 +1576,7 @@ class ControladorGRBL:
         return self.enviar_override_tempo_real("jog_cancel")
 
     def soft_reset(self):
+        bloquear_z_fisico("Soft reset do controlador GRBL")
         self.invalidar_home_xy("Soft reset GRBL")
         if not self.ser:
             return False
@@ -1602,8 +1700,8 @@ class ControladorGRBL:
         """
         if abs(dz) > 1e-6:
             return False, "Eixo Z nao e cartesiano: use Z1..Z8 pelo GPIO."
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            return False, "GRBL fisico indisponivel para jog."
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            return False, "Conexao GRBL ausente ou inconsistente para jog."
         estado = self.ler_status_grbl()
         if not estado.startswith("<Idle"):
             return False, f"Jog bloqueado; estado GRBL: {estado}"
@@ -1646,10 +1744,10 @@ class ControladorGRBL:
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
-        if not SIMULADO and not self.home_xy_referenciado:
+        if not self.modo_simulacao and not self.home_xy_referenciado:
             return False, "sem referencia XY", "Execute Home XY por chaves antes de movimentos absolutos."
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            return False, "Desconectado", "Conexao GRBL fisica/simulada ausente ou inconsistente"
         if fora_dos_limites(x_mm, y_mm):
             return (
                 False, "alvo fora dos limites",
@@ -1769,8 +1867,10 @@ class ControladorGRBL:
 
 
     def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
-        """Nao persiste a referencia: GRBL perde confiabilidade apos reset/alarme."""
+        """Invalida referencia e permissão de Z sem adquirir lock GPIO sob lock serial."""
+        global MODO_Z_FISICO_HABILITADO
         self.home_xy_referenciado = False
+        MODO_Z_FISICO_HABILITADO = False
         estado = getattr(self, "home_xy_estado", None)
         if estado is not None:
             estado.update({"concluido": False})
@@ -1873,6 +1973,7 @@ class ControladorGRBL:
                                coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
                                recuo=2.0, seguranca_confirmada=False):
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
+        bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
         self.home_xy_estado.update({
             "ativo": True, "concluido": False, "erro": "",
@@ -1881,8 +1982,8 @@ class ControladorGRBL:
         try:
             if not seguranca_confirmada:
                 raise ValueError("Confirme parada de emergencia fisica independente antes de iniciar.")
-            if not self.ser or (not SIMULADO and not self.conexao_real):
-                raise RuntimeError("Controladora GRBL fisica nao conectada.")
+            if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+                raise RuntimeError("Conexao GRBL inconsistente: Home XY bloqueado.")
             if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
                 raise ValueError("Defina expressamente a direcao de busca X e Y em coordenadas GRBL.")
             for nome, valor in (("curso X", curso_x), ("curso Y", curso_y), ("coordenada X", coord_x),
@@ -2316,6 +2417,7 @@ def iniciar_home_xy_em_background(grbl, **parametros):
         _job_abortar = False
         _job_pausado = False
         abortar_job_evento.clear()
+    bloquear_z_fisico("Home XY reservado: somente motores X/Y autorizados")
     def _worker():
         global _operacao_manual
         try:
@@ -3098,9 +3200,18 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
     global _job_em_execucao, _job_pausado, _job_abortar
     if not programa:
         return False
-    if hasattr(grbl, "home_xy_referenciado") and not SIMULADO and not grbl.home_xy_referenciado:
+    if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
         registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
         return False
+    if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
+        if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
+            registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
+            return False
+    if any(bloco.get("tipo") == "z" for bloco in programa):
+        modo_z = obter_modo_z_efetivo()
+        if modo_z not in ("simulacao", "completo"):
+            registrar_log(f"Job com Z bloqueado no modo {modo_z}. Habilite Z fisico apos Home XY.", "erro")
+            return False
     try:
         validar_programa_antes_movimento(grbl, programa)
     except (ValueError, RuntimeError) as exc:
@@ -3126,6 +3237,8 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
             ok_cal, erro_cal = validar_janela_calibrada()
             if not ok_cal:
                 raise RuntimeError(erro_cal)
+            if any(bloco.get("tipo") == "z" for bloco in programa) and obter_modo_z_efetivo() not in ("simulacao", "completo"):
+                raise RuntimeError("Modo Z alterado antes do job; relés Z bloqueados.")
             if not grbl.preparar_grbl():
                 raise RuntimeError("GRBL nao ficou pronto; nenhum comando executado.")
             # Atualiza a posicao apos ler o GRBL real e checa o caminho novamente.
@@ -3146,8 +3259,8 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
                 except Exception as exc:
                     raise RuntimeError(f"Linha {bloco['linha']}: {exc}") from exc
             if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
-                if not SIMULADO and reset_ctrl.simulado:
-                    raise RuntimeError("Reset fisico solicitado mas Arduino de reset esta simulado.")
+                if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
+                    raise RuntimeError("Reset mecanico cancelado: modo GRBL e Arduino reset diferentes.")
                 ok_reset, detalhe_reset = reset_ctrl.ciclo_completo_reset()
                 if not ok_reset:
                     raise RuntimeError(f"Reset mecanico falhou: {detalhe_reset}")
@@ -3570,7 +3683,19 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="card">
       <div class="card-title">
         <span>Cabecote Z: Ordem [5, 6, 16, 27, 23, 17, 24, 25]</span>
-        <span style="font-size:10px;color:var(--accent);">Clique para testar</span>
+        <span style="font-size:10px;color:var(--accent);">Acionamento protegido</span>
+      </div>
+      <div style="border:1px solid rgba(148,163,184,.3);padding:8px;border-radius:6px;margin:5px 0 9px;">
+        <div id="estado-modo-z" style="font-size:11px;font-weight:700;">Z fisico bloqueado por padrao</div>
+        <div style="display:flex;gap:7px;margin-top:7px;flex-wrap:wrap;">
+          <button class="btn btn-sky" onclick="alterarModoZ(false)">Somente XY (bloquear Z)</button>
+          <button class="btn btn-amber" onclick="alterarModoZ(true)">Habilitar Z fisico</button>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;">
+          Simulacao GRBL: Z sempre virtual. Teste fisico XY: Z desativado.
+          Habilitar Z real exige Home XY e confirmacao explicita; reconectar,
+          reiniciar GRBL ou executar Home XY volta a bloquear Z.
+        </div>
       </div>
       <div class="gpio-grid">
         <button class="gpio-btn" onclick="testarNivelZ(1)">1:GPIO5</button>
@@ -3928,6 +4053,16 @@ async function mudarWCS(wcs) {
   atualizarStatus();
 }
 
+async function alterarModoZ(habilitar) {
+  if (habilitar && !confirm(
+    'Habilitar GPIOs e reles Z REAIS na Raspberry Pi?\n' +
+    'Confirme Home XY concluido, area livre, parada fisica independente e cabecote protegido.'
+  )) return;
+  const resposta = await apiPost('definir_modo_z', { habilitar, confirmado: habilitar });
+  if (!resposta.ok) alert(resposta.erro || 'Nao foi possivel alterar o modo Z.');
+  await atualizarStatus();
+}
+
 async function testarNivelZ(nv) {
   const resultado = await apiPost('testar_z', { nivel: nv });
   if (!resultado.ok) alert('Falha no acionamento Z: ' + ((resultado.info && resultado.info.erro) || resultado.erro || 'consulte os logs'));
@@ -4183,6 +4318,18 @@ async function atualizarStatus() {
     document.getElementById('grbl-state-badge').textContent = `● ${st.estado_grbl} (${st.wcs})`;
     document.getElementById('status-porta-pill').textContent = `● ${st.porta_grbl}`;
     document.getElementById('badge-status-porta').textContent = `Porta: ${st.porta_grbl}`;
+    if (st.modo_z) {
+      const nomesModo = {
+        simulacao: 'Simulacao integral — relés fisicos Z desativados',
+        teste_xy: 'Teste fisico XY — Z bloqueado',
+        completo: 'Operacao fisica completa — Z habilitado',
+        desconectado: 'GRBL desconectado — Z bloqueado',
+        inconsistente: 'Falha de modo — Z bloqueado'
+      };
+      const el = document.getElementById('estado-modo-z');
+      el.textContent = nomesModo[st.modo_z.modo] || st.modo_z.mensagem;
+      el.style.color = st.modo_z.fisico_habilitado ? '#fbbf24' : '#38bdf8';
+    }
 
     const x_idx_calc = st.idx ? st.idx[0] : 0;   // coluna, calculada no servidor pelos 4 cantos
     const y_idx_calc = st.idx ? st.idx[1] : 0;   // linha
@@ -4295,7 +4442,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             _grbl_global.atualizar_status()
             self._enviar_json({
                 "porta_grbl": _grbl_global.porta_atual,
-                "simulado": _grbl_global.porta_atual == "SIMULADO",
+                "simulado": bool(_grbl_global.modo_simulacao and not _grbl_global.conexao_real),
+                "modo_z": obter_estado_modo_z(),
                 "estado_grbl": _grbl_global.estado,
                 "wpos": _grbl_global.wpos,
                 "mpos": _grbl_global.mpos,
@@ -4463,10 +4611,28 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             p_grbl = dados.get("porta_grbl", _grbl_global.porta_atual)
             p_reset = dados.get("porta_reset", _reset_global.porta)
             ok_grbl = _grbl_global.conectar(p_grbl)
-            if ok_grbl and (SIMULADO or not reles_z):
-                inicializar_gpio_z()
+            # Conectar() desarma e fecha SEMPRE os GPIOs fisicos antes de trocar a porta.
             ok_reset = _reset_global.conectar(p_reset)
-            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl, "reset": ok_reset})
+            self._enviar_json({"ok": bool(ok_grbl and ok_reset), "grbl": ok_grbl,
+                               "reset": ok_reset, "modo_z": obter_estado_modo_z()})
+            return
+
+        if acao == "definir_modo_z":
+            habilitar = dados.get("habilitar")
+            if not isinstance(habilitar, bool):
+                self._enviar_json({"ok": False, "erro": "Informe habilitar=true ou false."}, 400)
+                return
+            if habilitar:
+                if dados.get("confirmado") is not True:
+                    self._enviar_json({"ok": False, "erro": "Confirme explicitamente a habilitacao fisica de Z."}, 400)
+                    return
+                ok_z, mensagem = habilitar_z_fisico()
+            else:
+                ok_z = bloquear_z_fisico("Operador selecionou Teste fisico XY")
+                mensagem = "Teste fisico XY ativo: reles Z bloqueados."
+            self._enviar_json({"ok": ok_z, "mensagem": mensagem,
+                               "erro": None if ok_z else mensagem, "modo_z": obter_estado_modo_z()},
+                              200 if ok_z else 409)
             return
 
         if acao == "jog":
@@ -4495,8 +4661,8 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
-            if not _grbl_global.ser or (not SIMULADO and not _grbl_global.conexao_real):
-                self._enviar_json({"ok": False, "erro": "Conecte a CNC fisica antes de iniciar Home XY."}, 409)
+            if not _grbl_global.ser or (not _grbl_global.modo_simulacao and not _grbl_global.conexao_real):
+                self._enviar_json({"ok": False, "erro": "Conecte GRBL fisico ou simulador antes de iniciar Home XY."}, 409)
                 return
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
@@ -4599,7 +4765,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "iniciar_job":
-            if not SIMULADO and not _grbl_global.home_xy_referenciado:
+            if not _grbl_global.modo_simulacao and not _grbl_global.home_xy_referenciado:
                 self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
                 return
             if estado_importacao_gcode["programa"] is not None:
@@ -4614,7 +4780,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "reset_mecanico":
-            if not SIMULADO and _reset_global.simulado:
+            if _grbl_global.modo_simulacao and not _reset_global.simulado:
+                self._enviar_json({"ok": False, "erro": "GRBL simulado: Arduino de reset REAL bloqueado."}, 409)
+                return
+            if not _grbl_global.modo_simulacao and _reset_global.simulado:
                 self._enviar_json({"ok": False, "erro": "Arduino de reset fisico nao conectado."}, 409)
                 return
             sub = dados.get("subcmd", "completo")
@@ -4736,10 +4905,11 @@ def main():
         registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
     _grbl_global = ControladorGRBL()
     grbl_conectado = _grbl_global.conectar("SIMULADO" if SIMULADO else args.porta, BAUD)
-    if grbl_conectado:
-        inicializar_gpio_z()
-    else:
-        registrar_log("GPIO nao inicializado: GRBL nao esta pronto; conecte a controladora antes.", "erro")
+    # Padrao seguro: Z permanece desarmado inclusive com GRBL fisico conectado.
+    # O operador habilita Z explicitamente na interface somente apos Home XY.
+    bloquear_z_fisico("Inicializacao: Z fisico desativado por padrao")
+    if not grbl_conectado:
+        registrar_log("GRBL nao esta pronto; Z mantido bloqueado.", "erro")
 
     _reset_global = ControladorResetArduino()
     _reset_global.conectar(PORTA_ARDUINO_RESET)
