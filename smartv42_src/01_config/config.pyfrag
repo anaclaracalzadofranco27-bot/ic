@@ -267,29 +267,36 @@ def salvar_calibracao_matriz():
 
 
 def carregar_calibracao_matriz():
+    """Carrega configuracao legada apenas se os quatro cantos cobrem 100x100 a 3 mm.
+
+    Uma calibracao antiga de 24x21/247.5 mm NUNCA substitui silenciosamente os
+    pontos de 297 mm. Nao salva nem migra sem intervencao do operador.
+    """
     global USAR_CALIBRACAO_4_PONTOS, PONTO_A, PONTO_B, PONTO_C, PONTO_D
     global ORIGEM_X_NA_DIREITA, INVERTER_JOG_X, INVERTER_JOG_Y, SINAL_EIXO_X, SINAL_EIXO_Y
     if not os.path.isfile(ARQUIVO_CALIBRACAO_MATRIZ):
         return False
     try:
-        with open(ARQUIVO_CALIBRACAO_MATRIZ, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        if "ponto_a" in d and len(d["ponto_a"]) == 2:
-            PONTO_A = [float(d["ponto_a"][0]), float(d["ponto_a"][1])]
-        if "ponto_b" in d and len(d["ponto_b"]) == 2:
-            PONTO_B = [float(d["ponto_b"][0]), float(d["ponto_b"][1])]
-        if "ponto_c" in d and len(d["ponto_c"]) == 2:
-            PONTO_C = [float(d["ponto_c"][0]), float(d["ponto_c"][1])]
-        if "ponto_d" in d and len(d["ponto_d"]) == 2:
-            PONTO_D = [float(d["ponto_d"][0]), float(d["ponto_d"][1])]
-        USAR_CALIBRACAO_4_PONTOS = bool(d.get("usar_calibracao_4_pontos", True))
-        ORIGEM_X_NA_DIREITA = bool(d.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
-        INVERTER_JOG_X = bool(d.get("inverter_jog_x", INVERTER_JOG_X))
-        INVERTER_JOG_Y = bool(d.get("inverter_jog_y", INVERTER_JOG_Y))
-        SINAL_EIXO_X = -1.0 if float(d.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
-        SINAL_EIXO_Y = -1.0 if float(d.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
+        with open(ARQUIVO_CALIBRACAO_MATRIZ, "r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+        nomes = ("ponto_a", "ponto_b", "ponto_c", "ponto_d")
+        pontos = [[float(v) for v in dados[nome]] for nome in nomes]
+        ok, motivo = validar_calibracao_cantos(pontos)
+        if not ok:
+            registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
+            return False
+        origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
+        sx = -1.0 if float(dados.get("sinal_eixo_x", SINAL_EIXO_X)) < 0 else 1.0
+        sy = -1.0 if float(dados.get("sinal_eixo_y", SINAL_EIXO_Y)) < 0 else 1.0
+        PONTO_A, PONTO_B, PONTO_C, PONTO_D = pontos
+        USAR_CALIBRACAO_4_PONTOS = True
+        ORIGEM_X_NA_DIREITA = origem_direita
+        INVERTER_JOG_X = bool(dados.get("inverter_jog_x", INVERTER_JOG_X))
+        INVERTER_JOG_Y = bool(dados.get("inverter_jog_y", INVERTER_JOG_Y))
+        SINAL_EIXO_X, SINAL_EIXO_Y = sx, sy
         return True
-    except Exception:
+    except (ValueError, TypeError, KeyError, OSError, json.JSONDecodeError) as exc:
+        registrar_log(f"Calibracao salva invalida e ignorada: {exc}", "erro")
         return False
 
 
