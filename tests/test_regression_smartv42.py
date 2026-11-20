@@ -79,7 +79,8 @@ class TestesABSeguranca(unittest.TestCase):
     def test_gpio_fisico_bloqueia_check(self):
         ctrl = FakeGRBL()
         ctrl.ler_status_grbl = lambda timeout=0.5: "<Check|MPos:0,0,0>"
-        with patch.object(mod, "SIMULADO", False), patch.object(mod, "_grbl_global", ctrl):
+        ctrl.home_xy_referenciado = True
+        with patch.object(mod, "SIMULADO", False), patch.object(mod, "_grbl_global", ctrl), patch.object(mod, "MODO_Z_FISICO_HABILITADO", True):
             ok, info = mod.acionar_eixo_z(4)
         self.assertFalse(ok)
         self.assertIn("Idle", info["erro"])

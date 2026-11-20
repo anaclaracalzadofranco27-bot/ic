@@ -446,6 +446,7 @@ class ControladorGRBL:
         global SIMULADO
         porta = (porta or PORTA_GRBL).strip()
         baud = baud or BAUD
+        bloquear_z_fisico("Troca/reconexao da porta GRBL")
         self.invalidar_home_xy("Conexao USB reiniciada")
         with self.lock:
             if self.ser and getattr(self.ser, "is_open", False):
@@ -607,8 +608,8 @@ class ControladorGRBL:
 
     def preparar_grbl(self):
         """Nunca desbloqueia alarmes, ativa modo Check ou simula movimento silenciosamente."""
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            registrar_log("GRBL fisico nao conectado: job bloqueado.", "erro")
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            registrar_log("Conexao GRBL ausente ou estados fisico/simulado inconsistentes.", "erro")
             return ""
         status = self.ler_status_grbl()
         pronto, motivo = avaliar_status_para_mover(status)
@@ -658,6 +659,7 @@ class ControladorGRBL:
         return self.enviar_override_tempo_real("jog_cancel")
 
     def soft_reset(self):
+        bloquear_z_fisico("Soft reset do controlador GRBL")
         self.invalidar_home_xy("Soft reset GRBL")
         if not self.ser:
             return False
@@ -781,8 +783,8 @@ class ControladorGRBL:
         """
         if abs(dz) > 1e-6:
             return False, "Eixo Z nao e cartesiano: use Z1..Z8 pelo GPIO."
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            return False, "GRBL fisico indisponivel para jog."
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            return False, "Conexao GRBL ausente ou inconsistente para jog."
         estado = self.ler_status_grbl()
         if not estado.startswith("<Idle"):
             return False, f"Jog bloqueado; estado GRBL: {estado}"
@@ -825,10 +827,10 @@ class ControladorGRBL:
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
-        if not SIMULADO and not self.home_xy_referenciado:
+        if not self.modo_simulacao and not self.home_xy_referenciado:
             return False, "sem referencia XY", "Execute Home XY por chaves antes de movimentos absolutos."
-        if not self.ser or (not SIMULADO and not self.conexao_real):
-            return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
+        if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+            return False, "Desconectado", "Conexao GRBL fisica/simulada ausente ou inconsistente"
         if fora_dos_limites(x_mm, y_mm):
             return (
                 False, "alvo fora dos limites",
@@ -948,8 +950,10 @@ class ControladorGRBL:
 
 
     def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
-        """Nao persiste a referencia: GRBL perde confiabilidade apos reset/alarme."""
+        """Invalida referencia e permissão de Z sem adquirir lock GPIO sob lock serial."""
+        global MODO_Z_FISICO_HABILITADO
         self.home_xy_referenciado = False
+        MODO_Z_FISICO_HABILITADO = False
         estado = getattr(self, "home_xy_estado", None)
         if estado is not None:
             estado.update({"concluido": False})
@@ -1052,6 +1056,7 @@ class ControladorGRBL:
                                coord_x=0.0, coord_y=0.0, passo=0.5, feed=120.0,
                                recuo=2.0, seguranca_confirmada=False):
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
+        bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
         self.home_xy_estado.update({
             "ativo": True, "concluido": False, "erro": "",
@@ -1060,8 +1065,8 @@ class ControladorGRBL:
         try:
             if not seguranca_confirmada:
                 raise ValueError("Confirme parada de emergencia fisica independente antes de iniciar.")
-            if not self.ser or (not SIMULADO and not self.conexao_real):
-                raise RuntimeError("Controladora GRBL fisica nao conectada.")
+            if not self.ser or (self.conexao_real == self.modo_simulacao) or (SIMULADO and self.conexao_real):
+                raise RuntimeError("Conexao GRBL inconsistente: Home XY bloqueado.")
             if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
                 raise ValueError("Defina expressamente a direcao de busca X e Y em coordenadas GRBL.")
             for nome, valor in (("curso X", curso_x), ("curso Y", curso_y), ("coordenada X", coord_x),
@@ -1495,6 +1500,7 @@ def iniciar_home_xy_em_background(grbl, **parametros):
         _job_abortar = False
         _job_pausado = False
         abortar_job_evento.clear()
+    bloquear_z_fisico("Home XY reservado: somente motores X/Y autorizados")
     def _worker():
         global _operacao_manual
         try:

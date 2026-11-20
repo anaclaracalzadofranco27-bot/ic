@@ -405,7 +405,19 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="card">
       <div class="card-title">
         <span>Cabecote Z: Ordem [5, 6, 16, 27, 23, 17, 24, 25]</span>
-        <span style="font-size:10px;color:var(--accent);">Clique para testar</span>
+        <span style="font-size:10px;color:var(--accent);">Acionamento protegido</span>
+      </div>
+      <div style="border:1px solid rgba(148,163,184,.3);padding:8px;border-radius:6px;margin:5px 0 9px;">
+        <div id="estado-modo-z" style="font-size:11px;font-weight:700;">Z fisico bloqueado por padrao</div>
+        <div style="display:flex;gap:7px;margin-top:7px;flex-wrap:wrap;">
+          <button class="btn btn-sky" onclick="alterarModoZ(false)">Somente XY (bloquear Z)</button>
+          <button class="btn btn-amber" onclick="alterarModoZ(true)">Habilitar Z fisico</button>
+        </div>
+        <div style="font-size:10px;color:var(--muted);margin-top:6px;">
+          Simulacao GRBL: Z sempre virtual. Teste fisico XY: Z desativado.
+          Habilitar Z real exige Home XY e confirmacao explicita; reconectar,
+          reiniciar GRBL ou executar Home XY volta a bloquear Z.
+        </div>
       </div>
       <div class="gpio-grid">
         <button class="gpio-btn" onclick="testarNivelZ(1)">1:GPIO5</button>
@@ -763,6 +775,16 @@ async function mudarWCS(wcs) {
   atualizarStatus();
 }
 
+async function alterarModoZ(habilitar) {
+  if (habilitar && !confirm(
+    'Habilitar GPIOs e reles Z REAIS na Raspberry Pi?\n' +
+    'Confirme Home XY concluido, area livre, parada fisica independente e cabecote protegido.'
+  )) return;
+  const resposta = await apiPost('definir_modo_z', { habilitar, confirmado: habilitar });
+  if (!resposta.ok) alert(resposta.erro || 'Nao foi possivel alterar o modo Z.');
+  await atualizarStatus();
+}
+
 async function testarNivelZ(nv) {
   const resultado = await apiPost('testar_z', { nivel: nv });
   if (!resultado.ok) alert('Falha no acionamento Z: ' + ((resultado.info && resultado.info.erro) || resultado.erro || 'consulte os logs'));
@@ -1018,6 +1040,18 @@ async function atualizarStatus() {
     document.getElementById('grbl-state-badge').textContent = `● ${st.estado_grbl} (${st.wcs})`;
     document.getElementById('status-porta-pill').textContent = `● ${st.porta_grbl}`;
     document.getElementById('badge-status-porta').textContent = `Porta: ${st.porta_grbl}`;
+    if (st.modo_z) {
+      const nomesModo = {
+        simulacao: 'Simulacao integral — relés fisicos Z desativados',
+        teste_xy: 'Teste fisico XY — Z bloqueado',
+        completo: 'Operacao fisica completa — Z habilitado',
+        desconectado: 'GRBL desconectado — Z bloqueado',
+        inconsistente: 'Falha de modo — Z bloqueado'
+      };
+      const el = document.getElementById('estado-modo-z');
+      el.textContent = nomesModo[st.modo_z.modo] || st.modo_z.mensagem;
+      el.style.color = st.modo_z.fisico_habilitado ? '#fbbf24' : '#38bdf8';
+    }
 
     const x_idx_calc = st.idx ? st.idx[0] : 0;   // coluna, calculada no servidor pelos 4 cantos
     const y_idx_calc = st.idx ? st.idx[1] : 0;   // linha

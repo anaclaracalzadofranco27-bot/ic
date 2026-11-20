@@ -150,6 +150,8 @@ RELE_ATIVO_ALTO = False
 NIVEIS_MAX = 8
 MODO_PROFUNDIDADE = "distancia"
 SIMULADO = False
+# Armada somente via acao explicita da interface; o padrao da CNC real e teste XY sem Z.
+MODO_Z_FISICO_HABILITADO = False
 
 # Sequência EXATA dos pinos GPIO do cabeçote conforme a foto enviada:
 PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]
