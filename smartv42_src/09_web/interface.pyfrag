@@ -350,7 +350,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
       <div class="grid-4">
-        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ Home ($H)</button>
+        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
         <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌖ Calibrar (0,0)</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
@@ -390,7 +390,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <button class="jog-btn" onclick="jog(1, -1)">↘</button>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
-          <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ Definir Ponto Atual = (0,0)</button>
+          <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home XY (automatico)</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
             <button class="btn" onclick="acaoUGS('zerar_x')">Zerar X0</button>
             <button class="btn" onclick="acaoUGS('zerar_y')">Zerar Y0</button>
@@ -536,14 +536,51 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <div class="coord-banner">
-        <strong>Como funciona a correcao do (0,0) na extremidade direita:</strong><br>
-        • Na matriz fisica, o cabecote inicia na <strong>extremidade direita (X = 0.0 mm, Y = 0.0 mm)</strong>.<br>
-        • Com <strong>Origem X na Direita</strong> ativada, a borda direita da imagem (coluna 99) e plotada em <strong>X = 0.0 mm</strong> e o cabecote varre da direita para a esquerda ate <strong>X = 247.5 mm</strong> (coluna 0), mantendo a imagem na orientacao correta (sem espelhar!).
+        <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
+        O SmartV42 busca a chave X e depois a Y, avanca em passos de ate 0,5 mm,
+        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.<br>
+        <strong>Atencao:</strong> Com $21=1, atingir as chaves causa alarme. Esta rotina exige
+        $22=0 e $21=0 confirmados pelo GRBL, sem alterar a EEPROM automaticamente.
+        Nesse modo as chaves NAO funcionam como limites rigidos: uma parada de emergencia
+        eletrica independente e protecao mecanica sao obrigatorias. O deslocamento
+        maximo so limita o software; nao impede colisoes se houver falha de comunicacao.
+      </div>
+      <div class="card" style="display:flex;flex-direction:column;gap:7px;">
+        <div class="card-title">Parametros da busca X/Y</div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <label>Direcao X no GRBL
+            <select id="home-dir-x" style="width:95px;">
+              <option value="">Escolher</option><option value="-1">X negativo</option><option value="1">X positivo</option>
+            </select>
+          </label>
+          <label>Direcao Y no GRBL
+            <select id="home-dir-y" style="width:95px;">
+              <option value="">Escolher</option><option value="-1">Y negativo</option><option value="1">Y positivo</option>
+            </select>
+          </label>
+          <label>Curso max X (mm) <input id="home-curso-x" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
+          <label>Curso max Y (mm) <input id="home-curso-y" type="number" min="1" max="320" step="1" value="30" style="width:75px;"></label>
+        </div>
+        <div class="row" style="gap:8px;flex-wrap:wrap;">
+          <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
+          <label>Feed (mm/min) <input id="home-feed" type="number" min="20" max="150" step="10" value="120" style="width:75px;"></label>
+          <label>G54 X apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 Y apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
+        </div>
+        <label style="font-size:11px;display:flex;gap:6px;align-items:flex-start;">
+          <input type="checkbox" id="home-confirmacao-seguranca" style="width:auto;">
+          Confirmo que ha parada de emergencia fisica independente e protecoes
+          que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
+        </label>
+        <div class="row">
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home X e Y — recuo 2 mm</button>
+          <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
+        </div>
+        <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
       </div>
       <div class="grid-3">
-        <button class="btn btn-emerald" onclick="acaoUGS('definir_home_manual')">⌖ 1. Definir Posicao Atual como (0,0)</button>
-        <button class="btn btn-purple" onclick="acaoUGS('home_grbl')">⌂ 2. Executar Homing Hardware ($H)</button>
-        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ 3. Mover Cabecote ao Ponto A (0,0)</button>
+        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ Ir ao ponto A (apos Home)</button>
+        <button class="btn" onclick="abrirModal('modal-terminal')">⌨ Verificar $21, $22 e Pn:</button>
       </div>
       <div class="card">
         <div class="card-title"><span>Ajuste Fino de Direcao e Limites Fisicos (250 mm x 250 mm)</span></div>
@@ -569,7 +606,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <div style="font-size:11px;color:var(--muted);">
-        Comandos: <code>$$</code>, <code>$X</code>, <code>$H</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
+        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
       </div>
       <div class="log-box" id="term-historico" style="height:280px;font-size:11.5px;"></div>
       <div class="row">
@@ -695,6 +732,29 @@ async function jog(dxSign, dySign) {
 async function acaoUGS(tipo) {
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
+  atualizarStatus();
+}
+
+async function iniciarHomeXY() {
+  const x = document.getElementById('home-dir-x').value;
+  const y = document.getElementById('home-dir-y').value;
+  const seguro = document.getElementById('home-confirmacao-seguranca').checked;
+  if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
+  if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
+  if (!confirm('A CNC vai movimentar X e Y ATE as chaves selecionadas.\n' +
+               'Verifique direcoes, percurso livre, limites maximos, parada fisica e $21=0 / $22=0.\n' +
+               'Continuar?')) return;
+  const valor = id => Number(document.getElementById(id).value);
+  const resp = await apiPost('iniciar_home_xy', {
+    direcao_x: Number(x), direcao_y: Number(y),
+    curso_x: valor('home-curso-x'), curso_y: valor('home-curso-y'),
+    passo: valor('home-passo'), feed: valor('home-feed'),
+    coord_x: valor('home-coord-x'), coord_y: valor('home-coord-y'),
+    seguranca_confirmada: seguro
+  });
+  document.getElementById('home-confirmacao-seguranca').checked = false;
+  if (!resp.ok) alert(resp.erro || 'Falha ao iniciar Home XY.');
+  else document.getElementById('home-xy-status').textContent = resp.mensagem;
   atualizarStatus();
 }
 
@@ -925,6 +985,8 @@ async function carregarEstadoInicial() {
     if (d.coord.ponto_a) {
       document.getElementById('inp-xa').value = d.coord.ponto_a[0];
       document.getElementById('inp-ya').value = d.coord.ponto_a[1];
+      document.getElementById('home-coord-x').value = d.coord.ponto_a[0];
+      document.getElementById('home-coord-y').value = d.coord.ponto_a[1];
       document.getElementById('inp-xb').value = d.coord.ponto_b[0];
       document.getElementById('inp-yb').value = d.coord.ponto_b[1];
       document.getElementById('inp-xc').value = d.coord.ponto_c[0];
@@ -969,7 +1031,16 @@ async function atualizarStatus() {
     };
     document.getElementById('dro-pn').textContent = `Pn:${st.pinos_ativos || 'Nenhum'} | Col:${posCabecote.x_idx},Lin:${posCabecote.y_idx}`;
 
-    if (st.job && st.job.ativo) {
+    if (st.home_xy) {
+      const h = st.home_xy;
+      const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
+          : h.referenciado ? 'Home XY referenciado (recuo 2 mm)'
+          : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
+      document.getElementById('home-xy-status').textContent = resumo;
+    }
+    if (st.home_xy && st.home_xy.ativo) {
+      document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
+    } else if (st.job && st.job.ativo) {
       document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
       document.getElementById('info-progresso').textContent =
