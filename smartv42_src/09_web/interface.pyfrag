@@ -223,9 +223,9 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <button class="nav-btn" onclick="exportarGCode()">⬇ Exportar G-Code</button>
 
     <div class="sidebar-footer">
-      <strong>Origem (0,0) na Direita:</strong><br>
-      Coluna 99 (direita da imagem) mapeada em X=0.0mm e Coluna 0 (esquerda) em X=247.5mm.<br>
-      Smart Matrix • EESC-USP
+      <strong>Malha física: 100 × 100 pontos</strong><br>
+      Passo nominal 3 mm · extremos separados por 297 mm.<br>
+      Home XY por chaves · recuo de 2 mm · Smart Matrix EESC-USP
     </div>
   </aside>
 
@@ -308,21 +308,16 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_d')">📍D</button>
       </div>
-      <div style="font-size:10px;color:#34d399;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:5px;padding:4px 6px;margin-top:4px;font-family:monospace;">
-        Janela Plotagem (Y negativo): X=[246.0 .. 270.0] | Y=[-50.0 .. -29.0]
+      <div id="janela-matriz-info" style="font-size:10px;color:#34d399;background:rgba(16,185,129,0.12);border:1px solid #10b981;border-radius:5px;padding:4px 6px;margin-top:4px;font-family:monospace;">
+        Matriz 100 × 100 · passo 3 mm · extensão útil 297 × 297 mm · 299 mm é faixa nominal do movimento.
       </div>
       <div id="lbl-avisos" style="display:none;white-space:pre-wrap;font-size:10px;color:#fbbf24;background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:5px;padding:5px;margin-top:4px;"></div>
       <div class="row" style="justify-content:space-between;font-size:10.5px;margin-top:4px;">
         <span id="lbl-meio-fisico" style="color:#38bdf8;font-family:monospace;">Centro(50,50): X=258.00, Y=-39.50</span>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
-      <div class="row" style="justify-content:space-between;font-size:9.5px;margin-top:3px;">
-        <span style="color:var(--muted);">Carro esta agora em:</span>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_a')" title="Define a posicao atual do GRBL como Ponto A (G92)">Aqui=A</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_b')" title="Define a posicao atual do GRBL como Ponto B (G92)">Aqui=B</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_c')" title="Define a posicao atual do GRBL como Ponto C (G92)">Aqui=C</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_d')" title="Define a posicao atual do GRBL como Ponto D (G92)">Aqui=D</button>
-        <button class="btn btn-amber" style="padding:2px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('sync_meio')" title="Define a posicao atual do GRBL como Centro (50,50)">Aqui=Meio</button>
+      <div style="font-size:10px;color:var(--muted);margin:5px 0;">
+        Os cantos A/B/C/D são os centros extremos no G54. Defina a origem somente pelo Home XY com chaves, não pelo G92.
       </div>
       <div class="row" style="justify-content:space-between;font-size:10px;">
         <button class="btn btn-sky" style="padding:2px 6px;font-size:9.5px;" onclick="resetarQuadrado297()">↺ Padrao 297x297 (A..D)</button>
@@ -576,8 +571,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
           <label>Feed (mm/min) <input id="home-feed" type="number" min="20" max="150" step="10" value="120" style="width:75px;"></label>
-          <label>G54 X apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
-          <label>G54 Y apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
+          <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
         <label style="font-size:11px;display:flex;gap:6px;align-items:flex-start;">
           <input type="checkbox" id="home-confirmacao-seguranca" style="width:auto;">
@@ -595,7 +590,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" onclick="abrirModal('modal-terminal')">⌨ Verificar $21, $22 e Pn:</button>
       </div>
       <div class="card">
-        <div class="card-title"><span>Ajuste Fino de Direcao e Limites Fisicos (250 mm x 250 mm)</span></div>
+        <div class="card-title"><span>Sentido dos motores · malha útil ~297 × 297 mm</span></div>
         <div class="row">
           <span>Se ao mandar ir para a esquerda o motor andar para a direita:</span>
           <button class="btn btn-amber" onclick="inverterMotorXGrbl()">⇄ Inverter Direcao do Motor X no GRBL ($3)</button>
@@ -618,7 +613,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     </div>
     <div class="modal-body">
       <div style="font-size:11px;color:var(--muted);">
-        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>HOME_CAL</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
+        Comandos: <code>$</code>, <code>$X</code>, <code>?</code>, <code>Home XY via interface</code>, <code>ORIGEM_DIREITA</code>, <code>ORIGEM_ESQUERDA</code>, <code>SINAL_X=-1</code>, <code>SINAL_X=1</code>, <code>MS=12,10,15</code>, <code>PULSOS_NIVEL=1,2,3,4,5,6,7,8</code>, <code>T</code>, <code>SEQ_Z</code>, <code>Z1..Z8</code>.
       </div>
       <div class="log-box" id="term-historico" style="height:280px;font-size:11.5px;"></div>
       <div class="row">
@@ -692,6 +687,7 @@ async function aplicarConfigCoordenadas() {
     ponto_c: pc,
     ponto_d: pd
   });
+  if (!r.ok) { alert(r.erro || 'Calibracao recusada. Confira a distancia entre centros extremos.'); return; }
   if (r.coord) configCoord = r.coord;
   await carregarEstadoInicial();
 }
@@ -710,6 +706,7 @@ async function resetarQuadrado297() {
 
 async function calibrarCantoMatriz(etapa) {
   const r = await apiPost('calibrar_caixa_fisica', { etapa });
+  if (!r.ok) { alert(r.erro || 'Calibracao/posicionamento recusado.'); return; }
   if (r.coord) configCoord = r.coord;
   await carregarEstadoInicial();
   await atualizarStatus();
@@ -1016,7 +1013,10 @@ async function carregarEstadoInicial() {
       document.getElementById('inp-xd').value = d.coord.ponto_d[0];
       document.getElementById('inp-yd').value = d.coord.ponto_d[1];
     }
-    document.getElementById('lbl-meio-fisico').textContent = `Centro(50,50): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+    document.getElementById('lbl-meio-fisico').textContent = `Centro (49,5;49,5): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
+    document.getElementById('janela-matriz-info').textContent = d.coord.usar_janela_plotagem
+      ? `Recorte: X[${d.coord.plot_x_min},${d.coord.plot_x_max}], Y[${d.coord.plot_y_min},${d.coord.plot_y_max}] · passo físico não muda`
+      : 'Malha completa 100 × 100 · passo 3 mm · 297 mm entre centros extremos · faixa nominal 299 mm';
     const av = document.getElementById('lbl-avisos');
     av.style.display = (d.coord.avisos && d.coord.avisos.length) ? 'block' : 'none';
     av.textContent = (d.coord.avisos || []).map(a => '⚠ ' + a).join('\n');

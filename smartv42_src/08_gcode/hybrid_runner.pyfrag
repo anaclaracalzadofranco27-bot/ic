@@ -5,22 +5,25 @@
 
 
 def validar_janela_calibrada():
-    """Impede usar calibracao antiga que nao cobre a janela de plotagem."""
-    xs = [float(p[0]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    ys = [float(p[1]) for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    if not all(math.isfinite(v) for v in xs + ys):
-        return False, "Calibracao tem coordenadas nao finitas."
+    """Confere geometria 100x100, passo nominal 3 mm e recorte espacial."""
+    ok, motivo = validar_calibracao_cantos()
+    if not ok:
+        return False, motivo
     if not USAR_JANELA_PLOTAGEM:
         return True, ""
-    if (min(xs) > min(PLOT_X_MIN, PLOT_X_MAX) or
-            max(xs) < max(PLOT_X_MIN, PLOT_X_MAX) or
-            min(ys) > min(PLOT_Y_MIN, PLOT_Y_MAX) or
-            max(ys) < max(PLOT_Y_MIN, PLOT_Y_MAX)):
-        return False, (
-            "CALIBRACAO INCOMPATIVEL com a janela de plotagem. "
-            "Confira calibracao_matriz.json: v41/v42 utilizam Y negativo. "
-            "Calibre os quatro cantos antes de mover a maquina."
-        )
+    janela = (float(PLOT_X_MIN), float(PLOT_X_MAX), float(PLOT_Y_MIN), float(PLOT_Y_MAX))
+    if not all(math.isfinite(v) for v in janela):
+        return False, "Janela de plotagem nao finita."
+    if abs(janela[1]-janela[0]) < 1e-6 or abs(janela[3]-janela[2]) < 1e-6:
+        return False, "Janela de plotagem deve ter largura e altura positivas."
+    # A janela e um recorte opcional: precisa intersectar algum centro da malha.
+    encontrou = any(
+        ponto_na_janela_plotagem(*indice_para_mm_fisico(i, j))
+        for i in range(TAMANHO_MATRIZ[1])
+        for j in range(TAMANHO_MATRIZ[0])
+    )
+    if not encontrou:
+        return False, "Janela nao contem nenhum centro da malha (passo de 3 mm)."
     return True, ""
 
 
@@ -127,11 +130,13 @@ def validar_programa_antes_movimento(grbl, programa):
             if posicao is None:
                 raise ValueError(f"Linha {bloco['linha']}: acionamento Z sem deslocamento XY anterior.")
             x, y = posicao
-            if USAR_JANELA_PLOTAGEM and not (
-                min(PLOT_X_MIN, PLOT_X_MAX) - 1e-6 <= x <= max(PLOT_X_MIN, PLOT_X_MAX) + 1e-6
-                and min(PLOT_Y_MIN, PLOT_Y_MAX) - 1e-6 <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX) + 1e-6
-            ):
+            if not ponto_na_janela_plotagem(x, y):
                 raise ValueError(f"Linha {bloco['linha']}: Z fora da janela em ({x}, {y}).")
+            if desvio_centro_malha_mm(x, y) > 0.35:
+                raise ValueError(
+                    f"Linha {bloco['linha']}: Z em ({x:.3f}, {y:.3f}) fora dos centros "
+                    "fisicos da matriz (100x100, passo ~3 mm)."
+                )
     return True
 
 
@@ -161,10 +166,10 @@ def executar_bloco_hibrido(grbl, bloco, contexto):
         if pos is None:
             raise RuntimeError("Z bloqueado: nenhum movimento XY concluido.")
         x, y = pos
-        if USAR_JANELA_PLOTAGEM:
-            if not (min(PLOT_X_MIN, PLOT_X_MAX) <= x <= max(PLOT_X_MIN, PLOT_X_MAX)
-                    and min(PLOT_Y_MIN, PLOT_Y_MAX) <= y <= max(PLOT_Y_MIN, PLOT_Y_MAX)):
-                raise RuntimeError(f"Z fora da janela em X={x:.3f}, Y={y:.3f}.")
+        if not ponto_na_janela_plotagem(x,y):
+            raise RuntimeError(f"Z fora da janela em X={x:.3f}, Y={y:.3f}.")
+        if desvio_centro_malha_mm(x,y) > 0.35:
+            raise RuntimeError("Z recusado fora do centro fisico de um pino (passo ~3 mm).")
         if not aguardar_liberacao_z():
             raise RuntimeError("Z interrompido durante pausa.")
         pronto, motivo = grbl.aguardar_grbl_idle()

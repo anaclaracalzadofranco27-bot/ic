@@ -41,19 +41,17 @@ def avaliar_status_para_mover(status):
 
 
 def fora_dos_limites(x_mm, y_mm):
+    """Area segura de trabalho limitada pelos cantos medidos de 297 mm.
+
+    A escala nominal de movimentacao 0..299 NAO acrescenta pontos fisicos nem
+    libera deslocamentos fora da area medida sem verificacao mecanica.
     """
-    Verifica limites respeitando os 4 cantos físicos calibrados (PONTO_A, PONTO_B, PONTO_C, PONTO_D),
-    permitindo toda a faixa real medida na bancada (ex: X de 0 a 450, Y de -500 a +500).
-    """
-    # Uma janela de 30 mm alem dos cantos nao e intertravamento seguro.
-    margem = 0.0
-    xs = [p[0] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    ys = [p[1] for p in (PONTO_A, PONTO_B, PONTO_C, PONTO_D)]
-    if x_mm < min(xs) - margem or x_mm > max(xs) + margem:
+    try:
+        u, v = _inverter_cantos(x_mm, y_mm)
+    except (ValueError, TypeError, ZeroDivisionError):
         return True
-    if y_mm < min(ys) - margem or y_mm > max(ys) + margem:
-        return True
-    return False
+    margem = 0.0002  # ~0.06 mm para arredondamentos G-code de tres casas
+    return not (-margem <= u <= 1.0+margem and -margem <= v <= 1.0+margem)
 
 
 def validar_cantos(tol_mm=3.0):
@@ -64,6 +62,9 @@ def validar_cantos(tol_mm=3.0):
     Retorna lista de avisos (vazia = coerente).
     """
     avisos = []
+    ok, motivo = validar_calibracao_cantos()
+    if not ok:
+        avisos.append(motivo)
     checks = [
         ("Y de A e B (borda inferior)", PONTO_A[1], PONTO_B[1]),
         ("Y de D e C (borda superior)", PONTO_D[1], PONTO_C[1]),
@@ -927,26 +928,9 @@ class ControladorGRBL:
         return False, status
 
     def zerar_eixo(self, eixo="XY", valor_x=0.0, valor_y=0.0, valor_z=0.0):
-        eixo = eixo.upper()
-        if "Z" in eixo:
-            registrar_log("Z nao e eixo cartesiano; zeramento GRBL limitado a XY.", "aviso")
-            eixo = eixo.replace("Z", "")
-        if not eixo or any(letra not in "XY" for letra in eixo):
-            return False
-        partes = []
-        if "X" in eixo:
-            partes.append(f"X{float(valor_x):.3f}")
-        if "Y" in eixo:
-            partes.append(f"Y{float(valor_y):.3f}")
-        if "Z" in eixo:
-            partes.append(f"Z{float(valor_z):.3f}")
-        coords = " ".join(partes) if partes else "X0 Y0"
-        ok1, _ = self.enviar_comando(f"G10 P0 L20 {coords}", logar=False)
-        ok2, _ = self.enviar_comando(f"G92 {coords}", logar=False)
-        self.atualizar_status()
-        if ok1 and ok2:
-            registrar_log(f"Origem de Trabalho ({coords}) calibrada na posicao atual!", "ok")
-        return bool(ok1 and ok2)
+        # Origem de trabalho e definida APENAS apos as chaves X/Y e recuo de 2 mm.
+        registrar_log("Zeramento manual/G92 desativado: use Home XY pelas chaves.", "erro")
+        return False
 
 
     def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
@@ -1139,63 +1123,10 @@ class ControladorGRBL:
         registrar_log("Home $H desabilitado nesta instalacao: exige Z. Use Home XY por chaves.", "erro")
         return False
 
-    def calibrar_home(
-        self,
-        modo="manual_aqui",
-        offset_x=0.0,
-        offset_y=0.0,
-        offset_z=0.0,
-        salvar_g28=True,
-        zerar_mpos_reset=False,
-        homing_dir_mask=None,
-        homing_pulloff_mm=None,
-        homing_feed=None,
-        homing_seek=None,
-    ):
-        registrar_log(f"Iniciando Calibração de Home (modo={modo})...", "info")
+    def calibrar_home(self, *args, **kwargs):
+        registrar_log("Calibracao manual e homing $H desativados; execute Home XY automatico.", "erro")
+        return False
 
-        if homing_dir_mask is not None:
-            self.gravar_parametro_grbl("$22", 1)
-            self.gravar_parametro_grbl("$23", int(homing_dir_mask))
-        if homing_feed is not None and float(homing_feed) > 0:
-            self.gravar_parametro_grbl("$24", f"{float(homing_feed):.3f}")
-        if homing_seek is not None and float(homing_seek) > 0:
-            self.gravar_parametro_grbl("$25", f"{float(homing_seek):.3f}")
-        if homing_pulloff_mm is not None and float(homing_pulloff_mm) >= 0:
-            self.gravar_parametro_grbl("$27", f"{float(homing_pulloff_mm):.3f}")
-
-        if modo == "gravar_eeprom_home":
-            registrar_log("Parâmetros de Homing ($22, $23, $24, $25, $27) gravados na EEPROM do GRBL!", "ok")
-            return True
-
-        if modo == "homing_chave":
-            ok_h = self.executar_homing()
-            if not ok_h:
-                return False
-            if abs(offset_x) > 1e-6 or abs(offset_y) > 1e-6 or abs(offset_z) > 1e-6:
-                self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
-            if salvar_g28:
-                self.enviar_comando("G28.1", logar=False)
-            self.atualizar_status()
-            registrar_log("Calibração de Home com Fim de Curso ($H + G28.1) concluída!", "ok")
-            return True
-
-        if zerar_mpos_reset:
-            self.soft_reset()
-            time.sleep(0.2)
-            self.enviar_comando("$X", logar=False)
-            self.enviar_comando("G21 G90", logar=False)
-
-        self.zerar_eixo("XYZ", offset_x, offset_y, offset_z)
-        if salvar_g28:
-            self.enviar_comando("G28.1", logar=False)
-        self.atualizar_status()
-        registrar_log(
-            f"Home Manual calibrado na posição atual (Extremidade Direita = 0,0) -> WPos=({offset_x:.2f}, {offset_y:.2f}, {offset_z:.2f}) "
-            f"{'+ G28.1 salvo' if salvar_g28 else ''}!",
-            "ok",
-        )
-        return True
 
     def ir_para_g28(self):
         ok, _ = self.enviar_comando("G28")
@@ -1245,82 +1176,63 @@ class ControladorGRBL:
 
 
 def configurar_sistema_coordenadas(
-    origem_x_na_direita=None,
-    sinal_eixo_x=None,
-    sinal_eixo_y=None,
-    inverter_jog_x=None,
-    inverter_jog_y=None,
-    limite_x_mm=None,
-    limite_y_mm=None,
-    x_inicio_fisico=None,
-    y_inicio_fisico=None,
-    x_fim_fisico=None,
-    y_fim_fisico=None,
-    ponto_a=None,
-    ponto_b=None,
-    ponto_c=None,
-    ponto_d=None,
+    origem_x_na_direita=None, sinal_eixo_x=None, sinal_eixo_y=None,
+    inverter_jog_x=None, inverter_jog_y=None, limite_x_mm=None,
+    limite_y_mm=None, x_inicio_fisico=None, y_inicio_fisico=None,
+    x_fim_fisico=None, y_fim_fisico=None,
+    ponto_a=None, ponto_b=None, ponto_c=None, ponto_d=None,
 ):
-    """
-    Atualiza em tempo real a orientação e a caixa física real da matriz (X_INICIO..X_FIM, Y_INICIO..Y_FIM).
-    Salva automaticamente em calibracao_matriz.json para persistir entre execuções.
-    """
-    global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y, INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
-    global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO, PONTO_A, PONTO_B, PONTO_C, PONTO_D
-    if ponto_a is not None and len(ponto_a) == 2:
-        PONTO_A = [float(ponto_a[0]), float(ponto_a[1])]
-    if ponto_b is not None and len(ponto_b) == 2:
-        PONTO_B = [float(ponto_b[0]), float(ponto_b[1])]
-    if ponto_c is not None and len(ponto_c) == 2:
-        PONTO_C = [float(ponto_c[0]), float(ponto_c[1])]
-    if ponto_d is not None and len(ponto_d) == 2:
-        PONTO_D = [float(ponto_d[0]), float(ponto_d[1])]
+    """Calibracao atomica. Mudar sentido de jog nunca altera geometria A/B/C/D."""
+    global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y
+    global INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
+    global PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO
 
+    candidatos = [
+        list(PONTO_A if ponto_a is None else ponto_a),
+        list(PONTO_B if ponto_b is None else ponto_b),
+        list(PONTO_C if ponto_c is None else ponto_c),
+        list(PONTO_D if ponto_d is None else ponto_d),
+    ]
+    ok, motivo = validar_calibracao_cantos(candidatos)
+    if not ok:
+        raise ValueError(f"Calibracao recusada: {motivo}")
+    candidatos = [[float(x), float(y)] for x,y in candidatos]
+    if limite_x_mm is not None and (not math.isfinite(float(limite_x_mm)) or float(limite_x_mm) < EXTENSAO_UTIL_MALHA_MM):
+        raise ValueError("Limite X precisa cobrir os 297 mm medidos.")
+    if limite_y_mm is not None and (not math.isfinite(float(limite_y_mm)) or float(limite_y_mm) < EXTENSAO_UTIL_MALHA_MM):
+        raise ValueError("Limite Y precisa cobrir os 297 mm medidos.")
+    if any(v is not None for v in (x_inicio_fisico,y_inicio_fisico,x_fim_fisico,y_fim_fisico)):
+        raise ValueError("Limites fisicos legados desativados: use somente os quatro cantos A/B/C/D.")
+    # Os quatro cantos descrevem diretamente a posicao fisica no sistema G54.
+    PONTO_A, PONTO_B, PONTO_C, PONTO_D = candidatos
+    X_INICIO_FISICO, Y_INICIO_FISICO = PONTO_A
+    X_FIM_FISICO, Y_FIM_FISICO = PONTO_C
     if origem_x_na_direita is not None:
         ORIGEM_X_NA_DIREITA = bool(origem_x_na_direita)
     if sinal_eixo_x is not None:
         SINAL_EIXO_X = -1.0 if float(sinal_eixo_x) < 0 else 1.0
-        if x_fim_fisico is None:
-            larg_atual = abs(X_FIM_FISICO - X_INICIO_FISICO) or 247.5
-            X_FIM_FISICO = X_INICIO_FISICO + larg_atual * SINAL_EIXO_X
     if sinal_eixo_y is not None:
         SINAL_EIXO_Y = -1.0 if float(sinal_eixo_y) < 0 else 1.0
-        if y_fim_fisico is None:
-            alt_atual = abs(Y_FIM_FISICO - Y_INICIO_FISICO) or 247.5
-            Y_FIM_FISICO = Y_INICIO_FISICO + alt_atual * SINAL_EIXO_Y
     if inverter_jog_x is not None:
         INVERTER_JOG_X = bool(inverter_jog_x)
     if inverter_jog_y is not None:
         INVERTER_JOG_Y = bool(inverter_jog_y)
-    if x_inicio_fisico is not None:
-        X_INICIO_FISICO = float(x_inicio_fisico)
-    if y_inicio_fisico is not None:
-        Y_INICIO_FISICO = float(y_inicio_fisico)
-    if x_fim_fisico is not None:
-        X_FIM_FISICO = float(x_fim_fisico)
-        SINAL_EIXO_X = -1.0 if (X_FIM_FISICO - X_INICIO_FISICO) < 0 else 1.0
-    if y_fim_fisico is not None:
-        Y_FIM_FISICO = float(y_fim_fisico)
-        SINAL_EIXO_Y = -1.0 if (Y_FIM_FISICO - Y_INICIO_FISICO) < 0 else 1.0
-    if limite_x_mm is not None and float(limite_x_mm) > 0:
+    if limite_x_mm is not None:
         LIMITE_X_MM = float(limite_x_mm)
-    if limite_y_mm is not None and float(limite_y_mm) > 0:
+    if limite_y_mm is not None:
         LIMITE_Y_MM = float(limite_y_mm)
 
-    LIMITE_X_MM = max(abs(LIMITE_X_MM or 250.0), abs(X_INICIO_FISICO), abs(X_FIM_FISICO))
-    LIMITE_Y_MM = max(abs(LIMITE_Y_MM or 250.0), abs(Y_INICIO_FISICO), abs(Y_FIM_FISICO))
-
+    grbl = globals().get("_grbl_global")
+    if grbl is not None:
+        bloquear_z_fisico("Calibracao ou orientacao XY alterada")
+        grbl.invalidar_home_xy("Calibracao/orientacao modificada: execute Home XY novamente.")
     salvar_calibracao_matriz()
     est = obter_estado_coordenadas()
-    msg = (
-        f"4 Cantos Calibrados: A={est['ponto_a']} | B={est['ponto_b']} | "
-        f"C={est['ponto_c']} | D={est['ponto_d']} | "
-        f"Centro da Flor (50,50)=({est['x_meio_fisico']}, {est['y_meio_fisico']})"
+    registrar_log(
+        f"Malha 100x100, passo ~3 mm: cantos A={PONTO_A}, B={PONTO_B}, C={PONTO_C}, D={PONTO_D}",
+        "ok",
     )
-    registrar_log(msg, "ok")
-    registrar_terminal("SYS", msg, "ok")
-    for aviso in est.get("avisos", []):
-        registrar_log(f"ATENCAO CANTOS: {aviso}", "aviso")
     return est
 
 

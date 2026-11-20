@@ -118,8 +118,8 @@ class TestesCDCoordenadasEDados(unittest.TestCase):
         with patch.object(mod, "ORIGEM_X_NA_DIREITA", True), patch.object(mod, "SINAL_EIXO_X", 1):
             x0, _ = mod.indice_para_mm_fisico(0, 50)
             x99, _ = mod.indice_para_mm_fisico(99, 50)
-            self.assertAlmostEqual(x0, 270)
-            self.assertAlmostEqual(x99, 246)
+            self.assertAlmostEqual(x0, 297)
+            self.assertAlmostEqual(x99, 0)
             self.assertEqual(mod.mm_fisico_para_indice(x99, -40)[0], 99)
 
     def test_sinal_x_persistido(self):
@@ -195,9 +195,9 @@ class TestesEHMotorUnico(unittest.TestCase):
         fake = FakeGRBL()
         bloco = {"tipo": "z", "nivel": 4, "pulsos": 12, "on_ms": 15, "off_ms": 0}
         with patch.object(mod, "acionar_eixo_z", return_value=(True, {"pino_gpio": 27, "pulsos": 4})) as z, patch.object(mod.time, "sleep"):
-            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -40), "usar_parametros_arquivo": False})
+            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": False})
             self.assertIsNone(z.call_args.kwargs["pulsos_override"])
-            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -40), "usar_parametros_arquivo": True})
+            mod.executar_bloco_hibrido(fake, bloco, {"posicao_xy": (258, -39), "usar_parametros_arquivo": True})
             self.assertEqual(z.call_args.kwargs["pulsos_override"], 12)
             self.assertEqual(z.call_args.kwargs["off_ms_override"], 0)
 

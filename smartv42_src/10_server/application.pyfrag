@@ -174,20 +174,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 self._enviar_json({"ok": ok, "coord": obter_estado_coordenadas()})
                 return
             if etapa in ("sync_a", "sync_b", "sync_c", "sync_d", "sync_meio"):
-                xm, ym = indice_para_mm_fisico(49.5, 49.5)
-                alvo = {
-                    "sync_a": PONTO_A,
-                    "sync_b": PONTO_B,
-                    "sync_c": PONTO_C,
-                    "sync_d": PONTO_D,
-                    "sync_meio": [xm, ym],
-                }[etapa]
-                nome_p = etapa.replace("sync_", "").upper()
-                _grbl_global.enviar_comando(f"G10 P0 L20 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
-                _grbl_global.enviar_comando(f"G92 X{alvo[0]:.3f} Y{alvo[1]:.3f}")
-                _grbl_global.atualizar_status()
-                registrar_log(f"Posicao atual sincronizada como Ponto {nome_p}: X={alvo[0]:.3f}, Y={alvo[1]:.3f}")
-                self._enviar_json({"ok": True, "coord": obter_estado_coordenadas()})
+                self._enviar_json({
+                    "ok": False,
+                    "erro": "Zeramento G92 manual removido; a origem G54 e definida apenas pelo Home XY nas chaves."
+                }, 409)
                 return
             if etapa == "ir_meio":
                 xm, ym = indice_para_mm_fisico(49.5, 49.5)
@@ -314,17 +304,12 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             elif cmd == "home_grbl":
                 self._enviar_json({"ok": False, "erro": "Home $H desabilitado: use Home XY por chaves sem Z."}, 409)
                 return
-            elif cmd == "definir_home_manual":
-                ok_manual = _grbl_global.calibrar_home(modo="manual_aqui", salvar_g28=True)
+            elif cmd in ("definir_home_manual", "zerar_x", "zerar_y"):
                 self._enviar_json({
-                    "ok": bool(ok_manual), "erro": None if ok_manual else "Falha ao definir referencia manual.",
-                    "aviso": "Origem manual nao substitui Home XY por chaves.",
-                })
+                    "ok": False,
+                    "erro": "Origem manual desativada: faca Home XY pelas chaves, com recuo de 2 mm."
+                }, 409)
                 return
-            elif cmd == "zerar_x":
-                _grbl_global.zerar_eixo("X")
-            elif cmd == "zerar_y":
-                _grbl_global.zerar_eixo("Y")
             elif cmd == "ir_zero_trabalho":
                 _grbl_global.voltar_origem()
             elif cmd == "ir_g28":
