@@ -56,9 +56,9 @@ G-code importado ─────────────────────
 
 Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. A imagem é plotada dentro do retângulo A-B-C-D. Essas posições precisam corresponder à **bancada real**.
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
 
-Um `calibracao_matriz.json` antigo, com C/D em Y negativo, é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
+Um `calibracao_matriz.json` de versão anterior (Y negativo ou A à esquerda) é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
 
 ---
 
@@ -163,30 +163,16 @@ O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar
 
 Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emergência. O programa faz sozinho, sem mover nada com a mão:
 
-1. Busca as chaves **X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua 5 mm de cada uma e grava esse ponto como **A = (0, 0)** no G54.
+1. Busca as chaves **sempre em X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua **5 mm em X e 12 mm em Y** e grava esse ponto como **A = (0, 0)** no G54.
 2. Vai de **A até B** (X = 297).
 3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
 4. Vai até **D** e volta para **A**.
 
-O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa e `Pn:Y` livre no início (as duas chaves Y usam a mesma entrada, então com `Pn:Y` acionado o programa não sabe para onde recuar e pede um Jog Y curto). A busca da chave 2 **não passa do Y nominal de 297 mm**: se a chave estiver além disso, o Home para com a mensagem "Segunda chave Y nao encontrada" e os cantos não mudam.
+O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa. Se `Pn:Y` já estiver acionado no início, o programa anda **Y+ 10 mm**: se a chave soltar, era a chave 1 (lado A) e o Home segue; se continuar acionada, é a chave 2 (lado C/D), então volta **Y− 22 mm** (os 10 mm mais o recuo de 12 mm) para soltá-la e segue. Se mesmo assim não soltar, o Home para. A busca da chave 2 vai **até Y = 350 mm** (`HOME_AUTO_Y_LIMITE_CHAVE2_MM`). Se a chave acionar antes de 297 mm, C/D recebem o Y medido depois do recuo; se acionar depois, C/D ficam em 297 mm, porque a malha tem 100 pontos a 3 mm. Se não acionar até 350 mm, o Home para com "Segunda chave Y nao encontrada" e os cantos não mudam.
 
 No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
 
-### Etapa C2 — Home XY avançado (parâmetros manuais)
-
-1. Clique em **⚙ Home XY avançado**, na barra de navegação.
-2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada. O padrão é **X− e Y−**, porque com `$3=1` as duas chaves ficam no canto A.
-3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
-4. Escolha o passo de busca (**0,1 a 10 mm**) e o avanço (**20 a 600 mm/min**, padrão **500 mm/min**). O curso máximo de busca pode chegar a **300 mm por eixo**, mas inicia em **30 mm** para evitar percursos longos antes de verificar fisicamente a bancada.
-5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
-6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home XY sincronizado — recuo 5 mm**.
-7. Aguarde a indicação **Home XY concluído**.
-
-O programa começa procurando as chaves **X e Y juntas**, usando jogs coordenados em pequenos passos. Se somente uma chave acionar, interrompe ambos os motores, recua **o eixo detectado 5 mm** e continua com o eixo pendente. Se ambas acionarem no mesmo passo, **o recuo também será conjunto**. Apenas depois da confirmação da liberação das duas chaves a origem G54 é definida. Não utiliza `$H` nem movimenta Z.
-
-**Importante:** a posição do cabeçote após recuar 5 mm **não é automaticamente o ponto A da matriz**. Só use G54 = (0, 0) se essa posição realmente coincidir com A; caso contrário, informe a posição medida. A repetibilidade do disparo e a precisão dos recuos precisam ser testadas mecanicamente.
-
-Se o Home falhar, interrompa a operação e consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
+O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 12 mm**, recuo de 4 mm na chave 2 e perímetro a F250. Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
 
 ### Etapa D — Testar XY sem movimentar Z
 
@@ -234,7 +220,6 @@ Esse modo é destinado ao comissionamento dos motores; trabalhos que contenham a
 | **Visor WPos / MPos** | Mostra posição de trabalho / máquina | Antes e durante movimentos |
 | **Terminal UGS** | Consulta estado, alarmes e parâmetros do GRBL | Diagnóstico e configuração |
 | **⌂ Home** | Chaves X−/Y− → A, A → B, chave 2 → C/D, D → A | Ao ligar a máquina, antes de plotar |
-| **⚙ Home XY avançado** | Busca X/Y com sentidos, cursos e recuos escolhidos | Diagnóstico ou bancada diferente |
 | **Jog Manual** | Move X/Y em pequenos incrementos | Verificar sentidos e calibração |
 | **Somente XY (bloquear Z)** | Proíbe pulsos nos GPIOs Z | Testes de movimento |
 | **Habilitar Z físico** | Autoriza o cabeçote real com validações | Somente após comissionamento e Home |

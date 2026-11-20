@@ -361,8 +361,11 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
 HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
-HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_RECUO_X_MM = 5.0
+HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
+HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
 def validar_layout_home_automatico():
@@ -433,18 +436,52 @@ def iniciar_home_automatico(grbl):
                 )
             if isinstance(grbl.ser, PortaSimulada):
                 grbl.ser.configurar_chaves_bancada(
-                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                    recuo=HOME_AUTO_RECUO_Y_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
                 )
 
             # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
-            # acionada, nao ha como saber qual delas e para onde recuar.
+            # acionada, anda Y+10 mm: se soltar era a chave 1 (lado A);
+            # se continuar acionada e a chave 2 (lado C/D), entao volta em Y-
+            # os 10 mm mais o recuo de Y para solta-la antes do Home.
             estado_inicial = grbl._status_home_xy()
             if "Y" in pinos_ativos(estado_inicial):
-                raise RuntimeError(
-                    "Pn:Y ja acionado antes do Home: nao da para saber se e a "
-                    "chave 1 (lado A) ou a chave 2 (lado C/D). Use o Jog Y de "
-                    "1 mm para soltar a chave e tente de novo."
+                _fase(
+                    "Home 1/4: Pn:Y acionado no inicio; "
+                    f"Y+{HOME_AUTO_TESTE_PNY_MM:.0f} mm para identificar a chave"
                 )
+                grbl._jog_passo_home_xy(
+                    "Y", HOME_AUTO_TESTE_PNY_MM, HOME_AUTO_FEED,
+                    passo_max=HOME_AUTO_TESTE_PNY_MM, detectar_contato=False,
+                )
+                liberada, _, _ = grbl._confirmar_chave_liberada_home("Y")
+                if liberada:
+                    registrar_log(
+                        "HOME AUTOMATICO: Pn:Y soltou com Y+: era a chave Y1 (lado A).",
+                        "info",
+                    )
+                else:
+                    volta = HOME_AUTO_TESTE_PNY_MM + HOME_AUTO_RECUO_Y_MM
+                    _fase(
+                        "Home 1/4: Pn:Y continua acionado: chave Y2 (lado C/D); "
+                        f"Y-{volta:.0f} mm para solta-la"
+                    )
+                    grbl._jog_passo_home_xy(
+                        "Y", -volta, HOME_AUTO_FEED,
+                        passo_max=volta, detectar_contato=False,
+                    )
+                    liberada, estado_y, _ = grbl._confirmar_chave_liberada_home("Y")
+                    if not liberada:
+                        raise RuntimeError(
+                            "Pn:Y continua acionado depois de Y+10 mm e de "
+                            f"Y-{volta:.0f} mm. Verifique as chaves Y. "
+                            f"Ultimo status: {estado_y}"
+                        )
+                    registrar_log(
+                        "HOME AUTOMATICO: chave Y2 liberada; seguindo para o Home.",
+                        "info",
+                    )
+                if _abortado():
+                    raise RuntimeError("Home automatico abortado pelo operador.")
 
             _fase("Home 1/4: buscando chaves X- e Y- (canto A)")
             ok, msg = grbl.executar_home_xy_chaves(
@@ -452,7 +489,7 @@ def iniciar_home_automatico(grbl):
                 curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
                 coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
                 passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
-                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                recuo=HOME_AUTO_RECUO_X_MM, recuo_y=HOME_AUTO_RECUO_Y_MM,
                 seguranca_confirmada=True,
             )
             if not ok:
@@ -465,6 +502,7 @@ def iniciar_home_automatico(grbl):
             medicao = grbl.sondar_chave_y_oposta(
                 curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
                 progresso=lambda t: _fase("Home 3/4: " + t),
+                y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
             )
             configurar_sistema_coordenadas(
                 ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],
@@ -886,7 +924,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
-            recuo_y = float(dados.get("recuo_y", 5.0))
+            recuo_y = float(dados.get("recuo_y", 12.0))
             coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
             coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):

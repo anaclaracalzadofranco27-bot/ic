@@ -90,29 +90,34 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 #     para a esquerda no seu GRBL for necessário enviar X negativo, ou +1 se X+ já move para a esquerda).
 #   - INVERTER_JOG_X = False: Se True, inverte os botões "← X-" e "→ X+" na interface para bater com a visão frontal.
 # -----------------------------------------------------------------------------
-ORIGEM_X_NA_DIREITA = False
+ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
 SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
-INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
+INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
 # Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
-#   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
-#   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
-#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = 297.000
-#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = 297.000
+# Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
+# esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
+# imagem para ela nao sair invertida).
+#   - Ponto A (Inferior Direito  | col=99 da imagem): X = 0.000,   Y = 0.000
+#   - Ponto B (Inferior Esquerdo | col=0  da imagem): X = 297.000, Y = 0.000
+#   - Ponto C (Superior Esquerdo | col=0  da imagem): X = 297.000, Y = 297.000
+#   - Ponto D (Superior Direito  | col=99 da imagem): X = 0.000,   Y = 297.000
 # A imagem e plotada dentro do retangulo A-B-C-D.
 # =============================================================================
 ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
+# Arquivos de outra versao do modelo (Y negativo, A a esquerda) sao ignorados.
+MODELO_CALIBRACAO = "100x100_3mm_297mm_A_direita_Y_positivo"
 USAR_CALIBRACAO_4_PONTOS = True
 
-PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
-PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
-PONTO_C = [297.000, 297.000]    # Topo-Direita da matriz  (col 99, lin 0)
-PONTO_D = [0.000, 297.000]      # Topo-Esquerda da matriz (col 0,  lin 0)
+PONTO_A = [0.000, 0.000]        # Base-Direita  (Home nas chaves X/Y)
+PONTO_B = [297.000, 0.000]      # Base-Esquerda
+PONTO_C = [297.000, 297.000]    # Topo-Esquerda (borda da chave 2 de Y)
+PONTO_D = [0.000, 297.000]      # Topo-Direita  (borda da chave 2 de Y)
 
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
@@ -275,7 +280,7 @@ def salvar_calibracao_matriz():
         "inverter_jog_y": INVERTER_JOG_Y,
         "sinal_eixo_x": SINAL_EIXO_X,
         "sinal_eixo_y": SINAL_EIXO_Y,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -304,15 +309,14 @@ def carregar_calibracao_matriz():
         if not ok:
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
-        y_ab = 0.5 * (pontos[0][1] + pontos[1][1])
-        y_cd = 0.5 * (pontos[2][1] + pontos[3][1])
-        if y_cd < y_ab:
-            # Modelo antigo (D em Y negativo). Na bancada com $3=1, Y+ vai
-            # de A para D; usar esse arquivo mandaria o cabecote para fora.
+        if dados.get("modelo") != MODELO_CALIBRACAO:
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
-                "Calibracao salva IGNORADA: usa o modelo antigo com Y negativo "
-                f"(Y de C/D={y_cd:.1f}). Usando A=(0,0), B=(297,0), "
-                "C=(297,297), D=(0,297). Execute o Home automatico.", "aviso"
+                "Calibracao salva IGNORADA: arquivo de versao anterior "
+                f"({dados.get('modelo')}). Usando A=(0,0) embaixo a direita, "
+                "B=(297,0), C=(297,297), D=(0,297). Execute o Home automatico.",
+                "aviso"
             )
             return False
         origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
@@ -480,7 +484,7 @@ def obter_estado_coordenadas():
         "passo_nominal_mm": PASSO_NOMINAL_MALHA_MM,
         "extensao_util_mm": EXTENSAO_UTIL_MALHA_MM,
         "curso_nominal_mm": CURSO_NOMINAL_DESLOCAMENTO_MM,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
         "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
         "plot_x_min": PLOT_X_MIN,
         "plot_x_max": PLOT_X_MAX,
@@ -2417,7 +2421,8 @@ class ControladorGRBL:
             )
 
     def sondar_chave_y_oposta(self, curso=15.0, feed=120.0,
-                             recuo=4.0, passo=1.0, progresso=None):
+                             recuo=4.0, passo=1.0, progresso=None,
+                             y_limite_busca=None):
         """Busca Y2 automaticamente desde A ou B, sem JOG manual.
 
         Se ja estiver perto de C/D (modo legado), permite somente a busca
@@ -2467,6 +2472,15 @@ class ControladorGRBL:
         direcao = 1 if y_previsto > y_base else -1
         extensao = direcao * (y_previsto - y_base)
         distancia_prevista = direcao * (y_previsto - y_atual)
+        busca_estendida = y_limite_busca is not None
+        y_limite = float(y_limite_busca) if busca_estendida else y_previsto
+        if busca_estendida and not (
+                math.isfinite(y_limite) and
+                0.0 <= direcao * (y_limite - y_previsto) <= 60.0):
+            raise ValueError(
+                f"Limite da busca Y2 ({y_limite}) deve ficar entre o Y nominal "
+                f"de C/D ({y_previsto:.2f}) e 60 mm alem dele."
+            )
         perto_de_a = abs(x_atual - float(PONTO_A[0])) <= 8.0
         perto_de_b = abs(x_atual - float(PONTO_B[0])) <= 8.0
         # A mesma chave Y da extremidade oposta pode ser medida pelo lado A
@@ -2526,10 +2540,10 @@ class ControladorGRBL:
                         "Pn:Y acionado entre etapas sem contato confirmado. "
                         "Verifique a chave e refaca Home."
                     )
-                # Nunca ultrapassa o Y estimado para C/D. A margem final
-                # ajustavel em 'curso' limita a etapa curta e nao amplia
-                # o percurso nominal em direcao ao batente.
-                restante = direcao * (y_previsto - float(self.wpos[1]))
+                # Sem y_limite_busca, nunca ultrapassa o Y estimado para C/D.
+                # Com ele (Home automatico), a busca lenta continua ate esse
+                # Y absoluto, pois a chave 2 pode ficar alem do ultimo pino.
+                restante = direcao * (y_limite - float(self.wpos[1]))
                 if not math.isfinite(restante) or restante < 0.0:
                     raise RuntimeError(
                         "Posicao Y ultrapassou o Y nominal de C/D sem "
@@ -2537,7 +2551,8 @@ class ControladorGRBL:
                     )
                 # De A/B, etapa final tem ate 25 mm; se ja iniciou
                 # perto de C/D, o limite continua 15 mm por padrao.
-                alcance = min(restante, 25.0 if partida_base else curso)
+                alcance = (restante if busca_estendida else
+                           min(restante, 25.0 if partida_base else curso))
                 if alcance < 0.2:
                     raise RuntimeError(
                         "Y ja esta no limite nominal C/D mas Pn:Y nao acionou. "
@@ -2554,7 +2569,7 @@ class ControladorGRBL:
             if "Y" not in contatos:
                 raise RuntimeError(
                     f"Segunda chave Y nao encontrada ate Y={float(self.wpos[1]):.2f} "
-                    f"(limite nominal C/D Y={y_previsto:.2f}). "
+                    f"(limite da busca Y={y_limite:.2f}). "
                     "Movimento encerrado sem alterar calibracao. "
                     "Confirme Pn:Y, posicao da chave e sentido do motor."
                 )
@@ -2579,10 +2594,13 @@ class ControladorGRBL:
                 raise RuntimeError(
                     "Y nao recuou para o interior da malha; C/D nao atualizados."
                 )
+            # Chave alem do ultimo pino: a malha continua com 297 mm, entao
+            # C/D ficam no Y nominal; antes dele, usa o Y medido.
+            y_cd = y_previsto if direcao * (y_util - y_previsto) > 0 else y_util
             candidatos = (
                 list(PONTO_A), list(PONTO_B),
-                [float(PONTO_C[0]), y_util],
-                [float(PONTO_D[0]), y_util],
+                [float(PONTO_C[0]), y_cd],
+                [float(PONTO_D[0]), y_cd],
             )
             ok_cantos, motivo = validar_calibracao_cantos(candidatos)
             if not ok_cantos:
@@ -2592,11 +2610,11 @@ class ControladorGRBL:
                 )
             fase(
                 f"Y2 validado: contato={y_contato:.2f}, "
-                f"limite interno C/D={y_util:.2f}; Pn:Y livre."
+                f"apos recuo Y={y_util:.2f}, C/D em Y={y_cd:.2f}; Pn:Y livre."
             )
             return {
                 "y_contato": round(y_contato, 3),
-                "y_cd": round(y_util, 3),
+                "y_cd": round(y_cd, 3),
                 "ponto_c": candidatos[2],
                 "ponto_d": candidatos[3],
                 "recuo": recuo,
@@ -2643,9 +2661,9 @@ class ControladorGRBL:
                 raise ValueError("Home requer passo 0.1..10 mm e feed 20..600 mm/min.")
             if not 1.0 <= curso_x <= 300.0 or not 1.0 <= curso_y <= 300.0:
                 raise ValueError("Cursos MAXIMOS de BUSCA devem estar em 1..300 mm; recuo apos contato permanece 5 mm.")
-            if not 2.0 <= recuo <= 10.0 or not 2.0 <= recuo_y <= 10.0:
+            if not 2.0 <= recuo <= 15.0 or not 2.0 <= recuo_y <= 15.0:
                 raise ValueError(
-                    "Recuos X/Y devem estar entre 2 e 10 mm. "
+                    "Recuos X/Y devem estar entre 2 e 15 mm. "
                     "Verifique fisicamente o espaco livre antes de aumentar."
                 )
             recuos = {"X": recuo, "Y": recuo_y}
@@ -4436,7 +4454,6 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
     <button class="nav-btn" onclick="homeAutomatico()">⌂ Home automático (A→B→C→D)</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⚙ Home XY avançado</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -4502,28 +4519,28 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" style="padding:2px 7px;font-size:10.5px;" onclick="calibrarCantoMatriz('ir_meio')">🎯 Ir ao Centro (50,50)</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-a" style="width:28px;color:#34d399;font-weight:bold;">A(↙)</span>
+        <span id="rotulo-canto-a" style="width:28px;color:#34d399;font-weight:bold;">A(↘)</span>
         <input type="number" id="inp-xa" value="0.000" step="0.5" title="Ponto A (0,0) - X">
         <input type="number" id="inp-ya" value="0.000" step="0.5" title="Ponto A (0,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_a')">Ir A</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_a')">📍A</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-b" style="width:28px;color:#38bdf8;font-weight:bold;">B(↘)</span>
+        <span id="rotulo-canto-b" style="width:28px;color:#38bdf8;font-weight:bold;">B(↙)</span>
         <input type="number" id="inp-xb" value="297.000" step="0.5" title="Ponto B (297,0) - X">
         <input type="number" id="inp-yb" value="0.000" step="0.5" title="Ponto B (297,0) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_b')">Ir B</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_b')">📍B</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↗)</span>
+        <span id="rotulo-canto-c" style="width:28px;color:#fbbf24;font-weight:bold;">C(↖)</span>
         <input type="number" id="inp-xc" value="297.000" step="0.5" title="Ponto C (297,297) - X">
         <input type="number" id="inp-yc" value="297.000" step="0.5" title="Ponto C (297,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_c')">Ir C</button>
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('gravar_c')">📍C</button>
       </div>
       <div class="row" style="font-size:10px;gap:4px;">
-        <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↖)</span>
+        <span id="rotulo-canto-d" style="width:28px;color:#f43f5e;font-weight:bold;">D(↗)</span>
         <input type="number" id="inp-xd" value="0.000" step="0.5" title="Ponto D (0,297) - X">
         <input type="number" id="inp-yd" value="297.000" step="0.5" title="Ponto D (0,297) - Y">
         <button class="btn" style="padding:3px 5px;font-size:9.5px;" onclick="calibrarCantoMatriz('ir_d')">Ir D</button>
@@ -4538,36 +4555,16 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-emerald" style="padding:3px 8px;font-size:10.5px;" onclick="aplicarConfigCoordenadas()">✓ Salvar A,B,C,D</button>
       </div>
       <div style="font-size:10px;color:var(--muted);margin:5px 0;">
-        Os cantos A/B/C/D são os centros extremos no G54. Depois de corrigir os rótulos físicos, o Home fica no canto B (antigo A). Não use G92.
+        Os cantos A/B/C/D são os centros extremos no G54. A=(0,0) fica embaixo à direita. C e D são medidos pela chave 2 no botão ⌂ Home. Não use G92.
       </div>
       <div class="row" style="justify-content:space-between;font-size:10px;">
         <button class="btn btn-sky" style="padding:2px 6px;font-size:9.5px;" onclick="resetarQuadrado297()">↺ Padrao 297x297 (A..D)</button>
-        <button class="btn" style="padding:2px 6px;font-size:9.5px;" onclick="calibrarCantoMatriz('testar_perimetro')">▢ Calibrar Y2 se preciso + Perímetro A→B→C→D→A</button>
         <label style="display:flex;align-items:center;gap:3px;cursor:pointer;">
           <input type="checkbox" id="cfg-inv-jog-x" onchange="aplicarConfigCoordenadas()"> Inv. Jog X
         </label>
       </div>
       <div class="row" style="gap:5px;margin-top:7px;flex-wrap:wrap;">
-        <button class="btn btn-sky" id="btn-corrigir-rotulos-cantos" onclick="corrigirRotulosFisicosCantos()">⇄ Corrigir A/B físicos (e C/D)</button>
-        <span id="status-rotulos-cantos" style="font-size:10.5px;color:#fbbf24;">Verifique a posição física dos cantos.</span>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin:4px 0;">
-        Corrige os nomes: antigo A vira B, antigo B vira A; antigo C vira D, antigo D vira C.
-        Mantém a referência física de Home (agora B), a imagem e as posições G54.
-        Não altera a direção dos motores. Refaça Home XY antes de mover.
-      </div>
-      <div class="row" style="gap:5px;margin-top:7px;flex-wrap:wrap;">
-        <button class="btn btn-amber" onclick="calibrarYOposto()">⇅ Buscar Y2 desde A/B e calibrar C/D automaticamente</button>
-        <span id="estado-borda-y-oposta" style="font-size:10.5px;color:#fbbf24;">Borda C/D ainda não medida pela chave Y oposta.</span>
-      </div>
-      <div style="font-size:10px;color:var(--muted);margin:4px 0;">
-        Após Home XY, mantenha o cabeçote em <strong>A ou B</strong>, com a chave Y1 livre.
-        O programa realiza a busca Y2 automaticamente: aproximação monitorada até 25 mm antes
-        do Y nominal (F200, trechos 2 mm), depois busca final em F120 (trechos 1 mm),
-        cancela ao detectar Pn:Y e recua 4 mm. Não faz Jog manual nem ultrapassa
-        o Y nominal de C/D. Z fica desarmado. Se a chave não responder, interrompe
-        sem alterar os cantos. O botão Perímetro pode realizar esta calibração antes
-        de percorrer a malha. Exige parada elétrica independente e chaves verificadas.
+        <span id="estado-borda-y-oposta" style="font-size:10.5px;color:#fbbf24;">Borda C/D ainda não medida pela chave 2. Use ⌂ Home.</span>
       </div>
     </div>
 
@@ -4783,107 +4780,6 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   </section>
 </div>
 
-<!-- MODAL 1: CALIBRACAO DE HOME & PONTO (0,0) NA EXTREMIDADE DIREITA -->
-<div class="modal-backdrop" id="modal-home">
-  <div class="modal">
-    <div class="modal-header">
-      <span>⌂ Home XY automatico nas chaves — recuo de 5 mm (sem eixo Z)</span>
-      <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
-    </div>
-    <div class="modal-body">
-      <div class="coord-banner">
-        <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 agora <strong>enfileira movimentos XY coordenados no GRBL</strong>
-        sem esperar o motor parar entre cada trecho de busca. O padrao continua
-        em 5 mm por comando, mas o planejador recebe trechos sucessivos.
-        Quando um sensor aciona, cancela a fila, espera o GRBL parar e
-        <strong>recua o eixo acionado no sentido oposto ao da busca</strong>.
-        O outro eixo continua a busca sozinho depois disso.
-        A fila e curta e supervisionada por Pn:, mas a USB nao substitui
-        hard limits ou parada eletrica independente.
-        Quando uma chave aciona, o Home interrompe o jog conjunto,
-        confirma o contato, recua o eixo correspondente na distancia configurada
-        e continua com o eixo pendente.
-        <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
-        <strong>Recuo independente X e Y: 2 a 10 mm. Confira o espaco livre antes de aumentar.</strong><br>
-        <strong>ATENCAO: os campos Busca max X e Busca max Y iniciam em apenas 30 mm.</strong>
-        Se Y encontrar sua chave e X ainda estiver longe, X continuara ate atingir seu
-        proprio limite de busca e parara, mesmo que o teto permitido seja 300 mm.
-        O recuo de X/Y apos contato e configurado separadamente.
-        Antes de aumentar a busca, confira a distancia
-        fisica livre, pois os hard limits estao desativados neste modo.<br>
-        Com $3=1, X+ vai de A para B e Y+ vai de A para D; por isso o padrao
-        e buscar X- e Y- (chaves no canto A). Para o uso normal prefira o
-        botao <strong>Home</strong>, que faz tudo sozinho.
-        <strong>Exemplo: busca Y- implica recuo Y+; busca Y+ implica recuo Y-.</strong>
-        Se o Y tocar a chave e nao afastar, confira o comando
-        <code>HOME XY RECUO Y</code> nos logs, o valor atual de $3 e o estado
-        <code>Pn:Y</code>. Nao repita movimentos sem confirmar a direcao real.
-        O feed inicial do Home e 500 mm/min, independente do feed de plotagem.<br>
-        Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
-        abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
-        Pn:X e Pn:Y devem aparecer somente durante cada acionamento.<br>
-        <strong>Atencao:</strong> Com $21=1, atingir as chaves causa alarme. Esta rotina exige
-        $22=0 e $21=0 confirmados pelo GRBL, sem alterar a EEPROM automaticamente.
-        Nesse modo as chaves NAO funcionam como limites rigidos: uma parada de emergencia
-        eletrica independente e protecao mecanica sao obrigatorias. O deslocamento
-        maximo so limita o software; nao impede colisoes se houver falha de comunicacao.
-      </div>
-      <div class="card" style="display:flex;flex-direction:column;gap:7px;">
-        <div class="card-title">Parametros da busca X/Y</div>
-        <div class="row" style="gap:8px;flex-wrap:wrap;">
-          <label>Direcao X no GRBL
-            <select id="home-dir-x" style="width:95px;">
-              <option value="">Escolher</option><option value="-1" selected>X negativo</option><option value="1">X positivo</option>
-            </select>
-          </label>
-          <label>Direcao Y no GRBL (Y- vai para A)
-            <select id="home-dir-y" style="width:110px;">
-              <option value="-1" selected>Y negativo</option><option value="1">Y positivo</option>
-            </select>
-          </label>
-          <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max X (mm) <input id="home-curso-x" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
-          <label title="O valor inicial e 30 mm, mesmo que o limite permitido seja 300 mm. Aumente somente com espaco livre confirmado.">Busca max Y (mm) <input id="home-curso-y" type="number" min="1" max="300" step="1" value="30" style="width:75px;"></label>
-        </div>
-        <div class="row" style="gap:8px;flex-wrap:wrap;">
-          <label title="Distancia de cada segmento da busca, nao o recuo apos o contato. Padrao 5 mm; ate 10 mm se o curso livre for confirmado.">Trecho de busca (mm) <input id="home-passo" type="number" min="0.1" max="10" step="any" value="5" style="width:70px;"></label>
-          <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
-          <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
-          <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
-          <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
-          <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
-        </div>
-        <label style="font-size:11px;display:flex;gap:6px;align-items:flex-start;">
-          <input type="checkbox" id="home-confirmacao-seguranca" style="width:auto;">
-          Confirmo que ha parada de emergencia fisica independente e protecoes
-          que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
-        </label>
-        <div class="row">
-          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado</button>
-          <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
-        </div>
-        <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
-      </div>
-      <div class="grid-3">
-        <button class="btn btn-sky" onclick="acaoUGS('ir_zero_trabalho')">◎ Ir ao ponto A (apos Home)</button>
-        <button class="btn" onclick="abrirModal('modal-terminal')">⌨ Verificar $21, $22 e Pn:</button>
-      </div>
-      <div class="card">
-        <div class="card-title"><span>Sentido dos motores · malha útil ~297 × 297 mm</span></div>
-        <div class="row">
-          <span>Se ao mandar ir para a esquerda o motor andar para a direita:</span>
-          <button class="btn btn-amber" onclick="inverterMotorXGrbl()">⇄ Inverter Direcao do Motor X no GRBL ($3)</button>
-          <button class="btn btn-amber" onclick="inverterMotorYGrbl()">⇄ Inverter Direcao do Motor Y no GRBL ($3)</button>
-        </div>
-        <div class="row" style="font-size:11px;color:var(--muted);">
-          As coordenadas enviadas ao GRBL vem somente dos 4 cantos A, B, C, D (painel de calibracao).
-          Para mudar o sentido, corrija os cantos ou use $3.
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
 <!-- MODAL 2: TERMINAL SERIAL UGS INTEGRADO -->
 <div class="modal-backdrop" id="modal-terminal">
   <div class="modal">
@@ -5009,58 +4905,6 @@ async function calibrarCantoMatriz(etapa) {
   await atualizarStatus();
 }
 
-async function corrigirRotulosFisicosCantos() {
-  if (configCoord.cantos_x_corrigidos_fisicamente) return;
-  const ok = confirm(
-    'CORRIGIR IDENTIFICAÇÃO FÍSICA DOS CANTOS\n' +
-    'A e B serão trocados; C e D também, para preservar o perímetro.\n' +
-    'O Home/G54 ficará no mesmo ponto físico, agora identificado como B.\n' +
-    'Não move os motores, não altera $3 e mantém o mapa físico da imagem.\n' +
-    'É obrigatório refazer Home XY antes de movimentar a CNC. Aplicar uma vez?'
-  );
-  if (!ok) return;
-  const r = await apiPost('corrigir_rotulos_fisicos_ab', { confirmado: true });
-  if (!r.ok) {
-    alert(r.erro || 'Não foi possível corrigir os rótulos.');
-    return;
-  }
-  await carregarEstadoInicial();
-  const info = document.getElementById('status-rotulos-cantos');
-  if (info) info.textContent = r.mensagem || 'Rótulos corrigidos. Refaça Home XY.';
-}
-
-async function calibrarYOposto() {
-  const aceito = confirm(
-    'SONDA AUTOMÁTICA DA SEGUNDA CHAVE Y\n' +
-    'A CNC deve estar com Home XY válido e estacionada em A ou B,\n' +
-    'com Pn:Y livre. Não mova o carro manualmente.\n' +
-    'O programa percorrerá Y em trechos monitorados, diminuindo\n' +
-    'a velocidade perto da borda C/D. Se Y2 acionar, cancela o\n' +
-    'Jog, recua 4 mm e atualiza o Y de C/D.\n' +
-    'O modo de software exige $20=$21=$22=0, com limites rígidos\n' +
-    'desativados. Confirme parada elétrica INDEPENDENTE, sensores\n' +
-    'funcionando e área mecanicamente livre. Iniciar?'
-  );
-  if (!aceito) return;
-  const info = document.getElementById('estado-borda-y-oposta');
-  info.style.whiteSpace = 'pre-wrap';
-  info.style.color = '#fbbf24';
-  info.textContent = 'Iniciando busca Y2 desde A/B. Abortar fica disponível.';
-  let resposta;
-  try {
-    resposta = await apiPost('calibrar_y_oposto', { confirmado: true });
-  } catch (e) {
-    info.textContent = 'Falha de comunicação: ' + (e?.message || String(e));
-    return;
-  }
-  if (!resposta.ok) {
-    info.textContent = 'Busca Y2 não iniciada:\n' +
-      (resposta.erro || 'Sem diagnóstico.');
-    return;
-  }
-  info.textContent = resposta.mensagem;
-}
-
 async function inverterMotorXGrbl() {
   await apiPost('inverter_motor_x_grbl');
   atualizarStatus();
@@ -5121,7 +4965,7 @@ async function acaoUGS(tipo) {
 async function homeAutomatico() {
   if (!confirm(
     'HOME AUTOMÁTICO\n' +
-    '1) Busca as chaves X- e Y- e define o canto A = (0,0)\n' +
+    '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 12 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
     '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
     '4) Vai até D e volta para A\n\n' +
@@ -5133,46 +4977,6 @@ async function homeAutomatico() {
     resp.ok ? (resp.mensagem || 'Home automático iniciado.')
             : ('Home não iniciado: ' + (resp.erro || 'erro desconhecido'));
   if (!resp.ok) alert(resp.erro || 'Home automático não iniciado.');
-  atualizarStatus();
-}
-
-async function iniciarHomeXY() {
-  const x = document.getElementById('home-dir-x').value;
-  const y = document.getElementById('home-dir-y').value;
-  const seguro = document.getElementById('home-confirmacao-seguranca').checked;
-  if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
-  if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
-  const cursoX = Number(document.getElementById('home-curso-x').value);
-  const cursoY = Number(document.getElementById('home-curso-y').value);
-  const feedHome = Number(document.getElementById('home-feed').value);
-  const trechoBusca = Number(document.getElementById('home-passo').value);
-  if (!(cursoX >= 1 && cursoX <= 300 && cursoY >= 1 && cursoY <= 300 &&
-        feedHome >= 20 && feedHome <= 600 &&
-        trechoBusca >= 0.1 && trechoBusca <= 10)) {
-    document.getElementById('home-xy-status').textContent =
-      'Configure busca 1..300 mm, trecho 0,1..10 mm e feed 20..600 mm/min.';
-    return;
-  }
-  const recuoX = Number(document.getElementById('home-recuo-x').value);
-  const recuoY = Number(document.getElementById('home-recuo-y').value);
-  if (!(recuoX >= 2 && recuoX <= 10 && recuoY >= 2 && recuoY <= 10)) {
-    document.getElementById('home-xy-status').textContent =
-      'Recuo X/Y deve estar entre 2 e 10 mm. Verifique o espaco livre.';
-    return;
-  }
-  const valor = id => Number(document.getElementById(id).value);
-  const resp = await apiPost('iniciar_home_xy', {
-    direcao_x: Number(x), direcao_y: Number(y),
-    curso_x: valor('home-curso-x'), curso_y: valor('home-curso-y'),
-    passo: valor('home-passo'), feed: valor('home-feed'),
-    recuo_x: recuoX, recuo_y: recuoY,
-    coord_x: valor('home-coord-x'), coord_y: valor('home-coord-y'),
-    seguranca_confirmada: seguro
-  });
-  document.getElementById('home-confirmacao-seguranca').checked = false;
-  document.getElementById('home-xy-status').textContent =
-    resp.ok ? (resp.mensagem || 'Home XY iniciado.') :
-              (resp.erro || 'Falha ao iniciar Home XY.');
   atualizarStatus();
 }
 
@@ -5419,11 +5223,13 @@ function desenharMatriz() {
       const pb = configCoord.ponto_b || [297, 0];
       const pc = configCoord.ponto_c || [297, 297];
       const pd = configCoord.ponto_d || [0, 297];
-      const trocados = !!configCoord.cantos_x_corrigidos_fisicamente;
-      const supEsq = trocados ? ['C', pc] : ['D', pd];
-      const supDir = trocados ? ['D', pd] : ['C', pc];
-      const infEsq = trocados ? ['B', pb] : ['A', pa];
-      const infDir = trocados ? ['A', pa] : ['B', pb];
+      // A a direita quando a origem X esta na direita (bancada padrao);
+      // a troca antiga de rotulos A/B inverte novamente.
+      const aDireita = !!configCoord.origem_x_na_direita !== !!configCoord.cantos_x_corrigidos_fisicamente;
+      const supEsq = aDireita ? ['C', pc] : ['D', pd];
+      const supDir = aDireita ? ['D', pd] : ['C', pc];
+      const infEsq = aDireita ? ['B', pb] : ['A', pa];
+      const infDir = aDireita ? ['A', pa] : ['B', pb];
       ctx.fillStyle = '#f43f5e';
       ctx.fillText(`${supEsq[0]}(${supEsq[1][0]}, ${supEsq[1][1]})`, pad + 2, 18);
       ctx.fillStyle = '#fbbf24';
@@ -5479,9 +5285,6 @@ async function carregarEstadoInicial() {
     if (d.coord.ponto_a) {
       document.getElementById('inp-xa').value = d.coord.ponto_a[0];
       document.getElementById('inp-ya').value = d.coord.ponto_a[1];
-      const coordenadaHome = d.coord.ponto_home_xy || d.coord.ponto_a;
-      document.getElementById('home-coord-x').value = coordenadaHome[0];
-      document.getElementById('home-coord-y').value = coordenadaHome[1];
       document.getElementById('inp-xb').value = d.coord.ponto_b[0];
       document.getElementById('inp-yb').value = d.coord.ponto_b[1];
       document.getElementById('inp-xc').value = d.coord.ponto_c[0];
@@ -5490,15 +5293,11 @@ async function carregarEstadoInicial() {
       document.getElementById('inp-yd').value = d.coord.ponto_d[1];
     }
     const corrigidos = !!d.coord.cantos_x_corrigidos_fisicamente;
-    document.getElementById('rotulo-canto-a').textContent = corrigidos ? 'A(↘)' : 'A(↙)';
-    document.getElementById('rotulo-canto-b').textContent = corrigidos ? 'B(↙)' : 'B(↘)';
-    document.getElementById('rotulo-canto-c').textContent = corrigidos ? 'C(↖)' : 'C(↗)';
-    document.getElementById('rotulo-canto-d').textContent = corrigidos ? 'D(↗)' : 'D(↖)';
-    document.getElementById('btn-corrigir-rotulos-cantos').disabled = corrigidos;
-    document.getElementById('status-rotulos-cantos').textContent = corrigidos
-      ? 'Nomes físicos corrigidos: A↔B e C↔D; Home em B.'
-      : 'Correção física A/B e C/D ainda não aplicada.';
-    document.getElementById('status-rotulos-cantos').style.color = corrigidos ? '#34d399' : '#fbbf24';
+    const aDireita = !!d.coord.origem_x_na_direita !== corrigidos;
+    document.getElementById('rotulo-canto-a').textContent = aDireita ? 'A(↘)' : 'A(↙)';
+    document.getElementById('rotulo-canto-b').textContent = aDireita ? 'B(↙)' : 'B(↘)';
+    document.getElementById('rotulo-canto-c').textContent = aDireita ? 'C(↖)' : 'C(↗)';
+    document.getElementById('rotulo-canto-d').textContent = aDireita ? 'D(↗)' : 'D(↖)';
     document.getElementById('lbl-meio-fisico').textContent = `Centro (49,5;49,5): X=${d.coord.x_meio_fisico}, Y=${d.coord.y_meio_fisico}`;
     document.getElementById('janela-matriz-info').textContent = d.coord.usar_janela_plotagem
       ? `Recorte: X[${d.coord.plot_x_min},${d.coord.plot_x_max}], Y[${d.coord.plot_y_min},${d.coord.plot_y_max}] · passo físico não muda`
@@ -5506,8 +5305,8 @@ async function carregarEstadoInicial() {
     const estadoBorda = document.getElementById('estado-borda-y-oposta');
     if (estadoBorda) {
       estadoBorda.textContent = d.coord.borda_y_oposta_calibrada
-        ? 'Borda C/D calibrada pela segunda chave Y (refazer Home após nova medição).'
-        : 'Borda C/D não calibrada pela segunda chave Y; não executar perímetro.';
+        ? 'Borda C/D medida pela chave 2 no último Home.'
+        : 'Borda C/D ainda não medida pela chave 2. Use ⌂ Home.';
       estadoBorda.style.color = d.coord.borda_y_oposta_calibrada ? '#34d399' : '#fbbf24';
     }
     const av = document.getElementById('lbl-avisos');
@@ -5588,24 +5387,13 @@ async function atualizarStatus() {
         infoY2.style.whiteSpace = 'pre-wrap';
         infoY2.style.color = s.erro ? '#f87171' : (s.concluido ? '#34d399' : '#fbbf24');
         infoY2.textContent = s.erro
-          ? 'Calibração/perímetro interrompido: ' + s.erro
+          ? 'Home interrompido: ' + s.erro
           : (s.fase || 'Procurando segunda chave Y...');
       }
       if (!s.ativo && s.concluido && sondaY2AnteriorAtiva) {
         await carregarEstadoInicial();
       }
       sondaY2AnteriorAtiva = !!s.ativo;
-    }
-    if (st.home_xy) {
-      const h = st.home_xy;
-      const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
-          : h.referenciado ? 'Home XY referenciado; ambos sensores liberados'
-          : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
-      document.getElementById('home-xy-status').textContent = resumo;
-      if (!h.ativo && h.erro) {
-        const painel = document.getElementById('info-progresso');
-        if (painel) painel.textContent = 'Home XY interrompido: ' + h.erro;
-      }
     }
     if (st.sonda_y2 && st.sonda_y2.ativo) {
       document.getElementById('info-progresso').textContent = st.sonda_y2.fase +
@@ -6004,8 +5792,11 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
 HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
-HOME_AUTO_RECUO_MM = 5.0
+HOME_AUTO_RECUO_X_MM = 5.0
+HOME_AUTO_RECUO_Y_MM = 12.0   # a chave Y precisa de ~12 mm para soltar
 HOME_AUTO_FEED_PERIMETRO = 250.0
+HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
 def validar_layout_home_automatico():
@@ -6076,18 +5867,52 @@ def iniciar_home_automatico(grbl):
                 )
             if isinstance(grbl.ser, PortaSimulada):
                 grbl.ser.configurar_chaves_bancada(
-                    recuo=HOME_AUTO_RECUO_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
+                    recuo=HOME_AUTO_RECUO_Y_MM, extensao_y=EXTENSAO_UTIL_MALHA_MM
                 )
 
             # As duas chaves Y usam a mesma entrada Pn:Y. Se ja estiver
-            # acionada, nao ha como saber qual delas e para onde recuar.
+            # acionada, anda Y+10 mm: se soltar era a chave 1 (lado A);
+            # se continuar acionada e a chave 2 (lado C/D), entao volta em Y-
+            # os 10 mm mais o recuo de Y para solta-la antes do Home.
             estado_inicial = grbl._status_home_xy()
             if "Y" in pinos_ativos(estado_inicial):
-                raise RuntimeError(
-                    "Pn:Y ja acionado antes do Home: nao da para saber se e a "
-                    "chave 1 (lado A) ou a chave 2 (lado C/D). Use o Jog Y de "
-                    "1 mm para soltar a chave e tente de novo."
+                _fase(
+                    "Home 1/4: Pn:Y acionado no inicio; "
+                    f"Y+{HOME_AUTO_TESTE_PNY_MM:.0f} mm para identificar a chave"
                 )
+                grbl._jog_passo_home_xy(
+                    "Y", HOME_AUTO_TESTE_PNY_MM, HOME_AUTO_FEED,
+                    passo_max=HOME_AUTO_TESTE_PNY_MM, detectar_contato=False,
+                )
+                liberada, _, _ = grbl._confirmar_chave_liberada_home("Y")
+                if liberada:
+                    registrar_log(
+                        "HOME AUTOMATICO: Pn:Y soltou com Y+: era a chave Y1 (lado A).",
+                        "info",
+                    )
+                else:
+                    volta = HOME_AUTO_TESTE_PNY_MM + HOME_AUTO_RECUO_Y_MM
+                    _fase(
+                        "Home 1/4: Pn:Y continua acionado: chave Y2 (lado C/D); "
+                        f"Y-{volta:.0f} mm para solta-la"
+                    )
+                    grbl._jog_passo_home_xy(
+                        "Y", -volta, HOME_AUTO_FEED,
+                        passo_max=volta, detectar_contato=False,
+                    )
+                    liberada, estado_y, _ = grbl._confirmar_chave_liberada_home("Y")
+                    if not liberada:
+                        raise RuntimeError(
+                            "Pn:Y continua acionado depois de Y+10 mm e de "
+                            f"Y-{volta:.0f} mm. Verifique as chaves Y. "
+                            f"Ultimo status: {estado_y}"
+                        )
+                    registrar_log(
+                        "HOME AUTOMATICO: chave Y2 liberada; seguindo para o Home.",
+                        "info",
+                    )
+                if _abortado():
+                    raise RuntimeError("Home automatico abortado pelo operador.")
 
             _fase("Home 1/4: buscando chaves X- e Y- (canto A)")
             ok, msg = grbl.executar_home_xy_chaves(
@@ -6095,7 +5920,7 @@ def iniciar_home_automatico(grbl):
                 curso_x=HOME_AUTO_CURSO_MAX_MM, curso_y=HOME_AUTO_CURSO_MAX_MM,
                 coord_x=float(PONTO_A[0]), coord_y=float(PONTO_A[1]),
                 passo=HOME_AUTO_TRECHO_MM, feed=HOME_AUTO_FEED,
-                recuo=HOME_AUTO_RECUO_MM, recuo_y=HOME_AUTO_RECUO_MM,
+                recuo=HOME_AUTO_RECUO_X_MM, recuo_y=HOME_AUTO_RECUO_Y_MM,
                 seguranca_confirmada=True,
             )
             if not ok:
@@ -6108,6 +5933,7 @@ def iniciar_home_automatico(grbl):
             medicao = grbl.sondar_chave_y_oposta(
                 curso=15.0, feed=120.0, recuo=4.0, passo=1.0,
                 progresso=lambda t: _fase("Home 3/4: " + t),
+                y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,
             )
             configurar_sistema_coordenadas(
                 ponto_c=medicao["ponto_c"], ponto_d=medicao["ponto_d"],
@@ -6529,7 +6355,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             passo = float(dados.get("passo", 5.0))
             feed = float(dados.get("feed", 500))
             recuo_x = float(dados.get("recuo_x", 5.0))
-            recuo_y = float(dados.get("recuo_y", 5.0))
+            recuo_y = float(dados.get("recuo_y", 12.0))
             coord_x = float(dados.get("coord_x", ponto_home_xy()[0]))
             coord_y = float(dados.get("coord_y", ponto_home_xy()[1]))
             if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):

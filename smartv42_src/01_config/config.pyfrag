@@ -90,29 +90,34 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 #     para a esquerda no seu GRBL for necessário enviar X negativo, ou +1 se X+ já move para a esquerda).
 #   - INVERTER_JOG_X = False: Se True, inverte os botões "← X-" e "→ X+" na interface para bater com a visão frontal.
 # -----------------------------------------------------------------------------
-ORIGEM_X_NA_DIREITA = False
+ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
 SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
-INVERTER_JOG_X = False      # Se True, inverte apenas os botões visuais ← X- e → X+ do painel
+INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
 # Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
-#   - Ponto A (Canto Inferior Esquerdo | col=0,  lin=99): X = 0.000,   Y = 0.000
-#   - Ponto B (Canto Inferior Direito  | col=99, lin=99): X = 297.000, Y = 0.000
-#   - Ponto C (Canto Superior Direito  | col=99, lin=0 ): X = 297.000, Y = 297.000
-#   - Ponto D (Canto Superior Esquerdo | col=0,  lin=0 ): X = 0.000,   Y = 297.000
+# Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
+# esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
+# imagem para ela nao sair invertida).
+#   - Ponto A (Inferior Direito  | col=99 da imagem): X = 0.000,   Y = 0.000
+#   - Ponto B (Inferior Esquerdo | col=0  da imagem): X = 297.000, Y = 0.000
+#   - Ponto C (Superior Esquerdo | col=0  da imagem): X = 297.000, Y = 297.000
+#   - Ponto D (Superior Direito  | col=99 da imagem): X = 0.000,   Y = 297.000
 # A imagem e plotada dentro do retangulo A-B-C-D.
 # =============================================================================
 ARQUIVO_CALIBRACAO_MATRIZ = "calibracao_matriz.json"
+# Arquivos de outra versao do modelo (Y negativo, A a esquerda) sao ignorados.
+MODELO_CALIBRACAO = "100x100_3mm_297mm_A_direita_Y_positivo"
 USAR_CALIBRACAO_4_PONTOS = True
 
-PONTO_A = [0.000, 0.000]        # Base-Esquerda da matriz (col 0,  lin 99)
-PONTO_B = [297.000, 0.000]      # Base-Direita da matriz  (col 99, lin 99)
-PONTO_C = [297.000, 297.000]    # Topo-Direita da matriz  (col 99, lin 0)
-PONTO_D = [0.000, 297.000]      # Topo-Esquerda da matriz (col 0,  lin 0)
+PONTO_A = [0.000, 0.000]        # Base-Direita  (Home nas chaves X/Y)
+PONTO_B = [297.000, 0.000]      # Base-Esquerda
+PONTO_C = [297.000, 297.000]    # Topo-Esquerda (borda da chave 2 de Y)
+PONTO_D = [0.000, 297.000]      # Topo-Direita  (borda da chave 2 de Y)
 
 # Segunda chave de Y: sua posicao de contato nao e o centro fisico do ultimo pino.
 # So marcar como calibrada apos buscar, cancelar Jog, recuar e confirmar Pn:Y livre.
@@ -275,7 +280,7 @@ def salvar_calibracao_matriz():
         "inverter_jog_y": INVERTER_JOG_Y,
         "sinal_eixo_x": SINAL_EIXO_X,
         "sinal_eixo_y": SINAL_EIXO_Y,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
     }
     try:
         with open(ARQUIVO_CALIBRACAO_MATRIZ, "w", encoding="utf-8") as f:
@@ -304,15 +309,14 @@ def carregar_calibracao_matriz():
         if not ok:
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
-        y_ab = 0.5 * (pontos[0][1] + pontos[1][1])
-        y_cd = 0.5 * (pontos[2][1] + pontos[3][1])
-        if y_cd < y_ab:
-            # Modelo antigo (D em Y negativo). Na bancada com $3=1, Y+ vai
-            # de A para D; usar esse arquivo mandaria o cabecote para fora.
+        if dados.get("modelo") != MODELO_CALIBRACAO:
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
-                "Calibracao salva IGNORADA: usa o modelo antigo com Y negativo "
-                f"(Y de C/D={y_cd:.1f}). Usando A=(0,0), B=(297,0), "
-                "C=(297,297), D=(0,297). Execute o Home automatico.", "aviso"
+                "Calibracao salva IGNORADA: arquivo de versao anterior "
+                f"({dados.get('modelo')}). Usando A=(0,0) embaixo a direita, "
+                "B=(297,0), C=(297,297), D=(0,297). Execute o Home automatico.",
+                "aviso"
             )
             return False
         origem_direita = bool(dados.get("origem_x_na_direita", ORIGEM_X_NA_DIREITA))
@@ -480,7 +484,7 @@ def obter_estado_coordenadas():
         "passo_nominal_mm": PASSO_NOMINAL_MALHA_MM,
         "extensao_util_mm": EXTENSAO_UTIL_MALHA_MM,
         "curso_nominal_mm": CURSO_NOMINAL_DESLOCAMENTO_MM,
-        "modelo": "100x100_3mm_297mm",
+        "modelo": MODELO_CALIBRACAO,
         "usar_janela_plotagem": USAR_JANELA_PLOTAGEM,
         "plot_x_min": PLOT_X_MIN,
         "plot_x_max": PLOT_X_MAX,
