@@ -514,3 +514,9 @@ A mudanca para SIMULADO, reconexao USB, soft reset ou inicio de um novo Home XY 
 **Importante:** nao se deve confiar somente na Raspberry Pi para manter as bobinas desenergizadas em caso de falha. Contatos normalmente fechados de parada fisica, circuito de desligamento de potencia, fusivel e eletrica adequada sao necessarios. Caso os modulos sejam ativos em nivel baixo, utilize resistores de pull-up apropriados para evitar acionamento quando GPIO estiver em alta impedancia.
 
 Os testes de software usam objetos de rele falsos e executam no CI, sem comprovar a eletrica da bancada.
+
+## 14. Coordenadas físicas unificadas (100 × 100, 3 mm)
+
+A Smart Matrix utiliza 10.000 centros físicos, indexados de 0 a 99 por eixo. O intervalo nominal entre centros adjacentes é 3 mm, totalizando **297 mm entre extremos**. A referência nominal de movimento 0..299 mm **não significa 300 pinos**. O G-code XY utiliza interpolação bilinear dos quatro cantos calibrados, independente de recortes de plotagem. Por padrão, a janela está desativada; se habilitada, somente mascara pontos e não comprime a malha.
+
+O Home XY automático por chaves e recuo de 2 mm foi preservado. O botão de origem manual G92 foi removido, e calibrações antigas incompatíveis são ignoradas. Um G-code importado só pressiona Z em centros da malha (tolerância máxima 0,35 mm). Veja [docs/MODELO_COORDENADAS_297.md](docs/MODELO_COORDENADAS_297.md) antes dos testes físicos.
