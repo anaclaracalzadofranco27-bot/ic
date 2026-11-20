@@ -513,11 +513,20 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 _job_pausado = False
                 _grbl_global.enviar_byte_tempo_real(b"~", "Cycle Start (~)")
             elif cmd == "abort":
+                # Prioridade absoluta: liberar a espera do job e enviar bytes
+                # realtime sem adquirir o lock serial da thread em movimento.
                 _job_abortar = True
                 _job_pausado = False
-                if _job_em_execucao or _operacao_manual:
-                    abortar_job_evento.set()
-                _grbl_global.soft_reset()
+                abortar_job_evento.set()
+                ok_parada = _grbl_global.parar_grbl()
+                mensagem = ("Hold + Ctrl+X enviados ao GRBL; confirme parada na CNC."
+                            if ok_parada else
+                            "Nao foi possivel enviar parada pela USB. ACIONE A PARADA ELETRICA.")
+                self._enviar_json({
+                    "ok": bool(ok_parada), "mensagem": mensagem,
+                    "erro": None if ok_parada else mensagem,
+                }, 200 if ok_parada else 503)
+                return
             elif cmd == "jog_cancel":
                 _grbl_global.cancelar_jog()
             elif cmd == "unlock":
