@@ -1252,7 +1252,7 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
             "  [ORIGEM 0,0]  ORIGEM_DIREITA (Define ponto 0,0 na extremidade direita da matriz)\n"
             "                ORIGEM_ESQUERDA (Define ponto 0,0 na extremidade esquerda da matriz)\n"
             "                SINAL_X=-1 ou SINAL_X=1 (Define se para ir para a esquerda o GRBL usa X- ou X+)\n"
-            "                HOME_CAL (Apenas origem manual; NAO referencia sensores nem libera jobs)\n"
+            "                HOME_CAL (Desativado: use Home XY automatico)\n"
             "  [PINOS Z]     PINOS (Mostra sequencia GPIO [5, 6, 16, 27, 23, 17, 24, 25] e pulsos)\n"
             "                Z1 a Z8 (Dispara nivel Z) | TESTE_Z (Testa reles 1 a 8) | SEQ_Z (Sequencia 1..8)\n"
             "                MS=10 ou MS=15,10,10 (Configura duracao do pulso ON, OFF e Pausa em ms)\n"
@@ -1345,19 +1345,19 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         off_ms = partes[1] if len(partes) >= 2 else on_ms
         pausa_ms = partes[2] if len(partes) >= 3 else None
         cfg = configurar_parametros_pulsos_z(on_ms=on_ms, off_ms=off_ms, pausa_ms=pausa_ms)
-        return {"ok": True, "resposta": "Tempo de pulso (ms) atualizado.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tempo de pulso (ms) atualizado.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("OFF_MS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         off_ms = float(cmd.split("=", 1)[1].strip())
         cfg = configurar_parametros_pulsos_z(off_ms=off_ms)
-        return {"ok": True, "resposta": "Tempo OFF (ms) atualizado.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tempo OFF (ms) atualizado.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PAUSA_MS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         pausa_ms = float(cmd.split("=", 1)[1].strip())
         cfg = configurar_parametros_pulsos_z(pausa_ms=pausa_ms)
-        return {"ok": True, "resposta": "Pausa antes de Z (ms) atualizada.", "config_z": cfg}
+        return {"ok": True, "resposta": "Pausa antes de Z (ms) atualizada.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PULSOS="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
@@ -1365,13 +1365,13 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
         cfg = configurar_parametros_pulsos_z(
             num_pulsos_fixo=n_p, pulsos_por_nivel=[n_p] * NIVEIS_MAX, usar_fixo=True
         )
-        return {"ok": True, "resposta": f"Pulsos configurados para {n_p} em todos os niveis.", "config_z": cfg}
+        return {"ok": True, "resposta": f"Pulsos configurados para {n_p} em todos os niveis.", "config_z": cfg, "atualizar_matriz": True}
 
     if up.startswith("PULSOS_NIVEL="):
         registrar_terminal("TX", f">>> {cmd}", "cmd")
         lista_str = cmd.split("=", 1)[1].strip()
         cfg = configurar_parametros_pulsos_z(pulsos_por_nivel=lista_str, usar_fixo=False)
-        return {"ok": True, "resposta": "Tabela de pulsos por nivel atualizada.", "config_z": cfg}
+        return {"ok": True, "resposta": "Tabela de pulsos por nivel atualizada.", "config_z": cfg, "atualizar_matriz": True}
 
     if up == "HOME_CAL":
         registrar_terminal("TX", ">>> HOME_CAL", "cmd")

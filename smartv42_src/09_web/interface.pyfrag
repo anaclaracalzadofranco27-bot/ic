@@ -492,7 +492,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <input type="file" id="inp-file-gcode" accept=".gcode,.nc,.tap,.txt" style="display:none;" onchange="importarGcodeHibrido(this)">
         </label>
         <label style="display:flex;gap:5px;align-items:center;font-size:10px;" title="Desmarcado usa a configuracao Z atual; marcado usa ON/OFF/PULSOS do arquivo.">
-          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;"> Z do arquivo
+          <input id="usar-parametros-gcode" type="checkbox" style="width:auto;" onchange="alterarPreferenciaGcode()"> Z do arquivo
         </label>
         <select id="sel-profundidade" style="width:125px;" onchange="reprocessarProfundidade()">
           <option value="distancia">Prof: Distancia EDT</option>
@@ -500,6 +500,13 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <option value="binario">Prof: Binario (Z8)</option>
         </select>
       </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:7px 10px;border:1px solid rgba(148,163,184,.32);border-radius:6px;margin-bottom:6px;">
+      <strong style="font-size:11px;">Fonte da próxima plotagem:</strong>
+      <button id="bot-fonte-matriz" class="btn btn-sky" onclick="selecionarFonteJob('matriz')">Matriz 100 × 100</button>
+      <button id="bot-fonte-gcode" class="btn" onclick="selecionarFonteJob('gcode')">G-code importado</button>
+      <span id="fonte-job-info" style="font-size:11px;flex:1;min-width:150px;" title="O G-code importado fica salvo na memoria ate ser removido ou o servidor reiniciar.">Matriz selecionada</span>
+      <button id="bot-remover-gcode" class="btn btn-rose" onclick="removerGcodeSelecionado()">Remover G-code</button>
     </div>
 
     <div class="viz-split">
@@ -647,6 +654,9 @@ let estadoMatriz = [];
 let modoVista3D = false;
 let posCabecote = { x_mm: 0, y_mm: 0, x_idx: 99, y_idx: 0, nivel_z: 0 };
 let configCoord = { origem_x_na_direita: true, sinal_eixo_x: 1.0, inverter_jog_x: false };
+let fonteJobAtiva = 'matriz';
+let revisaoProjeto = null;
+let nomeGcodeCarregado = null;
 
 function abrirModal(id) {
   document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('open'));
@@ -811,9 +821,38 @@ async function salvarConfigCabecote() {
 }
 
 async function iniciarJob() {
-  const resposta = await apiPost('iniciar_job');
-  if (!resposta.ok) alert(resposta.erro || 'Job nao iniciado; consulte os logs.');
+  if (revisaoProjeto === null) { alert('Atualize o estado antes de iniciar uma plotagem.'); return; }
+  const descricao = fonteJobAtiva === 'gcode' ? (nomeGcodeCarregado || 'G-code importado') : 'matriz 100 × 100';
+  if (!confirm('Iniciar plotagem usando: ' + descricao + '?\nA fonte e os parametros serao congelados ate o fim do job.')) return;
+  const resposta = await apiPost('iniciar_job', {
+    fonte_esperada: fonteJobAtiva, revisao_esperada: revisaoProjeto
+  });
+  if (!resposta.ok) {
+    alert(resposta.erro || 'Job nao iniciado; consulte os logs.');
+    await carregarEstadoInicial();
+  }
   atualizarStatus();
+}
+
+async function selecionarFonteJob(fonte) {
+  const resposta = await apiPost('selecionar_fonte_job', { fonte });
+  if (!resposta.ok) { alert(resposta.erro || 'Fonte nao selecionada.'); return; }
+  await carregarEstadoInicial();
+}
+
+async function removerGcodeSelecionado() {
+  if (!confirm('Remover o G-code importado da memoria? A matriz sera mantida.')) return;
+  const resposta = await apiPost('remover_gcode_importado', { confirmado: true });
+  if (!resposta.ok) { alert(resposta.erro || 'Nao foi possivel remover o G-code.'); return; }
+  await carregarEstadoInicial();
+}
+
+async function alterarPreferenciaGcode() {
+  if (!nomeGcodeCarregado) return; // antes de importar: a caixa escolhe a preferencia do novo arquivo
+  const escolha = !!document.getElementById('usar-parametros-gcode').checked;
+  const resposta = await apiPost('definir_parametros_gcode', { usar_parametros_arquivo: escolha });
+  if (!resposta.ok) alert(resposta.erro || 'Preferencia de parametros nao alterada.');
+  await carregarEstadoInicial();
 }
 
 async function executarResetCompleto() {
@@ -828,7 +867,8 @@ async function acaoReset(subcmd) {
 }
 
 async function carregarPadrao(padrao) {
-  await apiPost('gerar_padrao', { padrao });
+  const resposta = await apiPost('gerar_padrao', { padrao });
+  if (!resposta.ok) { alert(resposta.erro || 'Padrao nao gerado.'); return; }
   await carregarEstadoInicial();
 }
 
@@ -998,6 +1038,20 @@ async function carregarEstadoInicial() {
   const res = await fetch('/api/matrix');
   const d = await res.json();
   estadoMatriz = d.matriz || [];
+  if (d.fontes_job) {
+    const f = d.fontes_job;
+    fonteJobAtiva = f.fonte_ativa;
+    revisaoProjeto = f.revisao;
+    nomeGcodeCarregado = f.nome_gcode;
+    const nome = f.nome_gcode || '(nenhum arquivo importado)';
+    document.getElementById('fonte-job-info').textContent = fonteJobAtiva === 'gcode'
+      ? 'Selecionado: ' + nome + ' · Z: ' + (f.usar_parametros_arquivo ? 'arquivo' : 'painel')
+      : 'Selecionado: matriz física · G-code guardado: ' + nome;
+    document.getElementById('bot-fonte-gcode').disabled = !f.gcode_importado;
+    document.getElementById('bot-remover-gcode').disabled = !f.gcode_importado;
+    document.getElementById('bot-fonte-matriz').style.opacity = fonteJobAtiva === 'matriz' ? '1' : '.6';
+    document.getElementById('bot-fonte-gcode').style.opacity = fonteJobAtiva === 'gcode' ? '1' : '.6';
+  }
   if (d.coord) {
     configCoord = d.coord;
     document.getElementById('cfg-inv-jog-x').checked = !!d.coord.inverter_jog_x;
@@ -1075,7 +1129,7 @@ async function atualizarStatus() {
     if (st.home_xy && st.home_xy.ativo) {
       document.getElementById('info-progresso').textContent = 'Home XY: ' + st.home_xy.fase;
     } else if (st.job && st.job.ativo) {
-      document.getElementById('info-progresso').textContent = `Plotando ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
+      document.getElementById('info-progresso').textContent = `${st.job.nome_programa || 'Job'}: ${st.job.atual}/${st.job.total} (X=${st.job.x_mm}mm, Y=${st.job.y_mm}mm)`;
     } else {
       document.getElementById('info-progresso').textContent =
         st.job.erro ? 'Falha: ' + st.job.erro : (st.job.concluido ? 'Concluido' : 'Pronto');

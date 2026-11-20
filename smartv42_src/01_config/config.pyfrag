@@ -19,6 +19,7 @@ Plataforma CNC Tátil, IA Embarcada, Calibração de Home, Console UGS & Reset M
 
 import argparse
 import base64
+import copy
 import csv
 import http.server
 import io

@@ -9,14 +9,142 @@ _gcode_atual = []
 _trajetoria_atual = []
 estado_importacao_gcode = {"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False}
 _imagem_origem = None
+# A edicao da matriz, o G-code externo e a fonte selecionada sao estados distintos.
+# Nenhum recálculo da matriz elimina o arquivo importado; a remocao e explicita.
+_estado_projeto_lock = threading.RLock()
+_fonte_job_ativa = "matriz"
+_revisao_estado_projeto = 0
+
+
+def obter_fonte_job_ativa():
+    with _estado_projeto_lock:
+        return _fonte_job_ativa
+
+
+def obter_estado_fontes_job():
+    with _estado_projeto_lock:
+        importado = estado_importacao_gcode["programa"] is not None
+        return {
+            "fonte_ativa": _fonte_job_ativa,
+            "revisao": _revisao_estado_projeto,
+            "gcode_importado": importado,
+            "nome_gcode": estado_importacao_gcode.get("nome") if importado else None,
+            "blocos_gcode": len(estado_importacao_gcode["programa"] or []),
+            "usar_parametros_arquivo": bool(estado_importacao_gcode.get("usar_parametros_arquivo", False)),
+            "matriz_disponivel": _matriz_atual is not None,
+        }
+
+
+def selecionar_fonte_job(fonte):
+    global _fonte_job_ativa, _revisao_estado_projeto
+    if fonte not in ("matriz", "gcode"):
+        raise ValueError("Fonte deve ser matriz ou gcode.")
+    with _estado_projeto_lock:
+        if fonte == "gcode" and estado_importacao_gcode["programa"] is None:
+            raise ValueError("Nenhum G-code importado selecionavel.")
+        if fonte == "matriz" and _matriz_atual is None:
+            raise ValueError("Nenhuma matriz disponivel.")
+        if fonte != _fonte_job_ativa:
+            _fonte_job_ativa = fonte
+            _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+def remover_gcode_importado():
+    global _fonte_job_ativa, _revisao_estado_projeto
+    with _estado_projeto_lock:
+        estado_importacao_gcode.update({
+            "linhas": None, "programa": None, "nome": None,
+            "usar_parametros_arquivo": False,
+        })
+        _fonte_job_ativa = "matriz"
+        _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
 
 
 def atualizar_matriz_global(nova_matriz, modo_operacao="Domo Gaussiano 3D", descartar_importacao=False):
-    global _matriz_atual, _gcode_atual, _trajetoria_atual
-    if descartar_importacao:
-        estado_importacao_gcode.update({"linhas": None, "programa": None, "nome": None, "usar_parametros_arquivo": False})
-    _matriz_atual = np.asarray(nova_matriz, dtype=np.uint8)
-    _gcode_atual, _trajetoria_atual, _ = compilar_matriz_para_estudio(_matriz_atual, modo_operacao)
+    """Compila uma COPIA e publica matriz + preview atomicamente.
+
+    descartar_importacao e um nome legado: passa a significar apenas selecionar
+    a matriz como fonte. O G-code importado so sai por remover_gcode_importado().
+    """
+    global _matriz_atual, _gcode_atual, _trajetoria_atual, _fonte_job_ativa, _revisao_estado_projeto
+    nova = np.array(nova_matriz, dtype=np.uint8, copy=True)
+    if nova.shape != TAMANHO_MATRIZ:
+        raise ValueError(f"Matriz deve ter dimensoes {TAMANHO_MATRIZ}.")
+    with _estado_projeto_lock:
+        linhas, trajetoria, _ = compilar_matriz_para_estudio(nova, modo_operacao)
+        _matriz_atual = nova
+        _gcode_atual = list(linhas)
+        _trajetoria_atual = list(trajetoria)
+        if descartar_importacao:
+            _fonte_job_ativa = "matriz"
+        _revisao_estado_projeto += 1
+
+
+def carregar_gcode_importado(conteudo, nome, usar_parametros_arquivo=False):
+    """Substitui importacao apenas DEPOIS de analisar arquivo completo."""
+    global _fonte_job_ativa, _revisao_estado_projeto
+    with _estado_projeto_lock:
+        programa = analisar_gcode_hibrido(conteudo)
+        linhas = tuple(conteudo.splitlines())
+        estado_importacao_gcode.update({
+            "linhas": linhas,
+            "programa": tuple(copy.deepcopy(programa)),
+            "nome": str(nome or "arquivo.gcode")[:120],
+            "usar_parametros_arquivo": bool(usar_parametros_arquivo),
+        })
+        _fonte_job_ativa = "gcode"
+        _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+def definir_preferencia_parametros_gcode(valor):
+    global _revisao_estado_projeto
+    if not isinstance(valor, bool):
+        raise ValueError("A preferencia deve ser um booleano.")
+    with _estado_projeto_lock:
+        if estado_importacao_gcode["programa"] is None:
+            raise ValueError("Importe um G-code antes de definir seus parametros.")
+        if estado_importacao_gcode["usar_parametros_arquivo"] != valor:
+            estado_importacao_gcode["usar_parametros_arquivo"] = valor
+            _revisao_estado_projeto += 1
+        return obter_estado_fontes_job()
+
+
+
+def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esperada=None):
+    """Prepara programa e configuracao no mesmo instante, sem alterar fonte ativa."""
+    with _estado_projeto_lock:
+        fonte = _fonte_job_ativa
+        if fonte_esperada is not None and fonte_esperada != fonte:
+            return False, "Fonte alterada na interface. Atualize o painel antes de iniciar."
+        if revisao_esperada is not None and int(revisao_esperada) != _revisao_estado_projeto:
+            return False, "O projeto foi modificado depois da ultima visualizacao. Confira programa e parametros."
+        if fonte == "gcode":
+            programa_fonte = estado_importacao_gcode["programa"]
+            if not programa_fonte:
+                return False, "Arquivo G-code selecionado nao esta disponivel."
+            programa = copy.deepcopy(list(programa_fonte))
+            nome = estado_importacao_gcode.get("nome") or "arquivo.gcode"
+            usar_arquivo = bool(estado_importacao_gcode["usar_parametros_arquivo"])
+            reset = None
+        else:
+            if _matriz_atual is None or not np.any(_matriz_atual):
+                return False, "Matriz vazia ou indisponivel."
+            if not _gcode_atual:
+                return False, "G-code da matriz ainda nao foi compilado."
+            programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
+            nome, usar_arquivo, reset = "Matriz 100x100", False, reset_ctrl
+        snapshot = capturar_snapshot_parametros_job()
+        ok = executar_job_gcode_em_background(
+            grbl, programa, reset_ctrl=reset, origem=fonte,
+            usar_parametros_arquivo=usar_arquivo,
+            parametros_job=snapshot, nome_programa=nome,
+        )
+        if not ok:
+            return False, "Job nao iniciado: maquina ocupada, nao referenciada ou validacao falhou."
+        return True, f"Job iniciado com snapshot do programa {nome} ({fonte})."
 
 
 class StudioRequestHandler(BaseHTTPRequestHandler):
@@ -43,15 +171,19 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/matrix":
-            pinos_ativos = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+            with _estado_projeto_lock:
+                fonte = obter_estado_fontes_job()
+                matriz = _matriz_atual.tolist() if _matriz_atual is not None else []
+                gcode = (list(estado_importacao_gcode["linhas"] or []) if _fonte_job_ativa == "gcode"
+                         else list(_gcode_atual))
+                pins = int(np.count_nonzero(_matriz_atual)) if _matriz_atual is not None else 0
+                linhas_importadas = len(estado_importacao_gcode["linhas"] or [])
+                coord = obter_estado_coordenadas()
             self._enviar_json({
-                "matriz": _matriz_atual.tolist() if _matriz_atual is not None else [],
-                "gcode": estado_importacao_gcode["linhas"] if estado_importacao_gcode["linhas"] is not None else _gcode_atual,
-                "gcode_importado": estado_importacao_gcode["linhas"] is not None,
-                "usar_parametros_arquivo": estado_importacao_gcode["usar_parametros_arquivo"],
-                "linhas_importadas": len(estado_importacao_gcode["linhas"] or []),
-                "pinos_ativos": pinos_ativos,
-                "coord": obter_estado_coordenadas(),
+                "matriz": matriz, "gcode": gcode, "gcode_importado": fonte["gcode_importado"],
+                "usar_parametros_arquivo": fonte["usar_parametros_arquivo"],
+                "linhas_importadas": linhas_importadas,
+                "pinos_ativos": pins, "coord": coord, "fontes_job": fonte,
             })
             return
 
@@ -120,22 +252,35 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
         global _job_pausado, _job_abortar, MODO_PROFUNDIDADE, AUTO_RESET_APOS_PLOT, FEED_RATE, _imagem_origem
 
         if acao == "carregar_gcode":
-            if _job_em_execucao:
-                self._enviar_json({"ok": False, "erro": "Conclua o job anterior antes de importar."})
+            conteudo = dados.get("conteudo", "")
+            estado = carregar_gcode_importado(
+                conteudo, dados.get("nome", "arquivo.gcode"),
+                usar_parametros_arquivo=dados.get("usar_parametros_arquivo", False),
+            )
+            registrar_log(
+                f"G-code importado e selecionado: {estado['nome_gcode']} "
+                f"({estado['blocos_gcode']} blocos), independente da matriz.",
+                "ok",
+            )
+            self._enviar_json({"ok": True, "blocos": estado["blocos_gcode"], "fontes_job": estado})
+            return
+
+        if acao == "selecionar_fonte_job":
+            estado = selecionar_fonte_job(dados.get("fonte"))
+            self._enviar_json({"ok": True, "fontes_job": estado})
+            return
+
+        if acao == "remover_gcode_importado":
+            if dados.get("confirmado") is not True:
+                self._enviar_json({"ok": False, "erro": "Confirmacao explicita necessaria para remover o G-code."}, 400)
                 return
-            try:
-                conteudo = dados.get("conteudo", "")
-                programa = analisar_gcode_hibrido(conteudo)
-            except (ValueError, TypeError) as exc:
-                self._enviar_json({"ok": False, "erro": str(exc)})
-                return
-            estado_importacao_gcode.update({
-                "linhas": conteudo.splitlines(), "programa": programa,
-                "nome": str(dados.get("nome", "arquivo.gcode"))[:120],
-                "usar_parametros_arquivo": bool(dados.get("usar_parametros_arquivo", False)),
-            })
-            registrar_log(f"G-code importado: {len(programa)} blocos; Z separado do GRBL.", "ok")
-            self._enviar_json({"ok": True, "blocos": len(programa)})
+            estado = remover_gcode_importado()
+            self._enviar_json({"ok": True, "fontes_job": estado})
+            return
+
+        if acao == "definir_parametros_gcode":
+            estado = definir_preferencia_parametros_gcode(dados.get("usar_parametros_arquivo"))
+            self._enviar_json({"ok": True, "fontes_job": estado})
             return
 
         if acao == "config_coordenadas":
@@ -370,15 +515,13 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             if not _grbl_global.modo_simulacao and not _grbl_global.home_xy_referenciado:
                 self._enviar_json({"ok": False, "erro": "Home XY por chaves nao confirmado nesta conexao. Execute Home XY antes da plotagem."}, 409)
                 return
-            if estado_importacao_gcode["programa"] is not None:
-                ok = executar_job_gcode_em_background(
-                    _grbl_global, estado_importacao_gcode["programa"],
-                    origem="gcode",
-                    usar_parametros_arquivo=estado_importacao_gcode["usar_parametros_arquivo"],
-                )
-            else:
-                ok = executar_job_em_background(_grbl_global, _reset_global, _matriz_atual)
-            self._enviar_json({"ok": ok, "erro": None if ok else "Ja existe job ativo ou falha ao iniciar."})
+            ok, mensagem = iniciar_job_selecionado(
+                _grbl_global, _reset_global,
+                fonte_esperada=dados.get("fonte_esperada"),
+                revisao_esperada=dados.get("revisao_esperada"),
+            )
+            self._enviar_json({"ok": ok, "mensagem": mensagem,
+                               "erro": None if ok else mensagem}, 200 if ok else 409)
             return
 
         if acao == "reset_mecanico":
@@ -393,7 +536,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
                 ok_reset, _ = _reset_global.ciclo_completo_reset(_matriz_atual)
                 if ok_reset:
                     _imagem_origem = None
-                    atualizar_matriz_global(_matriz_atual, descartar_importacao=True)
+                    atualizar_matriz_global(_matriz_atual)
                 else:
                     self._enviar_json({"ok": False, "erro": "Reset mecanico nao concluido."}, 500)
                     return
