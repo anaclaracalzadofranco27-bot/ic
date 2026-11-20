@@ -1401,8 +1401,10 @@ class ControladorGRBL:
         estado = self._status_home_xy()
         if not estado.startswith("<Idle") or "Y" in pinos_ativos(estado):
             raise RuntimeError(
-                "A sonda Y precisa iniciar em Idle e com Pn:Y livre. "
-                "Se houve ALARM, resolva-o e execute Home antes de repetir."
+                f"Sonda C/D recusada: estado={estado}; "
+                "a segunda chave Y deve estar LIVRE antes da aproximacao. "
+                "Se Pn:Y esta ativo, verifique a posicao e o contato; "
+                "se houve ALARM, recupere o GRBL e refaca Home."
             )
         ok_cfg, msg_cfg, cfg = self.consultar_configuracoes_grbl()
         if not ok_cfg or any(cfg.get(k) != "0" for k in ("$20", "$21", "$22")):
@@ -1417,9 +1419,15 @@ class ControladorGRBL:
         if not (0.0 <= distancia_ate_c <= 35.0 and
                 abs(x_atual - float(PONTO_B[0])) <= 8.0):
             raise RuntimeError(
-                "Posicione manualmente o cabecote perto de C, do lado de dentro "
-                "da malha, no mesmo X de B (ate 8 mm), e a no maximo 35 mm "
-                "do Y previsto para C. Nao inicie a sonda desde A ou B."
+                f"Sonda C/D fora da area inicial: posicao atual G54 "
+                f"X={x_atual:.2f} Y={y_atual:.2f}; "
+                f"X de B={float(PONTO_B[0]):.2f}, "
+                f"Y previsto de C={float(PONTO_C[1]):.2f}; "
+                f"distancia Y ate C={distancia_ate_c:.2f} mm. "
+                "Use Jog para ficar a ate 8 mm do X de B e 35 mm "
+                "do Y previsto de C, do lado interno da malha, "
+                "sem pressionar Pn:Y. Se A/B foram trocados, "
+                "confira o botao de correcao dos rotulos fisicos."
             )
         registrar_log(
             f"SONDA Y OPOSTA: de Y={y_atual:.3f}, "
@@ -1434,8 +1442,13 @@ class ControladorGRBL:
             )
             if "Y" not in contatos:
                 raise RuntimeError(
-                    f"Chave Y oposta nao encontrada em ate {curso:.1f} mm. "
-                    "Nao foram alterados os cantos C/D."
+                    f"Chave Y oposta nao encontrada na busca limitada a {curso:.1f} mm "
+                    f"(partida X={x_atual:.2f}, Y={y_atual:.2f}; "
+                    f"Y previsto de C={float(PONTO_C[1]):.2f}). "
+                    "Nenhum canto foi alterado. Confirme se Y avancou "
+                    "para a chave correta, se Pn:Y responde e se a chave "
+                    "esta efetivamente ao alcance da busca. "
+                    "Nao aumente o curso sem verificar espaco livre."
                 )
             y_contato = float(self.wpos[1])
             self._recuar_chave_home(
