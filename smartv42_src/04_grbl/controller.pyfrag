@@ -1530,11 +1530,12 @@ def configurar_sistema_coordenadas(
     limite_y_mm=None, x_inicio_fisico=None, y_inicio_fisico=None,
     x_fim_fisico=None, y_fim_fisico=None,
     ponto_a=None, ponto_b=None, ponto_c=None, ponto_d=None,
+    medicao_chave_y_oposta=False,
 ):
     """Calibracao atomica. Mudar sentido de jog nunca altera geometria A/B/C/D."""
     global ORIGEM_X_NA_DIREITA, SINAL_EIXO_X, SINAL_EIXO_Y
     global INVERTER_JOG_X, INVERTER_JOG_Y, LIMITE_X_MM, LIMITE_Y_MM
-    global PONTO_A, PONTO_B, PONTO_C, PONTO_D
+    global PONTO_A, PONTO_B, PONTO_C, PONTO_D, BORDA_Y_OPOSTA_CALIBRADA
     global X_INICIO_FISICO, Y_INICIO_FISICO, X_FIM_FISICO, Y_FIM_FISICO
 
     candidatos = [
@@ -1555,6 +1556,11 @@ def configurar_sistema_coordenadas(
         raise ValueError("Limites fisicos legados desativados: use somente os quatro cantos A/B/C/D.")
     # Os quatro cantos descrevem diretamente a posicao fisica no sistema G54.
     PONTO_A, PONTO_B, PONTO_C, PONTO_D = candidatos
+    if medicao_chave_y_oposta:
+        BORDA_Y_OPOSTA_CALIBRADA = True
+    elif ponto_c is not None or ponto_d is not None or ponto_a is not None or ponto_b is not None:
+        # A alteracao manual dos cantos desfaz a confianca da medicao da outra chave.
+        BORDA_Y_OPOSTA_CALIBRADA = False
     X_INICIO_FISICO, Y_INICIO_FISICO = PONTO_A
     X_FIM_FISICO, Y_FIM_FISICO = PONTO_C
     if origem_x_na_direita is not None:
