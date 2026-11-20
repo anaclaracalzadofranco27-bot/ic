@@ -147,6 +147,21 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertAlmostEqual(ctrl.mpos[0], 2.0, places=2)
         self.assertAlmostEqual(ctrl.mpos[1], -4.0, places=2)
 
+    def test_x_chega_primeiro_y_continua_sem_mover_x(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_x = -1.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        indice_recuo_x = next(i for i, c in enumerate(comandos)
+                               if "$J=G91 G21 X5.000 " in c)
+        self.assertTrue(any("$J=G91 G21 Y0.500 " in c
+                            for c in comandos[indice_recuo_x + 1:]))
+        self.assertAlmostEqual(ctrl.mpos[0], 4.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -2.0, places=2)
+
     def test_recuo_diferente_de_cinco_mm_nao_e_aceito(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
