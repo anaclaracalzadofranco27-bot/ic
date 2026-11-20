@@ -1021,6 +1021,30 @@ class ControladorGRBL:
         self.enviar_byte_tempo_real(b"\x85", "Home XY: timeout, cancelar jog")
         raise RuntimeError(f"Timeout esperando parar jog de {eixo}.")
 
+    def _confirmar_chave_liberada_home(self, eixo):
+        """Exige duas leituras Idle consecutivas livres, sem mover o carro.
+
+        Um unico Pn ativo depois de um jog pode ser temporario (bounce ou
+        atraso de status). O Home nunca e validado por uma amostra livre isolada.
+        """
+        amostras = []
+        livres_seguidas = 0
+        estado = ""
+        for tentativa in range(4):
+            if tentativa:
+                time.sleep(0.15)
+            estado = self._status_home_xy()
+            if not estado.startswith("<Idle"):
+                raise RuntimeError(
+                    f"GRBL saiu de Idle durante verificacao da chave {eixo}: {estado}"
+                )
+            pn = pinos_ativos(estado)
+            amostras.append(pn or "livre")
+            livres_seguidas = livres_seguidas + 1 if eixo not in pn else 0
+            if livres_seguidas >= 2:
+                return True, estado, amostras
+        return False, estado, amostras
+
     def _recuar_chave_home(self, eixo, direcao, feed, recuo, fase):
         """Recuo supervisionado: valida Pn e movimento INFORMADO pelo GRBL.
 
@@ -1035,26 +1059,29 @@ class ControladorGRBL:
         deslocamento = -direcao * recuo
         self._jog_passo_home_xy(eixo, deslocamento, feed, passo_max=recuo,
                                 detectar_contato=False)
-        time.sleep(0.05)
-        estado = self._status_home_xy()
+        liberada, estado, amostras = self._confirmar_chave_liberada_home(eixo)
         deslocamento_grbl = self.mpos[indice] - posicao_antes
         pn = pinos_ativos(estado)
         diagnostico = (f"Comando: {eixo}{deslocamento:+.2f} mm; "
                        f"MPos informado: {deslocamento_grbl:+.2f} mm; "
-                       f"Pn:{pn or 'livre'}; estado: {estado.split('|', 1)[0]}.")
-        if eixo in pn:
-            raise RuntimeError(
-                f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm. "
-                f"{diagnostico} Confirme fisicamente o afastamento, a direcao, "
-                "a chave e a fiacao (NO/NC, GND e $5). "
-                + ("Y nao foi iniciado porque X falhou." if eixo == "X" else "")
-            )
+                       f"Pn final:{pn or 'livre'}; "
+                       f"leituras Pn: {' / '.join(amostras)}; "
+                       f"estado: {estado.split('|', 1)[0]}.")
         if abs(deslocamento_grbl - deslocamento) > 0.35:
             raise RuntimeError(
                 f"Recuo {eixo} nao confirmado pela posicao reportada do GRBL. "
                 f"{diagnostico} Pare e verifique comandos, configuracao do eixo e mecanica."
             )
-        registrar_log(f"Home XY: chave {eixo} liberada. {diagnostico}", "ok")
+        if not liberada:
+            raise RuntimeError(
+                f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm. "
+                f"{diagnostico} O GRBL segue detectando o sensor. Se a chave "
+                "solta manualmente, verifique se o acionador ainda a pressiona "
+                "apos os 2 mm (folga, curso de acionamento e posicionamento). "
+                "Nao aumente o recuo sem medir o espaco livre. "
+                + ("Y nao foi iniciado porque X falhou." if eixo == "X" else "")
+            )
+        registrar_log(f"Home XY: chave {eixo} liberada em leituras consecutivas. {diagnostico}", "ok")
 
     def _home_um_eixo(self, eixo, direcao, curso_max, passo, feed, recuo):
         """Busca a chave fisica em passos curtos, com curso maximo verificavel."""
