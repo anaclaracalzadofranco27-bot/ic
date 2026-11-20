@@ -72,7 +72,7 @@ class Modelo297(unittest.TestCase):
         self.assertEqual(estado["ponto_c"], [297.0, -287.0])
         self.assertEqual(estado["ponto_d"], [0.0, -287.0])
         self.assertTrue(mod.BORDA_Y_OPOSTA_CALIBRADA)
-        self.assertFalse(ctrl.home_xy_referenciado)
+        self.assertTrue(ctrl.home_xy_referenciado)
 
     def test_segunda_chave_y_nao_encontrada_nao_muda_c_d(self):
         ctrl = self.preparar_sonda_y_simulada()
@@ -90,7 +90,7 @@ class Modelo297(unittest.TestCase):
         ctrl = self.preparar_sonda_y_simulada()
         ctrl.ser.mpos[1] = -80.0
         with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
-            with self.assertRaisesRegex(RuntimeError, "perto de C"):
+            with self.assertRaisesRegex(RuntimeError, "exige partida em A/B"):
                 ctrl.sondar_chave_y_oposta()
         self.assertFalse(any(
             call.args[0].startswith("$J=") for call in enviar.call_args_list
@@ -121,22 +121,120 @@ class Modelo297(unittest.TestCase):
         self.assertEqual(respostas[-1][1], 409)
         movimento.assert_not_called()
 
-    def test_perimetro_nao_retorna_sucesso_se_grbl_parou_em_c(self):
+    def test_perimetro_automatico_relata_erro_se_parar_em_c(self):
         ctrl = mod.ControladorGRBL()
+        ctrl.home_xy_referenciado = True
         respostas = []
         handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
         handler._enviar_json = lambda corpo, status=200: respostas.append((corpo, status))
+        class ThreadSincrona:
+            def __init__(self, target, **kwargs):
+                self.target = target
+            def start(self):
+                self.target()
         with patch.object(mod, "BORDA_Y_OPOSTA_CALIBRADA", True), \
              patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(mod.threading, "Thread", ThreadSincrona), \
              patch.object(ctrl, "mover_xy_sincrono",
                           side_effect=[(True, "ok"), (True, "ok"), (False, "GRBL em ALARM")]) as mover:
             handler._executar_acao_POST(
                 "calibrar_caixa_fisica", {"etapa": "testar_perimetro"}
             )
-        self.assertFalse(respostas[-1][0]["ok"])
-        self.assertEqual(respostas[-1][1], 409)
-        self.assertIn("C", respostas[-1][0]["erro"])
+        self.assertTrue(respostas[-1][0]["ok"])
+        self.assertEqual(respostas[-1][1], 200)
+        self.assertIn("C", mod._estado_sonda_y2["erro"])
+        self.assertFalse(mod._estado_sonda_y2["concluido"])
         self.assertEqual(mover.call_count, 3)
+
+    def test_sonda_y2_automatizada_desde_b_sem_mover_x(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        ctrl.ser.mpos[:2] = [297.0, 0.0]
+        ctrl.atualizar_status()
+        fases = []
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            medida = ctrl.sondar_chave_y_oposta(progresso=fases.append)
+        self.assertAlmostEqual(medida["y_contato"], -291.0, places=2)
+        self.assertAlmostEqual(medida["y_cd"], -287.0, places=2)
+        self.assertIn("Y", "".join(fases))
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any(
+            "$J=G91 G21 Y-2.000 F200.0" in c for c in comandos
+        ))
+        self.assertTrue(any(
+            "$J=G91 G21 Y-1.000 F120.0" in c for c in comandos
+        ))
+        self.assertTrue(any(
+            "$J=G91 G21 Y4.000 F120.0" in c for c in comandos
+        ))
+        self.assertFalse(any(
+            c.startswith("$J=") and " X" in c for c in comandos
+        ))
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_sonda_y2_automatizada_desde_a_aceita_x_da_outra_borda(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        ctrl.ser.mpos[:2] = [0.0, 0.0]
+        ctrl.atualizar_status()
+        # Teste de selecao A: os movimentos fisicos do GRBL
+        # continuam executados somente em Y.
+        with patch.object(ctrl, "_buscar_xy_em_fluxo_home") as busca, \
+             patch.object(ctrl, "_recuar_chave_home") as recuar:
+            def fluxo(eixos, sinais, cursos, percorrido, passo, feed):
+                ctrl.mpos[1] -= cursos["Y"]
+                ctrl.wpos[1] -= cursos["Y"]
+                if passo == 2.0:
+                    return set(), "<Idle|MPos:0,-272,0>"
+                ctrl.mpos[1] = -291.0
+                ctrl.wpos[1] = -291.0
+                return {"Y"}, "<Idle|MPos:0,-291,0|Pn:Y>"
+            def pullback(eixo, sinal, velocidade, distancia, fase):
+                ctrl.mpos[1] = -287.0
+                ctrl.wpos[1] = -287.0
+                ctrl.pinos_pn = ""
+            busca.side_effect = fluxo
+            recuar.side_effect = pullback
+            with patch.object(ctrl, "_status_home_xy", return_value="<Idle|MPos:0,-287,0>"):
+                medida = ctrl.sondar_chave_y_oposta()
+        self.assertAlmostEqual(medida["y_cd"], -287.0)
+        self.assertEqual(busca.call_count, 2)
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_sonda_y2_nao_ultrapassa_y_nominal_se_chave_nao_responder(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        ctrl.ser.mpos[:2] = [297.0, 0.0]
+        ctrl.ser.home_simulado_y_oposto = -310.0
+        ctrl.atualizar_status()
+        with self.assertRaisesRegex(RuntimeError, "Segunda chave Y nao encontrada"):
+            ctrl.sondar_chave_y_oposta()
+        self.assertGreaterEqual(ctrl.mpos[1], -297.01)
+        self.assertFalse(ctrl.home_xy_referenciado)
+        self.assertEqual(mod.PONTO_C, [297.0, -297.0])
+
+    def test_calibracao_y2_nao_invalida_home_se_apenas_c_d_mudarem(self):
+        ctrl = self.preparar_sonda_y_simulada()
+        with patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(mod, "salvar_calibracao_matriz"):
+            mod.configurar_sistema_coordenadas(
+                ponto_c=[297.0, -287.0],
+                ponto_d=[0.0, -287.0],
+                medicao_chave_y_oposta=True
+            )
+        self.assertTrue(ctrl.home_xy_referenciado)
+        self.assertTrue(mod.BORDA_Y_OPOSTA_CALIBRADA)
+
+    def test_erro_operacional_sonda_y2_exibido_ao_operador(self):
+        handler = mod.StudioRequestHandler.__new__(mod.StudioRequestHandler)
+        respostas = []
+        handler._enviar_json = lambda corpo, status=200: respostas.append((corpo,status))
+        ctrl = self.preparar_sonda_y_simulada()
+        with patch.object(mod, "_grbl_global", ctrl), \
+             patch.object(mod, "iniciar_sonda_y2_automatica",
+                          side_effect=RuntimeError("Pn:Y nao liberou apos recuo")):
+            handler._executar_acao_com_erros(
+                "calibrar_y_oposto", {"confirmado": True}
+            )
+        self.assertEqual(respostas[-1][1], 409)
+        self.assertIn("Pn:Y nao liberou", respostas[-1][0]["erro"])
 
     def test_grade_100_pontos_99_passos(self):
         self.assertEqual(mod.TAMANHO_MATRIZ, (100,100))
