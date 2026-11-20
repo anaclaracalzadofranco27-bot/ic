@@ -107,6 +107,9 @@ class PortaSimulada:
         self.rapid_override_pct = 100
         self.spindle_override_pct = 100
         self.check_mode = False
+        # Chaves VIRTUAIS apenas no simulador: testes reproduziveis sem acionar hardware.
+        self.home_simulado_x = -3.0
+        self.home_simulado_y = 3.0
         self.settings = {
             0: ("10", "Step pulse time, microseconds"),
             1: ("25", "Step idle delay, milliseconds"),
@@ -155,10 +158,14 @@ class PortaSimulada:
             wy = self.mpos[1] - self.wco[1]
             wz = self.mpos[2] - self.wco[2]
             fs = int(self.feed_atual * self.override_pct / 100.0) if self.estado in ("Run", "Jog") else 0
+            pn_simulado = ("X" if self.mpos[0] <= self.home_simulado_x else "") + (
+                "Y" if self.mpos[1] >= self.home_simulado_y else ""
+            )
+            campo_pn = f"|Pn:{pn_simulado}" if pn_simulado else ""
             status = (
                 f"<{self.estado}|MPos:{self.mpos[0]:.3f},{self.mpos[1]:.3f},{self.mpos[2]:.3f}|"
                 f"WPos:{wx:.3f},{wy:.3f},{wz:.3f}|WCO:{self.wco[0]:.3f},{self.wco[1]:.3f},{self.wco[2]:.3f}|"
-                f"FS:{fs},0|Ov:{self.override_pct},{self.rapid_override_pct},{self.spindle_override_pct}>"
+                f"FS:{fs},0|Ov:{self.override_pct},{self.rapid_override_pct},{self.spindle_override_pct}{campo_pn}>"
             )
             self.fila.append((status, 0.0))
             return
