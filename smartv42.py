@@ -2111,7 +2111,7 @@ class ControladorGRBL:
             )
         registrar_log(f"Home XY: chave {eixo} liberada em leituras consecutivas. {diagnostico}", "ok")
 
-    def _recuar_chaves_home(self, eixos, direcoes, feed, recuo, fase):
+    def _recuar_chaves_home(self, eixos, direcoes, feed, recuos, fase):
         """Recua juntas as duas chaves quando ambas estiverem acionadas.
 
         Se so uma chave foi detectada, preserva recuo exclusivamente daquele
@@ -2122,21 +2122,21 @@ class ControladorGRBL:
             raise RuntimeError("Recuo Home sem eixo selecionado.")
         if len(eixos) == 1:
             eixo = eixos[0]
-            self._recuar_chave_home(eixo, direcoes[eixo], feed, recuo, fase)
+            self._recuar_chave_home(eixo, direcoes[eixo], feed, recuos[eixo], fase)
             return
         self._estado_home_xy(fase + " (X e Y juntos)", "XY")
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
             raise RuntimeError("GRBL nao esta Idle antes do recuo XY.")
         antes = {"X": self.mpos[0], "Y": self.mpos[1]}
-        deslocamentos = {e: -direcoes[e] * recuo for e in eixos}
+        deslocamentos = {e: -direcoes[e] * recuos[e] for e in eixos}
         registrar_log(
             "HOME XY RECUO CONJUNTO: " +
             " ".join(f"{e}{deslocamentos[e]:+.3f}" for e in eixos) +
             f" F{feed:.1f}", "info",
         )
         self._jog_passo_xy_home(
-            deslocamentos, feed, passo_max=recuo, detectar_contato=False
+            deslocamentos, feed, passo_max=max(recuos.values()), detectar_contato=False
         )
         falhas = []
         for eixo in eixos:
@@ -2154,7 +2154,7 @@ class ControladorGRBL:
                 )
             if not liberada:
                 falhas.append(
-                    f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm; "
+                    f"Chave {eixo} nao liberou apos recuo de {recuos[eixo]:.1f} mm; "
                     f"MPos informado {delta:+.2f} mm; "
                     f"Pn final:{pinos_ativos(estado) or 'livre'}"
                 )
@@ -2167,7 +2167,7 @@ class ControladorGRBL:
             )
         registrar_log("Home XY: ambas as chaves liberadas apos recuo conjunto.", "ok")
 
-    def _home_xy_busca_sincronizada(self, direcoes, cursos, passo, feed, recuo):
+    def _home_xy_busca_sincronizada(self, direcoes, cursos, passo, feed, recuos):
         """Busca X/Y juntos; ao achar uma chave, recua seu eixo e o retira da busca."""
         estado = self._status_home_xy()
         if not estado.startswith("<Idle"):
@@ -2182,7 +2182,7 @@ class ControladorGRBL:
         iniciais_acionadas = {e for e in ("X", "Y") if e in pinos_iniciais}
         if iniciais_acionadas:
             self._recuar_chaves_home(
-                iniciais_acionadas, direcoes, feed, recuo,
+                iniciais_acionadas, direcoes, feed, recuos,
                 "Liberando chaves inicialmente acionadas",
             )
             estado = self._status_home_xy()
@@ -2232,8 +2232,8 @@ class ControladorGRBL:
                             "persistiu apos a parada."
                         )
                 self._recuar_chaves_home(
-                    contatos, direcoes, feed, recuo,
-                    f"Recuando {recuo:.1f} mm das chaves detectadas",
+                    contatos, direcoes, feed, recuos,
+                    "Recuando chaves detectadas",
                 )
                 encontrados.update(contatos)
                 registrar_log(
@@ -2247,7 +2247,7 @@ class ControladorGRBL:
 
     def executar_home_xy_chaves(self, direcao_x, direcao_y, curso_x, curso_y,
                                coord_x=0.0, coord_y=0.0, passo=0.5, feed=500.0,
-                               recuo=5.0, seguranca_confirmada=False):
+                               recuo=5.0, seguranca_confirmada=False, recuo_y=None):
         """Referencia X e Y por Pn: via USB; nunca executa $H nem move Z."""
         bloquear_z_fisico("Home XY em andamento: Z fisico proibido")
         self.invalidar_home_xy("Iniciando nova referencia XY")
@@ -2264,16 +2264,23 @@ class ControladorGRBL:
                 raise RuntimeError("Conexao GRBL inconsistente: Home XY bloqueado.")
             if direcao_x not in (-1, 1) or direcao_y not in (-1, 1):
                 raise ValueError("Defina expressamente a direcao de busca X e Y em coordenadas GRBL.")
+            if recuo_y is None:
+                recuo_y = recuo
             for nome, valor in (("curso X", curso_x), ("curso Y", curso_y), ("coordenada X", coord_x),
-                                ("coordenada Y", coord_y), ("passo", passo), ("feed", feed)):
+                                ("coordenada Y", coord_y), ("passo", passo), ("feed", feed),
+                                ("recuo X", recuo), ("recuo Y", recuo_y)):
                 if not math.isfinite(valor):
                     raise ValueError(f"{nome} deve ser finito.")
             if not 0.1 <= passo <= 0.5 or not 20.0 <= feed <= 600.0:
                 raise ValueError("Home requer passo 0.1..0.5 mm e feed 20..600 mm/min.")
             if not 1.0 <= curso_x <= 300.0 or not 1.0 <= curso_y <= 300.0:
                 raise ValueError("Cursos MAXIMOS de BUSCA devem estar em 1..300 mm; recuo apos contato permanece 5 mm.")
-            if recuo != 5.0:
-                raise ValueError("Esta rotina usa recuo fixo de 5.0 mm.")
+            if not 2.0 <= recuo <= 10.0 or not 2.0 <= recuo_y <= 10.0:
+                raise ValueError(
+                    "Recuos X/Y devem estar entre 2 e 10 mm. "
+                    "Verifique fisicamente o espaco livre antes de aumentar."
+                )
+            recuos = {"X": recuo, "Y": recuo_y}
             if fora_dos_limites(coord_x, coord_y):
                 raise ValueError("Posicao declarada apos o recuo nao pertence aos limites A/B/C/D.")
 
@@ -2295,11 +2302,11 @@ class ControladorGRBL:
                 f"Y {'+' if direcao_y > 0 else '-'}, "
                 f"F{feed:.1f} mm/min, busca max "
                 f"X={curso_x:.1f} mm Y={curso_y:.1f} mm, "
-                f"recuo apos contato={recuo:.1f} mm.", "info"
+                f"recuo apos contato X={recuo:.1f}, Y={recuo_y:.1f} mm.", "info"
             )
             self._home_xy_busca_sincronizada(
                 {"X": direcao_x, "Y": direcao_y},
-                {"X": curso_x, "Y": curso_y}, passo, feed, recuo
+                {"X": curso_x, "Y": curso_y}, passo, feed, recuos
             )
             if _job_abortar or abortar_job_evento.is_set():
                 raise RuntimeError("Home cancelado antes de gravar origem.")
@@ -2320,7 +2327,8 @@ class ControladorGRBL:
                 )
             self.home_xy_referenciado = True
             self.home_xy_estado.update({"concluido": True, "fase": "Home XY concluido", "erro": "", "eixo": ""})
-            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo de 5.0 mm em ambos; "
+            msg = (f"Home XY realizado: chaves X/Y detectadas, recuo "
+                   f"X={recuo:.1f} mm, Y={recuo_y:.1f} mm; "
                    f"G54 definido em X{coord_x:.3f} Y{coord_y:.3f}.")
             registrar_log(msg, "ok")
             return True, msg
@@ -4210,10 +4218,11 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
         O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
-        Quando qualquer chave aciona, cancela o jog conjunto, confirma o contato,
-        recua somente o eixo correspondente em 5,0 mm e continua com o eixo pendente.
+        Quando uma chave aciona, o Home interrompe o jog conjunto,
+        confirma o contato, recua o eixo correspondente na distancia configurada
+        e continua com o eixo pendente.
         <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
-        <strong>Verifique o espaco mecanico livre para 5 mm de recuo em ambos os eixos.</strong><br>
+        <strong>Recuo independente X e Y: 2 a 10 mm. Confira o espaco livre antes de aumentar.</strong><br>
         O curso maximo de BUSCA pode chegar a 300 mm, mas inicia em 30 mm por seguranca:
         nao e o recuo apos acionar a chave. Antes de aumentar, confira a distancia
         fisica livre, pois os hard limits estao desativados neste modo.<br>
@@ -4248,6 +4257,8 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <div class="row" style="gap:8px;flex-wrap:wrap;">
           <label>Avanco por passo (mm) <input id="home-passo" type="number" min="0.1" max="0.5" step="0.1" value="0.5" style="width:70px;"></label>
           <label>Feed do Home (mm/min) <input id="home-feed" type="number" min="20" max="600" step="10" value="500" style="width:75px;"></label>
+          <label>Recuo X (mm) <input id="home-recuo-x" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
+          <label>Recuo Y (mm) <input id="home-recuo-y" type="number" min="2" max="10" step="0.5" value="5" style="width:65px;"></label>
           <label>G54 X real apos recuo <input id="home-coord-x" type="number" step="0.1" value="0" style="width:70px;"></label>
           <label>G54 Y real apos recuo <input id="home-coord-y" type="number" step="0.1" value="0" style="width:70px;"></label>
         </div>
@@ -4257,7 +4268,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
         </label>
         <div class="row">
-          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado — recuo 5 mm</button>
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado</button>
           <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
         </div>
         <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
@@ -4465,24 +4476,26 @@ async function iniciarHomeXY() {
     alert('Configure curso de busca entre 1 e 300 mm e feed entre 20 e 600 mm/min.');
     return;
   }
-  if (!confirm('Home XY: busca X' + (Number(x) > 0 ? '+' : '-') +
-               ' e Y' + (Number(y) > 0 ? '+' : '-') +
-               ', F' + feedHome + ' mm/min.\n' +
-               'Cursos MAXIMOS de BUSCA: X=' + cursoX + ' mm, Y=' + cursoY + ' mm.\n' +
-               'O RECUO apos cada chave permanece 5 mm (NAO 300 mm).\n' +
-               'Confirme sentidos fisicos, espaco livre, parada eletrica e $21=0 / $22=0.\n' +
-               'Continuar?')) return;
+  const recuoX = Number(document.getElementById('home-recuo-x').value);
+  const recuoY = Number(document.getElementById('home-recuo-y').value);
+  if (!(recuoX >= 2 && recuoX <= 10 && recuoY >= 2 && recuoY <= 10)) {
+    document.getElementById('home-xy-status').textContent =
+      'Recuo X/Y deve estar entre 2 e 10 mm. Verifique o espaco livre.';
+    return;
+  }
   const valor = id => Number(document.getElementById(id).value);
   const resp = await apiPost('iniciar_home_xy', {
     direcao_x: Number(x), direcao_y: Number(y),
     curso_x: valor('home-curso-x'), curso_y: valor('home-curso-y'),
     passo: valor('home-passo'), feed: valor('home-feed'),
+    recuo_x: recuoX, recuo_y: recuoY,
     coord_x: valor('home-coord-x'), coord_y: valor('home-coord-y'),
     seguranca_confirmada: seguro
   });
   document.getElementById('home-confirmacao-seguranca').checked = false;
-  if (!resp.ok) alert(resp.erro || 'Falha ao iniciar Home XY.');
-  else document.getElementById('home-xy-status').textContent = resp.mensagem;
+  document.getElementById('home-xy-status').textContent =
+    resp.ok ? (resp.mensagem || 'Home XY iniciado.') :
+              (resp.erro || 'Falha ao iniciar Home XY.');
   atualizarStatus();
 }
 
@@ -4550,7 +4563,7 @@ async function selecionarFonteJob(fonte) {
 }
 
 async function removerGcodeSelecionado() {
-  if (!confirm('Remover o G-code importado da memoria? A matriz sera mantida.')) return;
+  // Remove somente o arquivo importado em memoria, sem movimentar motores.
   const resposta = await apiPost('remover_gcode_importado', { confirmado: true });
   if (!resposta.ok) { alert(resposta.erro || 'Nao foi possivel remover o G-code.'); return; }
   await carregarEstadoInicial();
@@ -4604,8 +4617,9 @@ async function importarGcodeHibrido(input) {
     return;
   }
   await carregarEstadoInicial();
-  alert('G-code validado: ' + resp.blocos + ' blocos. Parametros Z: ' +
-        (usar_parametros_arquivo ? 'arquivo' : 'configuracao atual') + '. Z nao sera enviado ao GRBL.');
+  const painel = document.getElementById('info-progresso');
+  if (painel) painel.textContent = 'G-code validado: ' + resp.blocos +
+    ' blocos. Z nao sera enviado ao GRBL.';
 }
 
 async function enviarImagemIA(input) {
@@ -5394,9 +5408,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             curso_y = float(dados.get("curso_y", 30))
             passo = float(dados.get("passo", 0.5))
             feed = float(dados.get("feed", 500))
+            recuo_x = float(dados.get("recuo_x", 5.0))
+            recuo_y = float(dados.get("recuo_y", 5.0))
             coord_x = float(dados.get("coord_x", PONTO_A[0]))
             coord_y = float(dados.get("coord_y", PONTO_A[1]))
-            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
+            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
             if not _grbl_global.ser or (not _grbl_global.modo_simulacao and not _grbl_global.conexao_real):
@@ -5405,7 +5421,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
                 curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
-                coord_x=coord_x, coord_y=coord_y, recuo=5.0,
+                coord_x=coord_x, coord_y=coord_y, recuo=recuo_x, recuo_y=recuo_y,
                 seguranca_confirmada=True,
             )
             self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
