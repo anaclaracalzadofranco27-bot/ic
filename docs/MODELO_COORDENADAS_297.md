@@ -11,7 +11,7 @@
 
 ## Mapeamento único da malha para G54
 
-No padrão inicial, A=(0,0) corresponde à linha 99, coluna 0; B=(297,0) à linha 99, coluna 99; C=(297,297) à linha 0, coluna 99; D=(0,297) à linha 0, coluna 0. Isso segue a bancada com `$3=1`: X+ vai de A para B e Y+ vai de A para D. Vista de frente, A fica embaixo à direita; por isso `ORIGEM_X_NA_DIREITA=True` espelha as colunas da imagem (coluna 0 da imagem fica do lado de B/C). As chaves X/Y do Home ficam no canto A e a chave 2 de Y na borda C/D.
+No padrão inicial, A=(0,0) corresponde à linha 99, coluna 0; B=(297,0) à linha 99, coluna 99; C=(297,297) à linha 0, coluna 99; D=(0,297) à linha 0, coluna 0. Isso segue a bancada com `$3=3`: X+ vai de A para B e Y+ vai de A para D. Vista de frente, A fica embaixo à direita; por isso `ORIGEM_X_NA_DIREITA=True` espelha as colunas da imagem (coluna 0 da imagem fica do lado de B/C). As chaves X/Y do Home ficam no canto A e a chave 2 de Y na borda C/D.
 
 Para uma malha quadrada perfeitamente alinhada, as coordenadas são:
 

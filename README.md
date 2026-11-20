@@ -56,7 +56,7 @@ G-code importado ─────────────────────
 
 Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=1` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, 297) e D = (0, 297). Com `$3=3` na placa, **X+ vai de A para B e Y+ vai de A para D**. Vista de frente, **A = (0, 0) fica embaixo à direita**, B embaixo à esquerda, C em cima à esquerda e D em cima à direita. A imagem é plotada dentro do retângulo A-B-C-D, com as colunas espelhadas (`ORIGEM_X_NA_DIREITA`) para não sair invertida. Essas posições precisam corresponder à **bancada real**.
 
 Um `calibracao_matriz.json` de versão anterior (Y negativo ou A à esquerda) é ignorado ao abrir o programa; o padrão positivo é usado e o Home automático mede C/D de novo.
 
@@ -165,14 +165,14 @@ Clique em **⌂ Home** (barra lateral ou painel UGS) e confirme a parada de emer
 
 1. Busca as chaves **sempre em X− e Y−** (até 300 mm, F500, trechos de 5 mm), recua **5 mm em X e 15 mm em Y** e grava esse ponto como **A = (0, 0)** no G54.
 2. Vai de **A até B** (X = 297).
-3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua 4 mm e grava esse Y em **C e D**.
+3. De B sobe em **Y+** procurando a **chave 2** (borda C/D). Ao tocar, cancela o jog, recua **15 mm** e grava esse Y em **C e D** (no máximo 297 mm).
 4. Vai até **D** e volta para **A**.
 
 O andamento aparece na barra de progresso e no log; **Abortar** interrompe a qualquer momento. Pré-requisitos: `$20=$21=$22=0` na placa. Se `Pn:Y` já estiver acionado no início, o programa anda **Y+ 10 mm**: se a chave soltar, era a chave 1 (lado A) e o Home segue; se continuar acionada, é a chave 2 (lado C/D), então volta **Y− 25 mm** (os 10 mm mais o recuo de 15 mm) para soltá-la e segue. Se mesmo assim não soltar, o Home para. A busca da chave 2 vai **até Y = 350 mm** (`HOME_AUTO_Y_LIMITE_CHAVE2_MM`). Se a chave acionar antes de 297 mm, C/D recebem o Y medido depois do recuo; se acionar depois, C/D ficam em 297 mm, porque a malha tem 100 pontos a 3 mm. Se não acionar até 350 mm, o Home para com "Segunda chave Y nao encontrada" e os cantos não mudam.
 
 No simulador (`--simulado` ou porta **SIMULADO**) o mesmo botão funciona: as chaves virtuais e `$3`, `$20`–`$22` são ajustados para imitar a bancada.
 
-O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de 4 mm na chave 2, perímetro a **F500** e busca da chave 2 a F400 (aproximação) / F240 (perto da chave). Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
+O **⌂ Home** é a única forma de referenciar a máquina na interface. Os parâmetros ficam fixos no código (`HOME_AUTO_*` em `smartv42_src/10_server/application.pyfrag`): busca até 300 mm, F500, trechos de 5 mm, recuo **X 5 mm / Y 15 mm**, recuo de **15 mm** na chave 2, perímetro a **F1000** e busca da chave 2 a F800 (aproximação) / F480 (perto da chave). O GRBL limita a velocidade real pelo `$110`/`$111`. Se o Home falhar, consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
 
 ### Etapa D — Testar XY sem movimentar Z
 
@@ -367,7 +367,7 @@ A máquina trabalha com motores, relés e atuadores que podem causar movimentos 
 
 **Atenção ao limite de 300 mm:** ele se refere à **busca da chave**, não ao recuo. O recuo depois do acionamento continua em 5 mm. Como o curso nominal da bancada é aproximadamente 299 mm, confira fisicamente se 300 mm são seguros e não aumente a busca antes dessa verificação. Com hard limits desabilitados ($21=0), o software não substitui uma parada elétrica independente.
 
-**Direção física do Y:** com `$3=1`, Y+ vai de A para D e o Home busca Y−. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
+**Direção dos motores:** a bancada usa `$3=3` (X e Y invertidos no GRBL). Com isso X− vai para A (direita), Y− vai para A (frente, chave Y1) e Y+ vai de A para D. Com `$3=1` o Y fica ao contrário e o Home sai em direção a D. Se o motor estiver invertido em todas as operações, existe o comando confirmado **Inverter Direção do Motor Y ($3)**. Ele inverte o bit Y da máscara de direção no GRBL, exige novo Home e nova verificação do sentido; não acione esse comando se o Y já estiver correto no firmware.
 
 ### Modo de bancada: ajustes de interface sem bypass de seguranca
 

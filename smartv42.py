@@ -92,13 +92,13 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 # -----------------------------------------------------------------------------
 ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
-SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
+SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=3 na placa
 INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
-# Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
+# Bancada com $3=3: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
 # Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
 # esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
@@ -310,7 +310,7 @@ def carregar_calibracao_matriz():
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
         if dados.get("modelo") != MODELO_CALIBRACAO:
-            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=3,
             # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
                 "Calibracao salva IGNORADA: arquivo de versao anterior "
@@ -1184,17 +1184,17 @@ class PortaSimulada:
     def configurar_chaves_bancada(self, recuo=5.0, extensao_y=297.0):
         """Chaves virtuais iguais a bancada: X e Y no canto A (lado negativo)
         e chave 2 de Y na borda C/D (lado positivo). Somente simulador.
-        Copia tambem a configuracao da placa: $3=1, $20=$21=$22=0."""
-        for numero, valor in ((3, "1"), (20, "0"), (21, "0"), (22, "0")):
+        Copia tambem a configuracao da placa: $3=3, $20=$21=$22=0."""
+        for numero, valor in ((3, "3"), (20, "0"), (21, "0"), (22, "0")):
             self.settings[numero] = (valor, self.settings[numero][1])
         self.home_simulado_x = float(self.mpos[0]) - 3.0
         self.home_simulado_y = float(self.mpos[1]) - 3.0
         self.home_simulado_y_sentido = -1
         # A fica 'recuo' mm depois do ponto onde a busca parou (ate um trecho
-        # alem da chave 1). A chave 2 comuta alguns mm antes do Y nominal de
-        # C/D para a sonda encontra-la dentro do limite.
+        # alem da chave 1). A chave 2 comuta alguns mm depois do Y nominal de
+        # C/D; com o recuo de 15 mm o cabecote volta para dentro da malha.
         self.home_simulado_y_oposto = (
-            self.home_simulado_y + float(recuo) + float(extensao_y) - 6.0
+            self.home_simulado_y + float(recuo) + float(extensao_y) + 5.0
         )
 
     def write(self, dados):
@@ -2445,13 +2445,13 @@ class ControladorGRBL:
         valores = (curso, feed, recuo, passo, feed_aproximacao)
         if not all(math.isfinite(v) for v in valores):
             raise ValueError("Parametros de sonda Y2 precisam ser finitos.")
-        if not 50.0 <= feed_aproximacao <= 600.0:
-            raise ValueError("Sonda Y2: feed de aproximacao 50..600 mm/min.")
-        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 250.0 and
-                2.0 <= recuo <= 10.0 and 0.2 <= passo <= 2.0):
+        if not 50.0 <= feed_aproximacao <= 1000.0:
+            raise ValueError("Sonda Y2: feed de aproximacao 50..1000 mm/min.")
+        if not (1.0 <= curso <= 20.0 and 50.0 <= feed <= 500.0 and
+                2.0 <= recuo <= 15.0 and 0.2 <= passo <= 2.0):
             raise ValueError(
-                "Sonda Y2: busca final 1..20 mm, feed 50..250, "
-                "recuo 2..10 mm, trecho 0,2..2 mm."
+                "Sonda Y2: busca final 1..20 mm, feed 50..500, "
+                "recuo 2..15 mm, trecho 0,2..2 mm."
             )
         bloquear_z_fisico("Sonda Y2 automatica: Z proibido")
         estado = self._status_home_xy()
@@ -4969,7 +4969,7 @@ async function homeAutomatico() {
     'HOME AUTOMÁTICO\n' +
     '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 15 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
-    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
+    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 15 mm\n' +
     '4) Vai até D e volta para A\n\n' +
     'Z fica desligado. O botão Abortar continua disponível.\n' +
     'Confirmo que existe parada de emergência física independente e área livre.'
@@ -5788,7 +5788,7 @@ def iniciar_sonda_y2_automatica(grbl, testar_perimetro=False):
 
 # -----------------------------------------------------------------------------
 # Home automatico em um clique: chaves X/Y -> A, A -> B, B -> chave 2 (C),
-# C -> D -> A. Parametros fixos da bancada ($3=1: X+ de A para B, Y+ de A
+# C -> D -> A. Parametros fixos da bancada ($3=3: X+ de A para B, Y+ de A
 # para D). O modal Home XY continua disponivel para ajustes avancados.
 # -----------------------------------------------------------------------------
 HOME_AUTO_CURSO_MAX_MM = 300.0   # cobre a malha inteira a partir de qualquer ponto
@@ -5796,10 +5796,11 @@ HOME_AUTO_FEED = 500.0
 HOME_AUTO_TRECHO_MM = 5.0
 HOME_AUTO_RECUO_X_MM = 5.0
 HOME_AUTO_RECUO_Y_MM = 15.0   # a chave Y precisa de ~15 mm para soltar
-HOME_AUTO_FEED_PERIMETRO = 500.0     # A->B, C->D, D->A
-HOME_AUTO_FEED_CHAVE2_APROX = 400.0  # B->C ate 25 mm antes de 297
-HOME_AUTO_FEED_CHAVE2_BUSCA = 240.0  # B->C perto da chave 2 (ate Y=350)
+HOME_AUTO_FEED_PERIMETRO = 1000.0    # A->B, C->D, D->A
+HOME_AUTO_FEED_CHAVE2_APROX = 800.0  # B->C ate 25 mm antes de 297
+HOME_AUTO_FEED_CHAVE2_BUSCA = 480.0  # B->C perto da chave 2 (ate Y=350)
 HOME_AUTO_Y_LIMITE_CHAVE2_MM = 350.0   # busca da chave 2 vai ate Y=350 a partir de A
+HOME_AUTO_RECUO_CHAVE2_MM = 15.0  # recuo depois de tocar a chave 2 (Y2)
 HOME_AUTO_TESTE_PNY_MM = 10.0   # Pn:Y no inicio: anda Y+ isso para saber qual chave e
 
 
@@ -5851,8 +5852,13 @@ def iniciar_home_automatico(grbl):
     def _mover(nome, ponto):
         if _abortado():
             raise RuntimeError("Home automatico abortado pelo operador.")
+        # Timeout calculado como se fosse F250: se o GRBL limitar a
+        # velocidade ($110/$111 menores que o feed pedido), nao estoura.
+        dist = math.hypot(ponto[0] - grbl.wpos[0], ponto[1] - grbl.wpos[1])
+        timeout = max(TIMEOUT_IDLE_GRBL,
+                      dist / 250.0 * 60.0 * FATOR_TIMEOUT_MOV + MARGEM_TIMEOUT_MOV_S)
         ok, info = grbl.mover_xy_sincrono(
-            ponto[0], ponto[1], feed=min(FEED_RATE, HOME_AUTO_FEED_PERIMETRO)
+            ponto[0], ponto[1], feed=HOME_AUTO_FEED_PERIMETRO, timeout=timeout
         )
         if not ok:
             raise RuntimeError(f"Movimento ate {nome} falhou: {info}.")
@@ -5935,7 +5941,8 @@ def iniciar_home_automatico(grbl):
 
             _fase("Home 3/4: B -> C procurando a chave 2 de Y")
             medicao = grbl.sondar_chave_y_oposta(
-                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA, recuo=4.0, passo=1.0,
+                curso=15.0, feed=HOME_AUTO_FEED_CHAVE2_BUSCA,
+                recuo=HOME_AUTO_RECUO_CHAVE2_MM, passo=1.0,
                 feed_aproximacao=HOME_AUTO_FEED_CHAVE2_APROX,
                 progresso=lambda t: _fase("Home 3/4: " + t),
                 y_limite_busca=float(PONTO_A[1]) + HOME_AUTO_Y_LIMITE_CHAVE2_MM,

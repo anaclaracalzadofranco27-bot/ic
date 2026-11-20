@@ -92,13 +92,13 @@ LIMITE_Y_MM = CURSO_NOMINAL_DESLOCAMENTO_MM
 # -----------------------------------------------------------------------------
 ORIGEM_X_NA_DIREITA = True   # A=(0,0) fica embaixo a DIREITA; X+ vai para a esquerda (B)
 SINAL_EIXO_X = 1.0          # +1.0 = envia X positivo | -1.0 = envia X negativo
-SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=1 na placa
+SINAL_EIXO_Y = 1.0          # +1.0 = Y positivo de A para D (0 a 297), com $3=3 na placa
 INVERTER_JOG_X = True       # True = seta → leva o cabecote para a direita (para A, X-)
 INVERTER_JOG_Y = False      # False = seta ↑ envia Y+ (de A para D)
 
 # =============================================================================
 # CALIBRAÇÃO BILINEAR PELOS 4 CANTOS DA MATRIZ 297x297 mm (X E Y POSITIVOS)
-# Bancada com $3=1: X+ vai de A para B e Y+ vai de A para D.
+# Bancada com $3=3: X+ vai de A para B e Y+ vai de A para D.
 # Home pelas chaves X/Y no canto A; a chave 2 de Y fica na borda C/D.
 # Vista de frente: A embaixo a direita, B embaixo a esquerda, C em cima a
 # esquerda, D em cima a direita (ORIGEM_X_NA_DIREITA espelha as colunas da
@@ -310,7 +310,7 @@ def carregar_calibracao_matriz():
             registrar_log(f"Calibracao salva IGNORADA: {motivo} Refaça medicao dos 4 cantos.", "erro")
             return False
         if dados.get("modelo") != MODELO_CALIBRACAO:
-            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=1,
+            # Modelo antigo (Y negativo ou A a esquerda). Na bancada com $3=3,
             # Y+ vai de A para D e A fica embaixo a direita.
             registrar_log(
                 "Calibracao salva IGNORADA: arquivo de versao anterior "

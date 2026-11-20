@@ -730,7 +730,7 @@ async function homeAutomatico() {
     'HOME AUTOMÁTICO\n' +
     '1) Busca as chaves X- e Y- (recuo X 5 mm, Y 15 mm) e define A = (0,0)\n' +
     '2) Vai de A até B\n' +
-    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 4 mm\n' +
+    '3) De B sobe em Y+ até a chave 2 (borda C/D) e recua 15 mm\n' +
     '4) Vai até D e volta para A\n\n' +
     'Z fica desligado. O botão Abortar continua disponível.\n' +
     'Confirmo que existe parada de emergência física independente e área livre.'
