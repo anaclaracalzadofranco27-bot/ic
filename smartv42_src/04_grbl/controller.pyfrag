@@ -1155,8 +1155,9 @@ class ControladorGRBL:
                 )
             if not liberada:
                 falhas.append(
-                    f"{eixo}: chave ainda acionada apos 5 mm; "
-                    f"Pn final={pinos_ativos(estado) or 'livre'}"
+                    f"Chave {eixo} nao liberou apos recuo de {recuo:.1f} mm; "
+                    f"MPos informado {delta:+.2f} mm; "
+                    f"Pn final:{pinos_ativos(estado) or 'livre'}"
                 )
         if falhas:
             raise RuntimeError(
