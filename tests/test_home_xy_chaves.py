@@ -133,6 +133,52 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertIn("Pn:XY", status)
         self.assertEqual(mod.pinos_ativos(status), "XY")
 
+    def test_sem_chave_dentro_do_curso_nao_confirma_referencia(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ctrl.ser.home_simulado_x = -999.0
+        ok, erro = self.executar_simulado(ctrl, curso_x=1.0)
+        self.assertFalse(ok)
+        self.assertIn("Chave X nao encontrada", erro)
+        self.assertFalse(ctrl.home_xy_referenciado)
+
+    def test_abortar_antes_da_busca_bloqueia_motor(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        mod.abortar_job_evento.set()
+        ok, erro = self.executar_simulado(ctrl)
+        self.assertFalse(ok)
+        self.assertIn("cancelado", erro)
+        self.assertEqual(ctrl.mpos[:2], [0.0, 0.0])
+
+    def test_home_em_background_reserva_maquina_e_limpa_abort_antigo(self):
+        ctrl = self.novo_controlador()
+        inicio = threading.Event()
+        liberar = threading.Event()
+
+        def simular_home(**kwargs):
+            inicio.set()
+            self.assertFalse(mod._job_abortar)
+            liberar.wait(2)
+            return True, "simulado"
+
+        mod._job_abortar = True
+        mod.abortar_job_evento.set()
+        with patch.object(ctrl, "executar_home_xy_chaves", side_effect=simular_home):
+            ok, msg = mod.iniciar_home_xy_em_background(ctrl)
+            self.assertTrue(ok, msg)
+            self.assertTrue(inicio.wait(2))
+            self.assertTrue(mod._operacao_manual)
+            self.assertFalse(mod.reservar_operacao_manual())
+            liberar.set()
+            import time
+            for _ in range(100):
+                if not mod._operacao_manual:
+                    break
+                time.sleep(0.01)
+            self.assertFalse(mod._operacao_manual)
+            self.assertFalse(mod.abortar_job_evento.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

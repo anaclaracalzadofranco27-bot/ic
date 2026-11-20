@@ -733,6 +733,7 @@ class ControladorGRBL:
                             registrar_log(f"Comando {cmd_limpo} executado (ok).", "ok")
                         return True, "\n".join(linhas_resposta)
                     if linha.startswith("ALARM"):
+                        self.invalidar_home_xy(f"GRBL retornou {linha}")
                         msg = f"GRBL retornou {explicar_alarme(linha)}"
                         registrar_log(msg, "erro")
                         if registrar_no_terminal:
@@ -1334,7 +1335,7 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
             "  [ORIGEM 0,0]  ORIGEM_DIREITA (Define ponto 0,0 na extremidade direita da matriz)\n"
             "                ORIGEM_ESQUERDA (Define ponto 0,0 na extremidade esquerda da matriz)\n"
             "                SINAL_X=-1 ou SINAL_X=1 (Define se para ir para a esquerda o GRBL usa X- ou X+)\n"
-            "                HOME_CAL (Calibra Home 0,0,0 na posicao atual + salva G28.1)\n"
+            "                HOME_CAL (Apenas origem manual; NAO referencia sensores nem libera jobs)\n"
             "  [PINOS Z]     PINOS (Mostra sequencia GPIO [5, 6, 16, 27, 23, 17, 24, 25] e pulsos)\n"
             "                Z1 a Z8 (Dispara nivel Z) | TESTE_Z (Testa reles 1 a 8) | SEQ_Z (Sequencia 1..8)\n"
             "                MS=10 ou MS=15,10,10 (Configura duracao do pulso ON, OFF e Pausa em ms)\n"
@@ -1486,11 +1487,13 @@ def executar_comando_terminal_integrado(texto_cmd, ctrl_grbl, ctrl_reset):
 
 def iniciar_home_xy_em_background(grbl, **parametros):
     """Reserva a maquina durante todo o Home XY. Abort continua disponivel."""
-    global _operacao_manual
+    global _operacao_manual, _job_abortar, _job_pausado
     with _job_lock:
         if _job_em_execucao or _operacao_manual:
             return False, "Maquina ocupada com job ou comando manual."
         _operacao_manual = True
+        _job_abortar = False
+        _job_pausado = False
         abortar_job_evento.clear()
     def _worker():
         global _operacao_manual

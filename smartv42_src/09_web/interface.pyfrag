@@ -215,7 +215,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌖ Calibrar Home / (0,0)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -351,7 +351,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
       </div>
       <div class="grid-4">
         <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
-        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌖ Calibrar (0,0)</button>
+        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home por sensores X/Y</button>
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -531,7 +531,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
 <div class="modal-backdrop" id="modal-home">
   <div class="modal">
     <div class="modal-header">
-      <span>⌖ Calibracao de Home e Ponto (0,0) na Extremidade Direita da Matriz</span>
+      <span>⌂ Home XY automatico nas chaves — recuo de 2 mm (sem eixo Z)</span>
       <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
     </div>
     <div class="modal-body">
