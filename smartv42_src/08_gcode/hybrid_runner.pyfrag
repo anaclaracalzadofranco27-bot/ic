@@ -115,6 +115,112 @@ def analisar_gcode_hibrido(texto):
     return programa
 
 
+
+def gerar_preview_gcode_malha(programa, max_trechos=5000):
+    """Previa SOMENTE visual do G-code importado, sem alterar a execucao.
+
+    Cada bloco Z1..Z8 define a altura do pino no ultimo XY explicito,
+    com conversao fisica pelo mesmo modelo bilinear dos quatro cantos.
+    Linhas G0/G1 sao trajetoria visual, NUNCA pulsos de Z.
+    """
+    altura, largura = TAMANHO_MATRIZ
+    matriz = [[0] * largura for _ in range(altura)]
+    tracos = []
+    x = y = None
+    anterior = None
+    z_comando = 0
+    z_visivel = 0
+    z_fora = 0
+    z_desalinhado = 0
+    movimentos_xy = 0
+    movimentos_sem_posicao = 0
+    max_trechos = max(0, int(max_trechos))
+    total_movimentos = sum(b.get("tipo") == "xy" for b in programa)
+    amostrar = max(1, math.ceil(total_movimentos / max_trechos)) if max_trechos else total_movimentos + 1
+
+    def posicao_na_grade(xx, yy):
+        # A inversa bilinear da malha evita um espelhamento diferente do
+        # caminho usado pelo arquivo gerado a partir da matriz.
+        u, v = _inverter_cantos(xx, yy)
+        if ORIGEM_X_NA_DIREITA:
+            u = 1.0 - u
+        return u * (largura - 1), v * (altura - 1)
+
+    for bloco in programa:
+        tipo = bloco.get("tipo")
+        if tipo == "xy":
+            movimentos_xy += 1
+            anterior = (x, y) if x is not None and y is not None else None
+            if bloco.get("x") is not None:
+                x = float(bloco["x"])
+            if bloco.get("y") is not None:
+                y = float(bloco["y"])
+            if x is None or y is None:
+                movimentos_sem_posicao += 1
+                continue
+            if anterior is not None and len(tracos) < max_trechos and movimentos_xy % amostrar == 0:
+                try:
+                    p0 = posicao_na_grade(*anterior)
+                    p1 = posicao_na_grade(x, y)
+                except (ValueError, ZeroDivisionError):
+                    continue
+                if all(math.isfinite(v) for v in (*p0, *p1)):
+                    g = re.match(r"^\s*G0?([01])\b", bloco.get("texto", "").upper())
+                    tracos.append([
+                        round(p0[0], 2), round(p0[1], 2),
+                        round(p1[0], 2), round(p1[1], 2),
+                        int(g.group(1)) if g else 0,
+                    ])
+        elif tipo == "z":
+            z_comando += 1
+            if x is None or y is None:
+                z_fora += 1
+                continue
+            try:
+                gx, gy = posicao_na_grade(x, y)
+            except (ValueError, ZeroDivisionError):
+                z_fora += 1
+                continue
+            if not (math.isfinite(gx) and math.isfinite(gy) and
+                    -1e-6 <= gx <= largura - 1 + 1e-6 and
+                    -1e-6 <= gy <= altura - 1 + 1e-6):
+                z_fora += 1
+                continue
+            col, lin = int(round(gx)), int(round(gy))
+            centro_x, centro_y = indice_para_mm_fisico(col, lin)
+            if math.hypot(x - centro_x, y - centro_y) > 0.35:
+                # Nao mostrar pino fisicamente inexequivel como se fosse valido.
+                z_desalinhado += 1
+                continue
+            if not ponto_na_janela_plotagem(x, y):
+                z_fora += 1
+                continue
+            matriz[lin][col] = max(matriz[lin][col], int(bloco["nivel"]))
+            z_visivel += 1
+
+    pinos_distintos = sum(bool(nivel) for linha in matriz for nivel in linha)
+    notas = []
+    if z_comando == 0:
+        notas.append("G-code sem comandos Z1..Z8/M42: trajetoria XY, sem relevo programado.")
+    if z_fora:
+        notas.append(f"{z_fora} acionamentos Z fora da malha/janela ou sem XY completo.")
+    if z_desalinhado:
+        notas.append(f"{z_desalinhado} acionamentos Z fora dos centros dos pinos (tolerancia 0,35 mm).")
+    if movimentos_sem_posicao:
+        notas.append(f"{movimentos_sem_posicao} movimentos XY iniciais sem os dois eixos definidos.")
+    if total_movimentos > max_trechos:
+        notas.append(f"Trajetoria visual reduzida para ate {max_trechos} trechos; execucao integral preservada.")
+    return {
+        "matriz": matriz,
+        "tracos": tracos,
+        "pinos_ativos": pinos_distintos,
+        "acionamentos_z": z_comando,
+        "acionamentos_z_visiveis": z_visivel,
+        "movimentos_xy": movimentos_xy,
+        "notas": notas,
+    }
+
+
 def validar_programa_antes_movimento(grbl, programa):
     """Valida as coordenadas de todos os blocos antes do primeiro movimento."""
     posicao = None
