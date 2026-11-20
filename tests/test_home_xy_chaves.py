@@ -162,6 +162,62 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertAlmostEqual(ctrl.mpos[0], 4.0, places=2)
         self.assertAlmostEqual(ctrl.mpos[1], -2.0, places=2)
 
+    def test_ambas_chaves_inicialmente_acionadas_recuam_juntas(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.mpos[:2] = [-3.0, 3.0]
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any(
+            "$J=G91 G21 X5.000 Y-5.000 F" in c for c in comandos
+        ))
+        self.assertTrue(any(
+            "$J=G91 G21 X-0.500 Y0.500 F" in c for c in comandos
+        ))
+
+    def test_duas_chaves_detectadas_no_mesmo_passo_recuam_juntas(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_x = -1.0
+        ctrl.ser.home_simulado_y = 1.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertTrue(ok, mensagem)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any(
+            "$J=G91 G21 X5.000 Y-5.000 F" in c for c in comandos
+        ))
+        self.assertAlmostEqual(ctrl.mpos[0], 4.0, places=2)
+        self.assertAlmostEqual(ctrl.mpos[1], -4.0, places=2)
+
+    def test_y_presa_apos_recuo_nao_confirma_home(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        leitura_original = ctrl._status_home_xy
+        detectou_y = [False]
+
+        def status_com_y_presa():
+            st = leitura_original()
+            pn = mod.pinos_ativos(st)
+            if "Y" in pn:
+                detectou_y[0] = True
+            if detectou_y[0] and "Y" not in pn:
+                if "|Pn:" in st:
+                    st = st.replace("|Pn:", "|Pn:Y", 1)
+                else:
+                    st = st.replace(">", "|Pn:Y>", 1)
+            return st
+
+        with patch.object(ctrl, "_status_home_xy", side_effect=status_com_y_presa):
+            ok, mensagem = self.executar_simulado(ctrl)
+        self.assertFalse(ok)
+        self.assertIn("Chave Y nao liberou", mensagem)
+        self.assertIn("MPos informado", mensagem)
+        self.assertFalse(ctrl.home_xy_referenciado)
+        self.assertGreater(ctrl.mpos[0], 0.0)
+
     def test_recuo_diferente_de_cinco_mm_nao_e_aceito(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
