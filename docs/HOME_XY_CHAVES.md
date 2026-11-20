@@ -5,13 +5,13 @@
 O novo Home XY da interface usa os pinos X/Y da CNC pela USB, sem enviar $H nem mover Z.
 
 1. Confirma o GRBL em Idle e le as chaves pelo status Pn:X e Pn:Y.
-2. Se a chave ja estiver acionada, libera primeiro com movimento limitado de 2,0 mm.
-3. Busca X e depois Y em passos de ate 0,5 mm via jog incremental $J=G91 G21, supervisionando Pn: a cada passo.
-4. Ao detectar uma chave, cancela o jog em andamento (byte 0x85), confirma contato estavel e **recua 2,0 mm** no sentido oposto.
+2. Se alguma chave estiver inicialmente acionada, libera essa chave com recuo limitado a 5,0 mm antes de iniciar a busca.
+3. Busca X e Y **juntos** usando um comando de jog XY de ate 0,5 mm por eixo em cada passo, supervisionando Pn:.
+4. Ao detectar uma das chaves, cancela o jog de **ambos os eixos** (byte 0x85), confirma o contato e **recua 5,0 mm no eixo acionado**, sem avancar no outro. Prossegue somente com os eixos restantes ate a deteccao de ambas as chaves.
 5. Confirma a liberacao de X e Y. So depois grava os comandos G21, G90, G54, G92.1 e G10 L20 P1 X... Y..., verificando WPos.
 6. Invalida o Home apos reconexao USB, soft reset, Alarm, Sleep ou alteracao externa de offsets. Jobs ficam bloqueados sem nova referencia confirmada.
 
-O recuo **comandado** eh de 2,0 mm apos a deteccao, nao uma medida metrologica do ponto mecanico exato: latencia USB, curso do switch e desaceleracao produzem alguma incerteza. Para maior repetibilidade, selecionar passos menores (0,1 mm).
+O recuo **comandado** eh de 5,0 mm apos a deteccao, nao uma medida metrologica do ponto mecanico exato: latencia USB, curso do switch e desaceleracao produzem alguma incerteza. Para maior repetibilidade, selecionar passos menores (0,1 mm).
 
 ## Condicoes de seguranca obrigatorias
 
@@ -44,17 +44,21 @@ Nao simula o motor Z, nao envia comandos Z ao GRBL, nao injeta valores falsos de
 
 Se a maquina continuar parando no primeiro passo, com motores DESENERGIZADOS verifique se `?` responde repetidamente com USB conectada, teste `Pn:X` e `Pn:Y` separadamente e procure erros de alimentacao/interferencia. Nao remova intertravamentos de curso nem trate `Pn` ausente como chave acionada.
 
-## Quando X nao libera apos recuo de 2 mm e Y nao se movimenta
+## Quando uma chave nao libera apos recuo de 5 mm
 
-A busca e sequencial: primeiro X, depois Y. Se X nao liberar, Y **nao inicia**. Nao e prova de defeito no motor Y.
+A busca e sincronizada enquanto ambos os eixos estao pendentes. Se X falhar, Y pode ja ter se movimentado, mas o Home conjunto **nao e concluido**. Uma falha de X nao significa necessariamente defeito no motor Y.
 
 A mensagem do Home passa a incluir o recuo solicitado, a diferenca de posicao **informada** pelo GRBL (MPos) e o Pn final. MPos e contabilizacao de passos do controlador, **nao** sensor de deslocamento real do carro; um motor travado ou desconectado pode gerar MPos aparentemente normal.
 
 1. Desligue a alimentacao dos motores (mantenha a USB/GRBL funcionando). Envie `?` no Terminal UGS com as duas chaves soltas. Nao deve haver `Pn:X` nem `Pn:Y`.
 2. Pressione somente a chave X: `Pn:X` deve aparecer. Solte: precisa desaparecer. Repita com a Y e `Pn:Y`. Se X continuar aparecendo solta, confira cabo, contato NO/NC, GND e polaridade `$5`.
 3. Com a CNC parada e area livre, confira se o sentido da busca X selecionado na tela realmente aponta para a chave. O recuo usa o sentido contrario.
-4. Se a posicao MPos reportar recuo ~2 mm mas X permanecer ativo, verifique fisicamente se o carro realmente afastou, o acionador da chave e a folga mecanica. Nao deduza deslocamento mecanico apenas de MPos.
+4. Se a posicao MPos reportar recuo ~5 mm mas X permanecer ativo, verifique fisicamente se o carro realmente afastou, o acionador da chave e a folga mecanica. Nao deduza deslocamento mecanico apenas de MPos.
 5. Teste Y separadamente pelo Jog Manual em passo de **0,5 mm**, baixa velocidade e apenas com area desobstruida, chaves livres, Z bloqueado e parada eletrica independente pronta. O Jog nao e um Home valido.
 6. Se o recuo informado estiver errado, confira alimentacao e habilitacao do driver, cabeamento STEP/DIR, acoplamento e configuracao dos passos por mm (`$100` para X e `$101` para Y).
 
-Nao pule a confirmacao do sensor para liberar automaticamente o Y e nao aumente o recuo sem confirmar o espaco mecanico disponivel.
+Nao pule a confirmacao do sensor nem continue movimentos depois de uma falha. Antes de usar o recuo de 5 mm, confirme espaco livre, sentido de retorno, acoplamento e limite fisico em ambos os eixos.
+
+### Teste antes da primeira execucao fisica com recuo de 5 mm
+
+O operador confirmou que 2 mm eram insuficientes para a chave X deixar de ser pressionada, mas **5 mm ainda nao foram validados nesta maquina**. Com a CNC desenergizada, verifique a folga mecanica no sentido de afastamento de cada chave e a trajetoria completa ate 5 mm. Teste os sensores individualmente com a USB, sem energia nos motores. So execute movimentos reais apos confirmar area livre, sentidos X/Y e parada de emergencia eletrica independente. O Home por USB com $21=0 nao substitui hard limits.
