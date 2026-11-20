@@ -203,6 +203,10 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
     if hasattr(grbl, "home_xy_referenciado") and not getattr(grbl, "modo_simulacao", False) and not grbl.home_xy_referenciado:
         registrar_log("Job bloqueado: primeiro execute Home XY por chaves.", "erro")
         return False
+    if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
+        if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
+            registrar_log("Reset mecanico inconsistente com modo real/simulado do GRBL; job bloqueado.", "erro")
+            return False
     if any(bloco.get("tipo") == "z" for bloco in programa):
         modo_z = obter_modo_z_efetivo()
         if modo_z not in ("simulacao", "completo"):
@@ -255,8 +259,8 @@ def executar_job_gcode_em_background(grbl, programa, reset_ctrl=None, origem="gc
                 except Exception as exc:
                     raise RuntimeError(f"Linha {bloco['linha']}: {exc}") from exc
             if AUTO_RESET_APOS_PLOT and origem == "matriz" and reset_ctrl is not None:
-                if not getattr(grbl, "modo_simulacao", False) and reset_ctrl.simulado:
-                    raise RuntimeError("Reset fisico solicitado mas Arduino de reset esta simulado.")
+                if bool(getattr(grbl, "modo_simulacao", False)) != bool(reset_ctrl.simulado):
+                    raise RuntimeError("Reset mecanico cancelado: modo GRBL e Arduino reset diferentes.")
                 ok_reset, detalhe_reset = reset_ctrl.ciclo_completo_reset()
                 if not ok_reset:
                     raise RuntimeError(f"Reset mecanico falhou: {detalhe_reset}")

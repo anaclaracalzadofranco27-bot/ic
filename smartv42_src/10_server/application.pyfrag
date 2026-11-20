@@ -397,7 +397,10 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             return
 
         if acao == "reset_mecanico":
-            if not SIMULADO and _reset_global.simulado:
+            if _grbl_global.modo_simulacao and not _reset_global.simulado:
+                self._enviar_json({"ok": False, "erro": "GRBL simulado: Arduino de reset REAL bloqueado."}, 409)
+                return
+            if not _grbl_global.modo_simulacao and _reset_global.simulado:
                 self._enviar_json({"ok": False, "erro": "Arduino de reset fisico nao conectado."}, 409)
                 return
             sub = dados.get("subcmd", "completo")

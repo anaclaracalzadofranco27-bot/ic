@@ -950,8 +950,10 @@ class ControladorGRBL:
 
 
     def invalidar_home_xy(self, motivo="Referencia XY invalidada"):
-        """Nao persiste a referencia: GRBL perde confiabilidade apos reset/alarme."""
+        """Invalida referencia e permissão de Z sem adquirir lock GPIO sob lock serial."""
+        global MODO_Z_FISICO_HABILITADO
         self.home_xy_referenciado = False
+        MODO_Z_FISICO_HABILITADO = False
         estado = getattr(self, "home_xy_estado", None)
         if estado is not None:
             estado.update({"concluido": False})
