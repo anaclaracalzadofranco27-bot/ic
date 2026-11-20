@@ -526,9 +526,11 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             curso_y = float(dados.get("curso_y", 30))
             passo = float(dados.get("passo", 0.5))
             feed = float(dados.get("feed", 500))
+            recuo_x = float(dados.get("recuo_x", 5.0))
+            recuo_y = float(dados.get("recuo_y", 5.0))
             coord_x = float(dados.get("coord_x", PONTO_A[0]))
             coord_y = float(dados.get("coord_y", PONTO_A[1]))
-            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, coord_x, coord_y)):
+            if not all(math.isfinite(v) for v in (curso_x, curso_y, passo, feed, recuo_x, recuo_y, coord_x, coord_y)):
                 self._enviar_json({"ok": False, "erro": "Parametros numericos invalidos para Home XY."}, 400)
                 return
             if not _grbl_global.ser or (not _grbl_global.modo_simulacao and not _grbl_global.conexao_real):
@@ -537,7 +539,7 @@ class StudioRequestHandler(BaseHTTPRequestHandler):
             ok, mensagem = iniciar_home_xy_em_background(
                 _grbl_global, direcao_x=direcao_x, direcao_y=direcao_y,
                 curso_x=curso_x, curso_y=curso_y, passo=passo, feed=feed,
-                coord_x=coord_x, coord_y=coord_y, recuo=5.0,
+                coord_x=coord_x, coord_y=coord_y, recuo=recuo_x, recuo_y=recuo_y,
                 seguranca_confirmada=True,
             )
             self._enviar_json({"ok": ok, "mensagem": mensagem, "erro": None if ok else mensagem},
