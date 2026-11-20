@@ -817,6 +817,8 @@ class ControladorGRBL:
         return False, "interrompido"
 
     def mover_xy_e_aguardar(self, x_mm, y_mm, timeout=None, feed=None):
+        if not SIMULADO and not self.home_xy_referenciado:
+            return False, "sem referencia XY", "Execute Home XY por chaves antes de movimentos absolutos."
         if not self.ser or (not SIMULADO and not self.conexao_real):
             return False, "Desconectado", "GRBL fisico nao conectado; simulacao proibida durante trabalho real"
         if fora_dos_limites(x_mm, y_mm):
@@ -979,11 +981,11 @@ class ControladorGRBL:
         while time.monotonic() < prazo:
             estado = self._status_home_xy()
             if eixo in pinos_ativos(estado):
-                acionou = True
-                if estado.startswith(("<Jog", "<Run")):
+                if not acionou and estado.startswith(("<Jog", "<Run")):
                     # Jog cancel e em tempo real, nao um comando de movimento adicional.
                     if not self.enviar_byte_tempo_real(b"\x85", f"Home {eixo}: chave acionada, cancelar jog"):
                         raise RuntimeError("Falhou o envio de cancelamento de jog.")
+                acionou = True
             if estado.startswith("<Idle"):
                 return acionou or eixo in pinos_ativos(estado), estado
             time.sleep(0.025)
