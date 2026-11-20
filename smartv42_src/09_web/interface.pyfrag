@@ -215,7 +215,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
   <aside class="sidebar">
     <button class="nav-btn active" onclick="fecharModais()">⊞ Visao Geral</button>
     <button class="nav-btn" onclick="iniciarJob()">▶ Plotar Matriz</button>
-    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
+    <button class="nav-btn" onclick="abrirModal('modal-home')">⌂ Home XY</button>
     <button class="nav-btn" onclick="abrirModal('modal-terminal')">⌨ Terminal UGS</button>
     <button class="nav-btn" onclick="abrirModal('modal-grbl')">⚙ Config GRBL ($$)</button>
     <button class="nav-btn" onclick="executarResetCompleto()">↻ Resetar Pinos</button>
@@ -225,7 +225,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
     <div class="sidebar-footer">
       <strong>Malha física: 100 × 100 pontos</strong><br>
       Passo nominal 3 mm · extremos separados por 297 mm.<br>
-      Home XY por chaves · recuo de 2 mm · Smart Matrix EESC-USP
+      Home XY por chaves · recuo de 5 mm · Smart Matrix EESC-USP
     </div>
   </aside>
 
@@ -344,9 +344,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn btn-sky" onclick="acaoUGS('resume')">▶‖ Resume (~)</button>
         <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar</button>
       </div>
-      <div class="grid-4">
-        <button class="btn btn-purple" onclick="abrirModal('modal-home')">⌂ Home XY (chaves)</button>
-        <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home por sensores X/Y</button>
+      <div class="grid-2">
         <button class="btn btn-amber" onclick="acaoUGS('unlock')">🔓 Kill Alarm ($X)</button>
         <button class="btn btn-rose" onclick="acaoUGS('soft_reset')">⚡ Soft Reset</button>
       </div>
@@ -385,7 +383,6 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           <button class="jog-btn" onclick="jog(1, -1)">↘</button>
         </div>
         <div style="display:flex;flex-direction:column;gap:5px;">
-          <button class="btn btn-emerald" onclick="abrirModal('modal-home')">⌂ Home XY (automatico)</button>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
             <button class="btn" onclick="acaoUGS('zerar_x')">Zerar X0</button>
             <button class="btn" onclick="acaoUGS('zerar_y')">Zerar Y0</button>
@@ -467,7 +464,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
         <button class="btn" onclick="acaoReset('descer')">↓ Descer</button>
         <button class="btn" onclick="acaoReset('subir')">↑ Subir</button>
         <button class="btn" onclick="acaoReset('varrer')">→ Varrer X'</button>
-        <button class="btn" onclick="acaoReset('home')">← Home X'</button>
+        <button class="btn" onclick="acaoReset('home')">← Retornar X' (reset)</button>
       </div>
     </div>
   </section>
@@ -545,15 +542,17 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
 <div class="modal-backdrop" id="modal-home">
   <div class="modal">
     <div class="modal-header">
-      <span>⌂ Home XY automatico nas chaves — recuo de 2 mm (sem eixo Z)</span>
+      <span>⌂ Home XY automatico nas chaves — recuo de 5 mm (sem eixo Z)</span>
       <button class="btn btn-rose" onclick="fecharModais()">✕ Fechar</button>
     </div>
     <div class="modal-body">
       <div class="coord-banner">
         <strong>HOME XY AUTOMATICO POR CHAVES — SEM $H / SEM Z</strong><br>
-        O SmartV42 busca a chave X e depois a Y, avanca em passos de ate 0,5 mm,
-        cancela o jog ao detectar Pn:X / Pn:Y e recua exatamente 2,0 mm por comando em cada eixo.
-        <strong>Y so inicia se X detectar e liberar sua chave. Se X falhar, Y fica parado por seguranca.</strong><br>
+        O SmartV42 busca X e Y simultaneamente em passos coordenados de ate 0,5 mm.
+        Quando qualquer chave aciona, cancela o jog conjunto, confirma o contato,
+        recua somente o eixo correspondente em 5,0 mm e continua com o eixo pendente.
+        <strong>Home XY so termina quando ambas as chaves estiverem livres.</strong><br>
+        <strong>Verifique o espaco mecanico livre para 5 mm de recuo em ambos os eixos.</strong><br>
         Diagnostico sem movimento: com a alimentacao dos motores desligada e USB/GRBL ligados,
         abra Terminal UGS, envie ? e pressione/solte as chaves individualmente.
         Pn:X e Pn:Y devem aparecer somente durante cada acionamento.<br>
@@ -591,7 +590,7 @@ HTML_CONCEITUAL = r"""<!DOCTYPE html>
           que impedem colisao caso a Raspberry Pi ou o GRBL falhem.
         </label>
         <div class="row">
-          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home X e Y — recuo 2 mm</button>
+          <button class="btn btn-emerald" onclick="iniciarHomeXY()">⌂ Iniciar Home XY sincronizado — recuo 5 mm</button>
           <button class="btn btn-rose" onclick="acaoUGS('abort')">■ Abortar / Reset GRBL</button>
         </div>
         <div id="home-xy-status" style="font-size:11px;font-family:monospace;">Home XY nao referenciado.</div>
@@ -777,7 +776,7 @@ async function iniciarHomeXY() {
   const seguro = document.getElementById('home-confirmacao-seguranca').checked;
   if (!x || !y) { alert('Selecione as direcoes reais de busca X e Y no GRBL.'); return; }
   if (!seguro) { alert('Confirme a existencia de parada eletrica de emergencia independente.'); return; }
-  if (!confirm('A CNC vai movimentar X e Y ATE as chaves selecionadas.\n' +
+  if (!confirm('A CNC buscara X e Y juntos, recuando cada eixo em 5 mm apos contato.\n' +
                'Verifique direcoes, percurso livre, limites maximos, parada fisica e $21=0 / $22=0.\n' +
                'Continuar?')) return;
   const valor = id => Number(document.getElementById(id).value);
@@ -1139,7 +1138,7 @@ async function atualizarStatus() {
     if (st.home_xy) {
       const h = st.home_xy;
       const resumo = h.ativo ? ('Buscando ' + (h.eixo || 'XY') + ': ' + h.fase)
-          : h.referenciado ? 'Home XY referenciado (recuo 2 mm)'
+          : h.referenciado ? 'Home XY referenciado (recuo 5 mm)'
           : h.erro ? 'Home nao concluido: ' + h.erro : 'Home XY nao referenciado';
       document.getElementById('home-xy-status').textContent = resumo;
     }
