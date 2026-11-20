@@ -157,6 +157,6 @@ def executar_job_em_background(grbl, reset_ctrl, matriz):
         return False
     return executar_job_gcode_em_background(
         grbl, programa, reset_ctrl=reset_ctrl,
-        origem="matriz", usar_parametros_arquivo=True,
+        origem="matriz", usar_parametros_arquivo=False,
         parametros_job=config_job, nome_programa="Matriz 100x100",
     )

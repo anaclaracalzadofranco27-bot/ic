@@ -135,7 +135,7 @@ def iniciar_job_selecionado(grbl, reset_ctrl, fonte_esperada=None, revisao_esper
             if not _gcode_atual:
                 return False, "G-code da matriz ainda nao foi compilado."
             programa = analisar_gcode_hibrido("\n".join(_gcode_atual))
-            nome, usar_arquivo, reset = "Matriz 100x100", True, reset_ctrl
+            nome, usar_arquivo, reset = "Matriz 100x100", False, reset_ctrl
         snapshot = capturar_snapshot_parametros_job()
         ok = executar_job_gcode_em_background(
             grbl, programa, reset_ctrl=reset, origem=fonte,
