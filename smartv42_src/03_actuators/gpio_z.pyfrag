@@ -300,12 +300,16 @@ def _acionar_pulsos_z_protegidos(sensor, num_batidas, t_on, t_off, info, t_inici
                     break
                 rele.on()
                 try:
-                    time.sleep(t_on)
+                    # Event.wait acorda imediatamente ao clicar Abortar, ao
+                    # contrario de time.sleep(t_on), que segurava o rele ligado.
+                    interrompeu = abortar_job_evento.wait(t_on)
                 finally:
                     rele.off()
+                if interrompeu or _job_abortar or not sistema_ativo.is_set():
+                    break
                 pulsos_realizados += 1
-                if i < num_batidas - 1:
-                    time.sleep(t_off)
+                if i < num_batidas - 1 and abortar_job_evento.wait(t_off):
+                    break
         finally:
             rele.off()
     else:
@@ -384,11 +388,14 @@ def testar_reles_um_a_um(tempo_ligado_s=0.5):
                 rele = reles_z[i - 1]
                 try:
                     rele.on()
-                    time.sleep(tempo_ligado_s)
+                    # Teste manual Z tambem precisa desligar ao receber Abortar.
+                    interrompeu = abortar_job_evento.wait(tempo_ligado_s)
                 finally:
                     rele.off()
-                if i < NIVEIS_MAX:
-                    time.sleep(0.3)
+                if interrompeu or _job_abortar or not sistema_ativo.is_set():
+                    return False
+                if i < NIVEIS_MAX and abortar_job_evento.wait(0.3):
+                    return False
         finally:
             if modo == "completo":
                 for rele in reles_z:

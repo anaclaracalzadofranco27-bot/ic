@@ -749,6 +749,19 @@ async function jog(dxSign, dySign) {
 }
 
 async function acaoUGS(tipo) {
+  if (tipo === 'abort') {
+    // Nao espera atualizarStatus(), fetch de telemetria ou animacao.
+    const painel = document.getElementById('info-progresso');
+    if (painel) painel.textContent = 'ABORTAR solicitado: aguarde confirmacao do GRBL; use E-stop fisico se necessario.';
+    try {
+      const resp = await apiPost('ugs_cmd', { cmd: 'abort' });
+      if (!resp.ok) alert(resp.erro || 'Falha na parada serial: USE PARADA FISICA.');
+      else if (painel) painel.textContent = resp.mensagem || 'Comando de abortamento enviado ao GRBL.';
+    } catch (erro) {
+      alert('Sem confirmacao USB. USE A PARADA FISICA de emergencia.');
+    }
+    return;
+  }
   const resp = await apiPost('ugs_cmd', { cmd: tipo });
   if (!resp.ok) alert(resp.erro || 'Comando nao executado.');
   atualizarStatus();
