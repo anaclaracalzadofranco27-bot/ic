@@ -208,6 +208,69 @@ class HomeXYChavesTeste(unittest.TestCase):
         self.assertIn("0.1..10 mm", msg)
         self.assertEqual(ctrl.mpos[:2], [0.0, 0.0])
 
+    def test_busca_continua_enfileira_jog_sem_esperar_idle(self):
+        ctrl = self.novo_controlador()
+        ctrl.enviar_comando("$22=0")
+        ctrl.ser.home_simulado_x = -8.0
+        ctrl.ser.home_simulado_y = 8.0
+        estados_na_emissao = []
+        enviar_original = ctrl.enviar_comando
+
+        def observar_envio(comando, *args, **kwargs):
+            if comando.startswith("$J=G91 G21 X-0.500 Y0.500"):
+                estados_na_emissao.append(ctrl.estado)
+            return enviar_original(comando, *args, **kwargs)
+
+        with patch.object(ctrl, "enviar_comando", side_effect=observar_envio):
+            ok, msg = self.executar_simulado(
+                ctrl, passo=0.5, curso_x=12.0, curso_y=12.0
+            )
+        self.assertTrue(ok, msg)
+        self.assertGreaterEqual(len(estados_na_emissao), 2)
+        self.assertTrue(any(st in ("JOG", "RUN") for st in estados_na_emissao[1:]))
+        self.assertTrue(ctrl.home_xy_referenciado)
+
+    def test_y_primeiro_recuo_oposto_a_busca_e_x_segue_em_fluxo(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.home_simulado_x = -8.0
+        ctrl.ser.home_simulado_y_sentido = -1
+        ctrl.ser.home_simulado_y = -2.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, msg = self.executar_simulado(
+                ctrl, direcao_y=-1, passo=1.0, feed=500.0,
+                recuo=5.0, recuo_y=7.0, curso_x=12.0, curso_y=12.0
+            )
+        self.assertTrue(ok, msg)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        self.assertTrue(any("$J=G91 G21 X-1.000 Y-1.000 " in c
+                            for c in comandos))
+        indice_recuo_y = next(
+            i for i, c in enumerate(comandos) if "$J=G91 G21 Y7.000 " in c
+        )
+        self.assertTrue(any("$J=G91 G21 X-1.000 " in c
+                            for c in comandos[indice_recuo_y+1:]))
+        self.assertFalse(any(
+            "$J=G91 G21 X-1.000 Y" in c
+            for c in comandos[indice_recuo_y+1:]
+        ))
+        self.assertNotIn("Y", ctrl.pinos_pn)
+
+    def test_y_inicialmente_pressionado_recua_antes_de_buscar_xy(self):
+        ctrl = self.novo_controlador()
+        ctrl.ser.mpos[1] = 3.0
+        ctrl.enviar_comando("$22=0")
+        with patch.object(ctrl, "enviar_comando", wraps=ctrl.enviar_comando) as enviar:
+            ok, msg = self.executar_simulado(ctrl)
+        self.assertTrue(ok, msg)
+        comandos = [c.args[0] for c in enviar.call_args_list]
+        indice_recuo = next(i for i, c in enumerate(comandos)
+                            if "$J=G91 G21 Y-5.000 " in c)
+        indice_busca = next(i for i, c in enumerate(comandos)
+                            if "$J=G91 G21 X-0.500 Y0.500 " in c)
+        self.assertLess(indice_recuo, indice_busca)
+        self.assertNotIn("Y", ctrl.pinos_pn)
+
     def test_busca_sincronizada_envia_x_e_y_no_mesmo_jog(self):
         ctrl = self.novo_controlador()
         ctrl.enviar_comando("$22=0")
