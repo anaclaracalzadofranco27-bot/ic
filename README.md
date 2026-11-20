@@ -1,532 +1,363 @@
 # Smart Matrix Studio v42
 
-Software de controle da **Smart 3D Matrix**, uma matriz tátil de 100 × 100 pontos para representação de imagens em relevo. O projeto reúne uma interface web inspirada no UGS, processamento de imagens, movimentação dos eixos **X/Y pelo GRBL** e acionamento discreto dos níveis **Z1–Z8 pelos GPIOs da Raspberry Pi**.
+Software de controle da **Smart 3D Matrix**, desenvolvido para representar imagens em relevo em uma malha tátil de **100 × 100 pontos**.
 
-> **Versão atual:** `smartv42.py`. O código-fonte editável fica em `smartv42_src/`. O executável é gerado automaticamente; não faça alterações permanentes diretamente nele.
->
-> **Estado de validação:** a geração, a compilação Python e os testes automatizados sem CNC passaram no GitHub Actions. Isso **não equivale à validação do hardware real**.
+O SmartV42 reúne processamento de imagens, geração e importação de G-code, movimentação dos eixos X/Y pelo GRBL, acionamento dos oito níveis Z pela Raspberry Pi e uma interface web de operação.
 
-## 1. Visão geral do funcionamento
+> **Comece pela simulação.** A execução com motores e solenoides reais ainda exige validação elétrica e mecânica na bancada. Os testes automáticos do GitHub não substituem esses ensaios.
 
-O sistema possui dois caminhos de entrada, que convergem para um **único executor híbrido XY/Z**:
+## Neste README
 
-1. **Imagem ou padrão gerado pela interface:** a imagem é transformada em uma matriz de níveis de relevo, convertida em pontos e executada pelo controlador da matriz.
-2. **Arquivo G-code híbrido importado:** um interpretador valida o arquivo antes da execução, envia os movimentos X/Y ao GRBL e converte as instruções Z em pulsos nos GPIOs da Raspberry Pi.
+1. [Como a máquina funciona](#1-como-a-máquina-funciona)
+2. [Instalar e abrir a versão final](#2-instalar-e-abrir-a-versão-final)
+3. [Usar o SmartV42, passo a passo](#3-usar-o-smartv42-passo-a-passo)
+4. [Entender os controles da interface](#4-entender-os-controles-da-interface)
+5. [Importar G-code sem confundir XY e Z](#5-importar-g-code-sem-confundir-xy-e-z)
+6. [Onde fica cada parte do código](#6-onde-fica-cada-parte-do-código)
+7. [Problemas comuns: como diagnosticar e corrigir](#7-problemas-comuns-como-diagnosticar-e-corrigir)
+8. [Editar, reconstruir e testar](#8-editar-reconstruir-e-testar)
+9. [Segurança e documentação técnica](#9-segurança-e-documentação-técnica)
 
-Em ambos os casos, **Z não é uma coordenada cartesiana controlada pelo GRBL**. É uma seleção de um dos oito atuadores/níveis, com parâmetros de pulso.
+---
 
-```text
-     IMAGEM / PADRÃO                         ARQUIVO .gcode / .nc / .tap / .txt
-            |                                            |
-            v                                            v
-  06_vision/pipeline.pyfrag                  08_gcode/hybrid_runner.pyfrag
-            |                                            |
-            v                                            |
-  Matriz 100 x 100 (níveis 0 a 8)                       |
-            |                                            |
-            v                                            |
-  07_trajectory/matrix_job.pyfrag                        |
-            |                                            |
-            +--------------------+-----------------------+
-                                 |
-                    Comandos e sequência de execução
-                                 |
-                   +-------------+-------------+
-                   |                           |
-                   v                           v
-         04_grbl/controller.pyfrag   03_actuators/gpio_z.pyfrag
-                   |                           |
-                   v                           v
-            GRBL / X e Y                Raspberry Pi / Z1–Z8
-                   |
-                   +--------- Interface e telemetria ----------+
-                             09_web + 10_server + 02_telemetry
-```
+## 1. Como a máquina funciona
 
-## 2. Estrutura completa do repositório
+A Raspberry Pi executa o programa `smartv42.py` e coordena três sistemas:
+
+| Sistema | Hardware | Função |
+|---|---|---|
+| **XY** | Controladora CNC com GRBL, Arduino Mega e motores de passo | Posicionar o cabeçote sobre cada ponto |
+| **Z1–Z8** | GPIOs da Raspberry Pi e módulos de relés/atuadores | Pressionar ou elevar o ponto no nível selecionado |
+| **Reset mecânico** | Arduino de reset separado, quando instalado | Reposição mecânica da matriz |
+
+O fluxo é:
 
 ```text
-ic/
-├── README.md
-├── smartv42.py                           # Executável completo, gerado pelo bot
-├── smartv42_src/                          # Fonte editável, dividido em 10 áreas
-│   ├── 01_config/
-│   │   └── config.pyfrag
-│   ├── 02_telemetry/
-│   │   └── logging.pyfrag
-│   ├── 03_actuators/
-│   │   └── gpio_z.pyfrag
-│   ├── 04_grbl/
-│   │   └── controller.pyfrag
-│   ├── 05_mechanics/
-│   │   └── reset.pyfrag
-│   ├── 06_vision/
-│   │   └── pipeline.pyfrag
-│   ├── 07_trajectory/
-│   │   └── matrix_job.pyfrag
-│   ├── 08_gcode/
-│   │   └── hybrid_runner.pyfrag
-│   ├── 09_web/
-│   │   └── interface.pyfrag
-│   └── 10_server/
-│       └── application.pyfrag
-├── tools/
-│   └── build_smartv42.py                 # Montagem do arquivo completo
-├── tests/
-│   └── test_smartv42.py                  # Testes automatizados sem hardware
-└── .github/
-    └── workflows/
-        └── build-smartv42.yml            # Bot GitHub Actions
+Imagem ou padrão ──> Matriz 100 × 100 ─┐
+                                       ├─> Preparar job ─> Executor único
+G-code importado ──────────────────────┘                       │
+                                               ┌───────────────┴───────────────┐
+                                               ▼                               ▼
+                                         GRBL: motores XY              GPIO: níveis Z1–Z8
 ```
 
-### Importante: por que os arquivos terminam em `.pyfrag`?
+**Atenção:** Z1–Z8 são **comandos discretos da aplicação**, não um eixo Z cartesiano do GRBL. Não conecte o cabeçote Z à lógica de `G1 Z...`.
 
-Os dez arquivos menores são **fragmentos de um mesmo programa Python**, e não módulos Python independentes. O gerador os concatena **na ordem fixa** acima para formar `smartv42.py`. Assim, eles compartilham o mesmo escopo global, inclusive constantes, estados, classes e funções do projeto original.
+### Dimensões e coordenadas
 
-Consequências práticas:
+| Característica | Valor |
+|---|---|
+| Pontos físicos | 100 × 100 = 10.000 |
+| Índices lógicos | 0 a 99 em cada eixo |
+| Espaçamento nominal entre centros | 3 mm |
+| Distância entre os centros extremos | 297 mm |
+| Faixa nominal de movimento informada para a bancada | 0 a 299 mm |
+| Área de plotagem padrão | Matriz inteira; sem compressão |
 
-- **Execute `smartv42.py`, não um `.pyfrag` isolado.**
-- Faça as correções no fragmento correspondente à função desejada.
-- Não altere nomes/caminhos de fragmentos ou a ordem de montagem sem atualizar `tools/build_smartv42.py`.
-- Uma função pode ser definida em uma pasta e utilizada pelas seguintes; a divisão foi feita por **responsabilidade** para facilitar manutenção, preservando a arquitetura atual.
-- O bot reconstrói o executável a cada alteração enviada para a `main` que atenda aos gatilhos do workflow. Alterações apenas no computador não acionam o bot.
+Os **299 mm não significam 300 pontos**. A área de centros físicos é de aproximadamente 297 × 297 mm. Uma janela de plotagem opcional apenas **seleciona pontos**; não altera o passo de 3 mm.
 
-## 3. O que faz cada pasta, em detalhes
+Os quatro cantos `A/B/C/D` definem a transformação entre ponto da matriz e coordenada física no **G54**. Na calibração padrão, A = (0, 0), B = (297, 0), C = (297, −297) e D = (0, −297). Essas posições precisam corresponder à **bancada real**.
 
-### `smartv42_src/01_config/` — Configurações, coordenadas e calibração
+---
 
-**Arquivo:** `config.pyfrag`
+## 2. Instalar e abrir a versão final
 
-Centraliza os imports, as constantes e os estados globais utilizados nas outras partes. Define, entre outros:
+### Requisitos
 
-- **Comunicação serial:** `PORTA_GRBL` (padrão `/dev/ttyACM0`), `PORTA_ARDUINO_RESET` (padrão `SIMULADO`), baud rate, timeouts e limites de tentativas.
-- **Dimensões e grade:** matriz de `100 × 100`, espaçamento nominal de `3 mm` e limites de X/Y.
-- **Coordenadas físicas:** pontos `PONTO_A`, `PONTO_B`, `PONTO_C`, `PONTO_D`, inversão visual dos jogs, origem à direita/esquerda e sentido dos eixos.
-- **Janela de plotagem configurada na v42:** `USAR_JANELA_PLOTAGEM = True`, X de **246 a 270 mm** e Y de **−50 a −29 mm**. Esses valores descrevem a configuração atual do software e precisam corresponder à calibração **real** antes de movimentar a bancada.
-- **Parâmetros Z:** `PINOS_GPIO_Z = [5, 6, 16, 27, 23, 17, 24, 25]`, `TEMPO_ON_Z_S`, `TEMPO_OFF_Z_S`, `PULSOS_POR_NIVEL`, polaridade do relé e pausas.
-- **Estado compartilhado:** flags de simulação, dados da interface, interpretações de status do GRBL e mensagens de erro/alarme.
+- Raspberry Pi com Python 3.11 ou versão compatível;
+- Git, Python e bibliotecas `numpy` e `Pillow`;
+- `pyserial` para conversar com a CNC real;
+- `gpiozero` e suporte GPIO compatível com a Raspberry Pi para comandar os relés reais;
+- CNC/GRBL e sensores X/Y configurados para os testes físicos.
 
-**Principais funções:** `salvar_calibracao_matriz()`, `carregar_calibracao_matriz()`, `indice_para_mm_fisico()`, `mm_fisico_para_indice()`, `obter_estado_coordenadas()`.
+`psutil`, `scipy` e `onnxruntime` são opcionais para recursos adicionais. O modelo `deeplabv3plus_int8.onnx` não está incluído no repositório.
 
-**Edite esta pasta quando:** precisar mudar portas, dimensões, orientação da matriz, posições dos quatro cantos, janela de plotagem ou parâmetros padrão de operação.
+### Instalação sugerida
 
-**Atenção:** `calibracao_matriz.json`, quando existente no diretório de execução, pode sobrescrever os valores de cantos definidos no código. Uma calibração antiga com Y positivo pode entrar em conflito com a configuração atual.
-
-### `smartv42_src/02_telemetry/` — Logs, histórico e telemetria
-
-**Arquivo:** `logging.pyfrag`
-
-Registra eventos para diagnóstico e acompanhamento da máquina. Cuida de:
-
-- Mensagens de funcionamento, avisos e erros do programa.
-- Histórico de comandos e respostas do terminal estilo UGS.
-- Leitura das últimas linhas de logs e produção de snapshots.
-- Rotinas periódicas de exportação de logs e coleta de telemetria da Raspberry Pi.
-
-**Principais funções:** `registrar_log()`, `registrar_terminal()`, `extrair_logs_recentes()`, `exportar_snapshot_de_logs()`, `monitorar_telemetria()`.
-
-**Arquivos que podem aparecer durante a execução:** `log_operacao.txt`, `log_telemetria_rasp.txt` e `log_snapshot_atual.txt`.
-
-**Edite esta pasta quando:** precisar melhorar mensagens de erro, diagnóstico de falhas, registros do terminal ou monitoramento.
-
-### `smartv42_src/03_actuators/` — Cabeçote Z, GPIOs e pulsos
-
-**Arquivo:** `gpio_z.pyfrag`
-
-É a parte que conversa diretamente com os **oito relés/saídas GPIO** responsáveis pelos níveis de relevo. O sistema associa **Z1, Z2, ..., Z8** aos GPIOs BCM **5, 6, 16, 27, 23, 17, 24 e 25**, respectivamente.
-
-Responsabilidades:
-
-- Inicializar as saídas físicas utilizando `gpiozero.OutputDevice` quando disponível.
-- Determinar o número de pulsos de cada nível, com configuração fixa ou individual.
-- Aplicar tempos ligados e desligados dos pulsos.
-- Acionar um nível específico por `acionar_eixo_z(nivel_z, ...)`.
-- Testar relés individualmente, executar sequência Z1–Z8 e permitir calibração do cabeçote.
-- Interromper uma sequência por meio do evento de cancelamento.
-- Retornar falha quando os GPIOs esperados não estão disponíveis em **modo físico**, em vez de informar sucesso fictício.
-
-**Principais funções:** `inicializar_gpio_z()`, `configurar_parametros_pulsos_z()`, `obter_pulsos_para_nivel()`, `acionar_eixo_z()`, `acionar_sequencia_cabecote()`, `testar_reles_um_a_um()`.
-
-**Edite esta pasta quando:** quiser corrigir problemas de relés, ordem dos GPIOs, duração ou quantidade de pulsos e atuação Z. **Não** implemente aqui movimentos G-code de X/Y.
-
-### `smartv42_src/04_grbl/` — Controlador dos eixos X e Y
-
-**Arquivo:** `controller.pyfrag`
-
-Concentra a comunicação com o firmware **GRBL 1.1** da controladora CNC e os comandos relacionados a movimentação.
-
-Responsabilidades:
-
-- Abrir, manter e fechar a conexão serial com GRBL; também possui porta simulada.
-- Enviar comandos e interpretar respostas `ok`, `error` e `ALARM`.
-- Ler e explicar status, estados de execução, coordenadas e sinais de limite.
-- Executar movimentos X/Y e aguardar a conclusão antes da próxima etapa.
-- Disponibilizar jog, homing, zero de trabalho, G28/G30, WCS, configurações e comandos de console compatíveis com o projeto.
-- Validar limites e cantos antes dos deslocamentos.
-- Interpretar comandos de terminal especiais, inclusive `Z1` a `Z8`, que são desviados para o cabeçote GPIO.
-
-**Elementos principais:** `ControladorGRBL`, `PortaSimulada`, `fora_dos_limites()`, `validar_cantos()`, `executar_comando_terminal_integrado()`.
-
-**Edite esta pasta quando:** ocorrerem problemas de conexão GRBL, travamento em `Idle`, alarmes, jog, home, sentindo de movimentação ou comandos manuais X/Y.
-
-**Separação essencial:** o GRBL não deve receber comandos `M42` do formato híbrido nem comandos `G1 Z...` gerados para um eixo Z cartesiano.
-
-### `smartv42_src/05_mechanics/` — Reset mecânico superior
-
-**Arquivo:** `reset.pyfrag`
-
-Controla um **Arduino Mega 2560 separado**, utilizado no mecanismo de reset superior da matriz: atuadores lineares e movimento do eixo **X'** do sistema de reposição.
-
-Responsabilidades:
-
-- Estabelecer comunicação serial com a placa de reset.
-- Enviar comandos individuais para subir/descer atuadores e deslocar/retornar X'.
-- Executar o ciclo completo de reset de acordo com o firmware do Arduino.
-- Manter estados de simulação e mensagens de execução.
-
-**Classe principal:** `ControladorResetArduino`.
-
-**Comandos previstos no código:** `D`, `D1`, `D2`, `M1_01`, `M1_00`, `M2_01`, `M2_00` e comandos legados de reset. A disponibilidade efetiva depende do firmware instalado no Arduino.
-
-**Edite esta pasta quando:** o ciclo de reposição mecânica, a serial do Arduino ou as etapas de subir/descer e varrer apresentarem problemas.
-
-### `smartv42_src/06_vision/` — IA, segmentação e profundidade
-
-**Arquivo:** `pipeline.pyfrag`
-
-Converte imagens em um mapa numérico de níveis de relevo. Abrange:
-
-- Carregamento opcional do modelo **DeepLabV3+ INT8** por `onnxruntime` (arquivo configurado: `deeplabv3plus_int8.onnx`).
-- Tratamento e preparação de imagens para a matriz.
-- Segmentação alternativa quando o modelo ONNX não está disponível, utilizando procedimentos de limiarização.
-- Conversão do objeto/imagem em níveis discretos de altura, por modos de **distância**, **luminância** ou **binário**.
-- Criação de padrões de teste, como flor, domo, rampa e logo USP.
-
-**Principais funções:** `carregar_sessao_onnx()`, `processar_imagem_para_matriz()`, `calcular_niveis_por_distancia()`, `calcular_niveis_por_luminancia()`, `gerar_padrao_teste()`.
-
-**Edite esta pasta quando:** quiser corrigir a interpretação das imagens, a seleção de objetos, os valores de profundidade ou os desenhos de teste. O modelo ONNX não foi incluído no repositório: caso deseje utilizá-lo, forneça um modelo compatível.
-
-### `smartv42_src/07_trajectory/` — Planejamento e execução da matriz
-
-**Arquivo:** `matrix_job.pyfrag`
-
-Transforma a matriz 100 × 100 em uma sequência física de movimentos e acionamentos. Responsabilidades:
-
-- Identificar apenas os pontos com nível acima de zero.
-- Ordenar a visita aos pontos por varredura **serpentina**, considerando a configuração de origem.
-- Converter os índices da imagem em coordenadas reais X/Y.
-- Compilar uma representação textual da trajetória em G-code híbrido.
-- Executar o trabalho diretamente a partir da matriz, coordenando movimentos X/Y, acionamento Z e eventual reset.
-- Manter o estado compartilhado de job, progresso, pausa e cancelamento.
-
-**Principais funções:** `montar_pontos()`, `compilar_matriz_para_estudio()`, `executar_job_em_background()`.
-
-**Edite esta pasta quando:** precisar corrigir ordem de plotagem, mapeamento dos pontos, planejamento de trajetória, progresso da execução por imagem ou retorno à origem.
-
-**Importante:** o caminho da matriz prepara os blocos de movimentos e chama o mesmo motor híbrido usado para o G-code importado. Assim, pausa, abortamento e Z obedecem às mesmas regras.
-
-### `smartv42_src/08_gcode/` — Leitor e executor G-code híbrido
-
-**Arquivo:** `hybrid_runner.pyfrag`
-
-Separa os movimentos cartesianos do acionamento físico Z. Agora é o **executor único** de trabalhos gerados a partir de matrizes e de arquivos G-code importados.
-
-Etapas:
-
-1. **Análise:** `analisar_gcode_hibrido(texto)` lê o conteúdo inteiro e verifica a sintaxe. Comandos desconhecidos são rejeitados antes do início do job.
-2. **Classificação:** separa configurações, movimentos X/Y, marcadores e comandos Z discretos.
-3. **Movimento:** `executar_bloco_hibrido()` envia X/Y ao controlador GRBL.
-4. **Sincronização:** antes de acionar Z, confirma que o deslocamento terminou e que o GRBL está em `Idle`.
-5. **Atuação:** para Z1–Z8, chama o mecanismo do arquivo `03_actuators/gpio_z.pyfrag`, sem enviar Z ao GRBL.
-6. **Execução:** `executar_job_gcode_em_background()` processa os blocos em uma thread, compartilhando a trava de jobs e verificando pausa/cancelamento.
-
-**Principais funções:** `validar_janela_calibrada()`, `analisar_gcode_hibrido()`, `executar_bloco_hibrido()`, `executar_job_gcode_em_background()`.
-
-**Comandos aceitos:** o subconjunto implementado do formato Smart Matrix (G21, G90, G54, movimentos G0/G1 com X/Y/F, G4 P0, marcadores M3 S1000/M5, `Z1`–`Z8` e `M42 P1 ; Z_LEVEL=N`). **Não é um interpretador CNC genérico.** Em particular, `G1 Z4` e `G91` são rejeitados.
-
-**Edite esta pasta quando:** arquivos G-code não forem reconhecidos, houver erro de sintaxe, problemas de sincronização entre XY e Z ou necessidade de adicionar suporte explícito a um formato seguro.
-
-### `smartv42_src/09_web/` — Interface gráfica
-
-**Arquivo:** `interface.pyfrag`
-
-Contém o HTML/CSS/JavaScript da interface web do Studio, embutido na variável `HTML_CONCEITUAL`, além da classe de servidor HTTP com suporte a threads.
-
-Na interface, o usuário pode:
-
-- Acompanhar os estados da máquina e as coordenadas.
-- Executar jog X/Y, acessar comandos de GRBL e o terminal estilo UGS.
-- Testar os oito níveis Z e configurar duração/quantidade de pulsos.
-- Calibrar a área de trabalho e a origem.
-- Gerar padrões, carregar imagens, escolher a representação de profundidade.
-- **Importar G-code híbrido** e executar jobs.
-- Visualizar o mapa tátil em 2D/3D e uma prévia das instruções.
-- Exportar o **G-code completo**, não somente as linhas exibidas na prévia.
-- Enviar comandos ao mecanismo de reset.
-
-**Edite esta pasta quando:** quiser mudar botões, layout, aparência, textos, gráficos, eventos JavaScript e formulários. Alterações de lógica física de motores ou relés devem ficar nos respectivos controladores.
-
-### `smartv42_src/10_server/` — Servidor HTTP, API e inicialização
-
-**Arquivo:** `application.pyfrag`
-
-Conecta o frontend ao restante do sistema. Responsabilidades:
-
-- Inicializar as conexões GRBL, GPIO e Arduino de reset.
-- Carregar calibração existente e um padrão inicial.
-- Publicar a interface em um servidor HTTP local.
-- Oferecer os endpoints `GET /api/matrix`, `GET /api/status` e `POST` de ações da interface.
-- Receber uploads de imagens e de G-code híbrido.
-- Selecionar o executor certo para o botão de iniciar: **matriz sintetizada** ou **G-code importado**.
-- Atualizar o estado global, conectar portas, encaminhar comandos de console e reset.
-- Encerrar conexões ao finalizar o programa.
-
-**Elementos principais:** `StudioRequestHandler`, `atualizar_matriz_global()`, `main()`.
-
-**Ações relevantes na API:** `carregar_gcode`, `iniciar_job`, `testar_z`, `jog`, `terminal_cmd`, `upload_imagem`, `config_coordenadas`, `config_cabecote`, `reset_mecanico`, `gerar_padrao`.
-
-**Edite esta pasta quando:** um botão chamar a função errada, houver falhas nos endpoints, erros ao importar dados, problemas ao iniciar jobs ou dificuldades na inicialização e no encerramento do servidor.
-
-## 4. Outras pastas e arquivos
-
-### `tools/` — Gerador do programa final
-
-`tools/build_smartv42.py` lê a lista fixa `PARTES` e concatena os dez fragmentos na ordem esperada. Depois, compila o texto gerado para verificar sintaxe e grava `smartv42.py`.
-
-Comandos:
+No terminal da Raspberry Pi:
 
 ```bash
-python3 tools/build_smartv42.py          # Gera/atualiza smartv42.py
-python3 tools/build_smartv42.py --check  # Confere se o gerado está sincronizado
-python3 -m py_compile smartv42.py       # Verifica sintaxe, sem executar motores
-```
+sudo apt update
+sudo apt install -y git python3 python3-venv
 
-A opção `--check` **não** altera o executável: ela falha se detectar divergência.
-
-### `tests/` — Testes automatizados
-
-`tests/test_smartv42.py` preserva os testes anteriores. `tests/test_regression_smartv42.py` adiciona regressões de segurança, conexão, coordenadas, parâmetros e reset, sempre sem hardware real. Os testes cobrem, entre outros:
-
-- Interpretação das instruções `M42` emitidas pelo compilador.
-- Rejeição de Z cartesiano e comandos não suportados.
-- Garantia de que `M42` **não seja transmitido ao GRBL**.
-- Bloqueio de atuação Z fora da janela permitida.
-- Detecção de calibração incompatível com Y negativo.
-
-Execute:
-
-```bash
-python3 -m unittest discover -s tests -v
-```
-
-**Limitação:** os testes não comprovam a eletrônica, a fiação, os sensores nem a cinemática reais.
-
-### `.github/workflows/` — Bot automático do GitHub
-
-`build-smartv42.yml` é um fluxo do **GitHub Actions**. Sempre que houver um push para `main` alterando `smartv42_src/**`, o próprio gerador, testes ou o workflow, ele:
-
-1. Baixa a revisão do repositório.
-2. Prepara Python.
-3. Reconstrói `smartv42.py`.
-4. Verifica a sintaxe.
-5. Instala dependências mínimas para testar.
-6. Executa a suíte de testes sem hardware.
-7. Se tudo passar e o executável tiver mudado, cria um commit com `github-actions[bot]`.
-
-O workflow também permite disparo manual em **GitHub → Actions → Bot Smart Matrix 42**.
-
-O bot precisa de **Actions habilitado** e permissão `contents: write`. O commit automático usa `[skip ci]` para evitar um loop de execuções. **Se os testes falharem, a etapa de publicação não será executada.**
-
-### `smartv42.py` — Programa para executar
-
-É a concatenação gerada dos dez fragmentos, não uma implementação independente. A execução normal usa este arquivo:
-
-```bash
-python3 smartv42.py --simulado
-```
-
-Não remova este arquivo e não faça correções permanentes nele. Para modificá-lo, edite `smartv42_src/` e reconstrua.
-
-## 5. Instalação e primeira execução
-
-Recomendado: Raspberry Pi com Python 3.11 ou versão compatível com as bibliotecas utilizadas. O controlador real depende da configuração da bancada.
-
-```bash
 git clone https://github.com/anaclaracalzadofranco27-bot/ic.git
 cd ic
 
-# Instale as dependências básicas de análise e simulação
-python3 -m pip install numpy Pillow pyserial psutil
+python3 -m venv .venv
+source .venv/bin/activate
 
-# Somente na Raspberry Pi com GPIO configurado:
-# python3 -m pip install gpiozero
+python -m pip install --upgrade pip
+python -m pip install numpy Pillow pyserial psutil
 
-# Opcionais para IA e cálculo de distância:
-# python3 -m pip install onnxruntime scipy
+# Para a Raspberry Pi com cabeçote físico, após preparar o suporte GPIO:
+# python -m pip install gpiozero
+```
 
-# Verifique geração e testes antes de operar
+O driver de GPIO adequado depende da versão da Raspberry Pi e do sistema operacional. Instale e valide esse suporte **antes** de energizar os atuadores; a instalação da biblioteca, sozinha, não comprova que os relés estão seguros.
+
+### Primeiro teste: somente simulação
+
+```bash
 python3 tools/build_smartv42.py --check
-python3 -m py_compile smartv42.py
 python3 -m unittest discover -s tests -v
-
-# Primeira execução, sem acionamento físico
 python3 smartv42.py --simulado
 ```
 
-A interface é servida por padrão em `127.0.0.1` (endereço local da máquina). O navegador pode abrir automaticamente; o endereço exato aparece no log. Em uma Raspberry Pi acessada remotamente, a interface **não ficará automaticamente acessível pela rede**, pois está vinculada ao loopback local.
+Abra no navegador o endereço informado pelo terminal, semelhante a:
 
-**Parâmetros CLI disponíveis:**
+```text
+http://127.0.0.1:PORTA_INFORMADA
+```
 
-| Opção | Objetivo |
-|---|---|
-| `--simulado` | Não acionar a bancada física durante testes |
-| `--porta /dev/ttyACM0` | Escolher a porta serial do GRBL |
-| `--origem-esquerda` | Selecionar a origem X na esquerda |
-| `--sinal-x -1` | Inverter o sinal de X usado pelo programa |
-| `--http-port 8000` | Escolher a porta local do servidor HTTP (0 = automática) |
+A porta HTTP é escolhida automaticamente por padrão. Para usar uma porta fixa:
 
-Para uso físico, depois de revisar a calibração, os comandos GPIO e a segurança mecânica, um exemplo é `python3 smartv42.py --porta /dev/ttyACM0`. **Isso não constitui autorização para energizar os atuadores sem comissionamento.**
+```bash
+python3 smartv42.py --simulado --http-port 8000
+```
 
-## 6. Como editar sem perder a atualização automática
+Nesse caso, abra `http://127.0.0.1:8000` **na mesma máquina**. O servidor usa `127.0.0.1`: a interface não fica automaticamente disponível em outro computador da rede.
 
-Exemplo: corrigir o tempo de pulso de Z.
+**Na simulação, não é necessário conectar a CNC.** Os movimentos XY e os níveis Z são virtuais.
 
-1. Abra `smartv42_src/03_actuators/gpio_z.pyfrag` no GitHub.
-2. Faça a alteração e salve com um commit na branch `main`.
-3. Abra a aba **Actions** do repositório.
-4. Aguarde o workflow `Bot Smart Matrix 42 - reconstruir codigo` terminar.
-5. Confira o resultado dos testes e o commit automático de `smartv42.py`.
+### Iniciar com a CNC real
 
-Exemplo: mudar um botão da interface. Edite `smartv42_src/09_web/interface.pyfrag` e use a mesma rotina; não altere o HTML embutido no executável gerado.
+**Somente após verificar a proteção elétrica, os sensores e a direção dos motores:**
 
-**Se o bot não reconstruir**, confira: a alteração foi enviada para `main`? O GitHub Actions está habilitado? O workflow concluiu com sucesso? Ele tem permissão de escrita? Há falhas em `tests/`?
+```bash
+python3 smartv42.py --porta /dev/ttyACM0
+```
 
-## 7. Exemplos de G-code e tratamento correto do Z
+A porta padrão é `/dev/ttyACM0`, mas pode ser outra, como `/dev/ttyUSB0`. Confira em `ls /dev/ttyACM* /dev/ttyUSB*`, se os dispositivos existirem, e selecione a porta correta também na interface.
 
-Trecho compatível com o interpretador híbrido:
+Para configurar um Arduino de reset físico separado, o programa aceita a variável de ambiente `SMART_MATRIX_PORTA_RESET`; por padrão, o reset começa simulado.
+
+---
+
+## 3. Usar o SmartV42, passo a passo
+
+### Etapa A — Aprender no modo simulado
+
+1. Inicie com `python3 smartv42.py --simulado`.
+2. No painel direito, selecione um padrão como **Flor**, **Domo** ou **Rampa X**; ou use **Carregar Imagem IA (ONNX)**.
+3. Escolha a representação de profundidade: **Distância**, **Luminância** ou **Binário**. O programa usa processamento alternativo quando o modelo ONNX opcional não está disponível.
+4. Confira a matriz 2D/3D e a prévia do G-code.
+5. Na seção **Fonte da próxima plotagem**, selecione **Matriz 100 × 100** e clique em **Iniciar**.
+6. Acompanhe o progresso. Teste **Hold**, **Resume** e **Abortar**.
+
+O objetivo dessa etapa é entender a interface e o sequenciamento sem movimentar a bancada.
+
+### Etapa B — Preparar a CNC real, com Z desabilitado
+
+1. **Desenergize os atuadores Z** e verifique a parada elétrica de emergência independente.
+2. Conecte a CNC/GRBL à Raspberry Pi pela USB; escolha a porta correta no painel **Portas USB**.
+3. Abra **Terminal UGS** e envie `?`. O estado normal de repouso deve indicar `Idle`.
+4. Com os motores sem potência, confirme o reconhecimento de cada sensor: pressionar X deve indicar `Pn:X`; pressionar Y, `Pn:Y`. Solte as chaves depois.
+5. Confira as configurações usando `$$`. A rotina de Home XY por software exige **`$22=0` e `$21=0`**, e verifica também a condição de `$20`.
+6. Verifique a direção física real de X e Y antes de permitir uma busca automática.
+
+**Aviso de segurança:** `$21=0` desabilita os limites rígidos do GRBL. Quando essa configuração é usada, as chaves X/Y **não protegem automaticamente contra ultrapassagem de curso**. O Home por USB/Linux não é uma função de segurança. **Não execute com motores energizados sem proteção mecânica e parada elétrica independente.** O programa não altera esses parâmetros automaticamente.
+
+### Etapa C — Fazer o Home XY pelas chaves
+
+1. Clique em **Home XY (chaves)**.
+2. Selecione os sentidos **X+/X−** e **Y+/Y−** conforme a movimentação física comprovada.
+3. Configure um **curso máximo** dentro da região realmente livre da máquina. Comece com curso e velocidade reduzidos.
+4. Escolha o passo da busca (**0,1 a 0,5 mm**) e o avanço (**20 a 150 mm/min**).
+5. Informe as coordenadas **G54 X/Y da posição final após o recuo**.
+6. Depois de confirmar fisicamente os intertravamentos, marque a confirmação na interface e clique em **Iniciar Home X e Y — recuo 2 mm**.
+7. Aguarde a indicação **Home XY concluído**.
+
+O programa procura primeiro a chave **X** e depois a **Y**, observa `Pn:` e comanda um **recuo de 2 mm** após detectar cada sensor. Não utiliza `$H` nem movimenta Z.
+
+**Importante:** a posição do cabeçote após recuar 2 mm **não é automaticamente o ponto A da matriz**. Só use G54 = (0, 0) se essa posição realmente coincidir com A; caso contrário, informe a posição medida. A repetibilidade do disparo e a precisão dos recuos precisam ser testadas mecanicamente.
+
+Se o Home falhar, interrompa a operação e consulte o motivo no painel. Não substitua o Home por zeramento manual com `G92`.
+
+### Etapa D — Testar XY sem movimentar Z
+
+1. Mantenha o modo **Somente XY (bloquear Z)**.
+2. Verifique que o Home está válido e que as chaves foram liberadas.
+3. Faça deslocamentos pequenos com **Jog Manual**, observando o sentido efetivo.
+4. Compare dois centros adjacentes conhecidos: devem estar separados por aproximadamente **3 mm**.
+5. Confira pontos e cantos apenas dentro de percursos livres já verificados.
+
+Esse modo é destinado ao comissionamento dos motores; trabalhos que contenham acionamentos Z ficam bloqueados enquanto Z estiver desabilitado.
+
+### Etapa E — Habilitar Z e realizar a primeira plotagem física
+
+**Execute esta etapa somente após validar os sistemas elétrico, mecânico e XY, com alimentação e proteção adequadas.**
+
+1. Verifique a ordem dos GPIOs, a polaridade dos relés e o desligamento seguro em repouso.
+2. Confirme **Home XY concluído**, GRBL em `Idle` e sensores liberados.
+3. No painel **Cabeçote Z**, clique em **Habilitar Z físico** e confirme a ação.
+4. Ajuste a quantidade de pulsos e os tempos de ligação/desligamento.
+5. Faça primeiro um **teste individual controlado**, sem carga mecânica perigosa.
+6. Escolha um padrão pequeno previamente conferido, selecione sua fonte e clique em **Iniciar**.
+7. Observe o progresso; use **Hold** para pausar e **Abortar** se houver comportamento inesperado.
+
+**Ao reconectar a USB, reiniciar o GRBL ou iniciar outro Home XY, o SmartV42 volta a bloquear Z.** É necessário refazer as verificações e habilitá-lo novamente.
+
+### Etapa F — Trabalhar com uma imagem ou G-code importado
+
+**Para uma imagem:** clique em **Carregar Imagem IA (ONNX)**, selecione o modo de profundidade, confira o resultado, escolha **Matriz 100 × 100** como fonte e inicie somente após validar o posicionamento.
+
+**Para um G-code:** clique em **Importar G-code X/Y + Z**, selecione um arquivo `.gcode`, `.nc`, `.tap` ou `.txt`, revise a prévia, escolha **G-code importado** e inicie.
+
+- **Z do arquivo desmarcado:** pulsos/tempos Z vêm da configuração do painel registrada no início do trabalho.
+- **Z do arquivo marcado:** valores Z explicitamente presentes no arquivo prevalecem; os ausentes usam a configuração registrada.
+- O arquivo importado **não é apagado** ao alterar uma imagem ou gerar padrão. Para apagá-lo, use **Remover G-code**.
+- O arquivo importado fica **somente na memória do servidor**; após reiniciar o SmartV42, importe-o novamente.
+- A fonte, o programa e os parâmetros são copiados/congelados ao iniciar o job. Se a interface estiver desatualizada, o servidor poderá recusar a execução até atualizar o estado.
+
+---
+
+## 4. Entender os controles da interface
+
+| Painel ou controle | O que faz | Quando usar |
+|---|---|---|
+| **Portas USB → Conectar** | Seleciona o GRBL e o Arduino de reset | Ao iniciar ou reconectar dispositivos |
+| **Visor WPos / MPos** | Mostra posição de trabalho / máquina | Antes e durante movimentos |
+| **Terminal UGS** | Consulta estado, alarmes e parâmetros do GRBL | Diagnóstico e configuração |
+| **Home XY (chaves)** | Busca X/Y e recua 2 mm em cada eixo | Antes de movimentação automática real |
+| **Jog Manual** | Move X/Y em pequenos incrementos | Verificar sentidos e calibração |
+| **Somente XY (bloquear Z)** | Proíbe pulsos nos GPIOs Z | Testes de movimento |
+| **Habilitar Z físico** | Autoriza o cabeçote real com validações | Somente após comissionamento e Home |
+| **Padrões / Carregar Imagem** | Gera a matriz de relevo | Produzir um trabalho |
+| **Importar G-code** | Lê e valida instruções híbridas | Utilizar trajetória externa |
+| **Fonte da próxima plotagem** | Escolhe matriz ou arquivo importado | Antes de pressionar Iniciar |
+| **Iniciar / Hold / Resume / Abortar** | Controla a execução | Durante jobs |
+
+O botão **Iniciar** usa a fonte indicada em **Fonte da próxima plotagem**; não presume que o último arquivo visualizado seja automaticamente a fonte ativa.
+
+---
+
+## 5. Importar G-code sem confundir XY e Z
+
+O SmartV42 lê um **subconjunto próprio de G-code híbrido**, não qualquer programa CNC.
+
+Exemplo didático com uma posição central válida na calibração padrão:
 
 ```gcode
 G21
 G90
 G54
-G1 X258 Y-39.5 F900
-G4 P0
-M42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=4 ON_MS=10 OFF_MS=10
-G1 X261 Y-39.5 F900
-G4 P0
-Z2
-M5
-G0 X0 Y0
+G1 X3 Y-297 F120
+Z4
+G1 X6 Y-297 F120
+M42 P1 ; Z_LEVEL=2 GPIO=6 PULSOS=2 ON_MS=10 OFF_MS=10
 ```
 
-Interpretação:
+- `G1 X... Y... F...`: movimentação XY pelo GRBL.
+- `Z4`: solicita o nível 4 do cabeçote GPIO, **não** o movimento cartesiano Z.
+- `M42 P1 ; Z_LEVEL=2 ...`: instrução interpretada pelo **SmartV42**, nunca encaminhada diretamente ao GRBL.
+- Um acionamento Z precisa ser precedido por uma posição XY válida, próxima do **centro de um ponto real** (tolerância de validação do código: 0,35 mm).
+- O arquivo é verificado antes de movimentar; comandos não suportados, coordenadas fora dos cantos e GPIOs incompatíveis são recusados.
 
-- `G1 X258 Y-39.5 F900`: posição X/Y a ser atingida pelo GRBL.
-- `G4 P0`: marcador de sincronização do formato.
-- `M42 P1 ; Z_LEVEL=4 ...`: **instrução de aplicação**, não comando para transmitir ao firmware GRBL. O interpretador escolhe o nível Z4 e aciona o GPIO correspondente.
-- `Z2`: comando abreviado para o atuador do nível 2.
-- `G0 X0 Y0`: movimento XY de retorno; **não aciona Z**.
+**Não envie esse arquivo diretamente ao Universal Gcode Sender ou a outro transmissor genérico.** Use o importador do SmartV42. Não substitua `Z4` por `G1 Z4`.
 
-O leitor valida o arquivo antes do primeiro movimento; as coordenadas e as condições operacionais são verificadas também durante a execução. Z só deve disparar depois de XY terminar e o GRBL estar em `Idle`.
+---
 
-Não envie diretamente o arquivo híbrido exportado a um transmissor G-code convencional esperando que `M42` funcione no GRBL 1.1 padrão. Use o importador do próprio Studio. Nunca substitua os acionamentos por `G1 Z...` sem redesenhar a arquitetura de hardware.
+## 6. Onde fica cada parte do código
 
-## 8. Diagnóstico rápido: onde corrigir cada tipo de problema
+O código editável está em `smartv42_src/`. As **dez partes** são fragmentos `.pyfrag` concatenados em uma ordem fixa para gerar `smartv42.py`.
 
-| Problema observado | Primeiro local para investigar |
-|---|---|
-| Porta serial, limites, Y invertido, calibração antiga | `01_config/config.pyfrag` |
-| Logs insuficientes ou mensagens confusas | `02_telemetry/logging.pyfrag` |
-| Z não pulsa, relé incorreto ou tempo de pulso errado | `03_actuators/gpio_z.pyfrag` |
-| Movimento X/Y não inicia, homing, alarme GRBL, jog | `04_grbl/controller.pyfrag` |
-| Atuadores de reset ou eixo X' não respondem | `05_mechanics/reset.pyfrag` |
-| Imagem não segmenta ou profundidade incorreta | `06_vision/pipeline.pyfrag` |
-| Trajetória serpentina ou ordem dos pontos incorreta | `07_trajectory/matrix_job.pyfrag` |
-| G-code importado rejeitado ou Z tratado como coordenada | `08_gcode/hybrid_runner.pyfrag` |
-| Erro visual, botão, gráfico, texto ou layout | `09_web/interface.pyfrag` |
-| Upload, endpoint, inicialização ou seleção de job | `10_server/application.pyfrag` |
-| Arquivo gerado desatualizado | `tools/build_smartv42.py` e workflow |
-| Teste automatizado falhando | `tests/test_smartv42.py` e módulo sob teste |
+| Parte | Arquivo | Responsabilidade — e onde corrigir |
+|---|---|---|
+| **01 — Config** | `01_config/config.pyfrag` | Dimensões, cantos A/B/C/D, parâmetros, portas e mapeamento de coordenadas |
+| **02 — Telemetria** | `02_telemetry/logging.pyfrag` | Logs, mensagens de erro, histórico e informações de operação |
+| **03 — Atuadores Z** | `03_actuators/gpio_z.pyfrag` | Relés, pulsos Z1–Z8, inicialização e bloqueios dos GPIOs |
+| **04 — GRBL XY** | `04_grbl/controller.pyfrag` | Serial da CNC, jog, Home XY, leitura de chaves e alarmes |
+| **05 — Reset** | `05_mechanics/reset.pyfrag` | Comunicação com Arduino de reset e sequência mecânica |
+| **06 — Imagem** | `06_vision/pipeline.pyfrag` | Segmentação, processamento e profundidade da imagem |
+| **07 — Trajetória** | `07_trajectory/matrix_job.pyfrag` | Pontos da matriz, ordem de visita e compilação da trajetória |
+| **08 — G-code** | `08_gcode/hybrid_runner.pyfrag` | Parser, validação, snapshot de parâmetros e executor único |
+| **09 — Interface** | `09_web/interface.pyfrag` | HTML, CSS, botões, visualizações e JavaScript |
+| **10 — Servidor** | `10_server/application.pyfrag` | API HTTP, importações, seleção de fonte, jobs e inicialização |
 
-## 9. Segurança e limitações conhecidas
+**Como as partes se relacionam:** o servidor (10) recebe ações da interface (09); o repositório de projeto separa matriz e arquivo importado; o preparador cria um plano imutável; o executor (08) envia XY ao controlador GRBL (04) e Z aos atuadores (03). Imagens são tratadas em (06), e a trajetória da matriz nasce em (07).
 
-- A aplicação controla equipamentos que podem exercer força e movimentação reais. Use simulação e testes com atuadores desenergizados antes de operar a bancada.
-- Confirme o mapeamento BCM e a polaridade dos oito relés, a alimentação, a proteção elétrica, as condições de fim de curso e uma parada de emergência física independente.
-- Verifique os quatro pontos de calibração e a **janela X=246..270 mm, Y=−50..−29 mm** antes de mover. Os limites de software não substituem barreiras físicas.
-- O formato G-code híbrido é propositalmente restrito. Não use arquivos CNC arbitrários sem adaptação e revisão.
-- O modo de reset pode estar simulado quando a porta do Arduino de reset não estiver configurada: confirme a conexão real antes de considerar o reset concluído fisicamente.
-- O modelo ONNX de IA é opcional e precisa ser fornecido/configurado separadamente.
-- Testes automatizados concluídos com sucesso comprovam apenas os cenários implementados na suíte — **não validam funcionamento, segurança ou desempenho físico**.
+**Arquitetura atual:** `RepositorioProjetoStudio`, `PlanoJobStudio`, `PreparadorJobStudio`, `ConfiguracaoExecucao` e `MotorExecucaoGCode` organizam preparação e execução. Algumas variáveis globais permanecem como adaptadores de compatibilidade.
 
-## 10. Manutenção e histórico
+**Regra de manutenção:** edite a parte responsável pela função desejada. Não faça correções permanentes diretamente em `smartv42.py`, porque ele é gerado automaticamente.
 
-A divisão atual facilita corrigir trechos específicos, mas os fragmentos ainda compartilham estado global. Uma futura refatoração pode convertê-los em módulos Python importáveis com interfaces explícitas; isso exige testes de regressão mais abrangentes.
+---
 
-Os arquivos históricos `smartv41.py` e `smaartvmatriz-main.zip` foram retirados da **versão atual** do repositório após a geração e validação da Smart Matrix v42. As versões anteriores continuam recuperáveis pelo histórico Git.
+## 7. Problemas comuns: como diagnosticar e corrigir
 
-## 11. Atualização de segurança e manutenção A–H (novembro de 2026)
+| Sintoma ou erro | O que verificar / como corrigir | Arquivo responsável |
+|---|---|---|
+| `ModuleNotFoundError: numpy` ou `PIL` | Ative o ambiente virtual e instale `numpy Pillow` | Instalação |
+| A CNC não conecta ou dá `Permission denied` | Confira porta USB, cabo, acesso à serial e se outro programa mantém a porta aberta | `04_grbl` / `01_config` |
+| O servidor inicia, mas a interface não abre de outro computador | Está vinculado a `127.0.0.1`; abra no próprio host ou configure um acesso remoto apropriado separadamente | `10_server` |
+| GRBL não responde a `?` | Confira porta correta, baud `115200`, alimentação e firmware | `04_grbl` |
+| `Pn:X` / `Pn:Y` não aparece ao pressionar a chave | Verifique o conector, estado elétrico, polaridade e relatório de status **com motores desenergizados** | Ligação / `04_grbl` |
+| Home XY não inicia com aviso de `$21`, `$22` ou `$20` | Verifique `$$` e a configuração exigida pelo Home; não desative limites sem parada elétrica independente | `04_grbl` |
+| O Home procura no sentido errado | Interrompa; confira físicamente o sentido X+/X− ou Y+/Y− antes de tentar novamente | `04_grbl` / interface |
+| A chave é detectada, mas não libera após 2 mm | Investigue mecânica do sensor, posição, folga e sentido de recuo; não force movimentos | `04_grbl` |
+| Job bloqueado por ausência de Home | Execute Home XY pelas duas chaves; um reset/reconexão invalida a referência | `04_grbl` / `08_gcode` |
+| Cabeçote Z não responde | Confira se está em **Teste físico XY** e se o modo físico completo foi habilitado após Home | `03_actuators` |
+| GPIO não inicializa | Verifique `gpiozero`, suporte GPIO, pinagem BCM, permissões e polaridade | `03_actuators` / `01_config` |
+| Relé aciona quando não deveria | **Corte a alimentação física**; verifique módulo ativo em nível baixo, polarização e circuito independente de desenergização | Elétrica / `03_actuators` |
+| A cabeça pressiona ponto errado | Confira Home, G54 real após recuo, quatro cantos, 3 mm entre centros e orientação visual | `01_config` / `07_trajectory` |
+| Calibração antiga recusada | Meça novamente A/B/C/D; a versão atual rejeita perfis incompatíveis com ~297 mm | `01_config` |
+| Z fora da janela ou longe de centro físico | Corrija XY do arquivo para o centro de um dos 10.000 pontos e revise o recorte | `01_config` / `08_gcode` |
+| `G1 Z...` ou comando desconhecido é rejeitado | Utilize o formato híbrido `Z1`–`Z8` ou `M42 P1 ; Z_LEVEL=N` | `08_gcode` |
+| GPIO mencionado no arquivo não coincide com Z | Corrija o mapa/arquivo e importe novamente; o programa bloqueia acionamento incompatível | `03_actuators` / `08_gcode` |
+| A plotagem usa matriz em vez do arquivo | Confira **Fonte da próxima plotagem** e selecione explicitamente **G-code importado** | `09_web` / `10_server` |
+| O arquivo importado desapareceu após reiniciar | O G-code externo fica em **memória temporária**; importe-o novamente | `10_server` |
+| Job recusado porque o projeto mudou | Atualize a página/estado, confira fonte e parâmetros e inicie novamente | `10_server` / `08_gcode` |
+| Imagem ou profundidade não corresponde ao esperado | Revise modo Distância/Luminância/Binário e a imagem original | `06_vision` |
+| Reset mecânico não responde ou não confirma fim | Confira porta do Arduino de reset, firmware e resposta de conclusão | `05_mechanics` |
+| `smartv42.py` está desatualizado | Execute o gerador e depois o modo `--check` | `tools/build_smartv42.py` |
+| Testes falham após uma alteração | Consulte qual teste e arquivo falharam; corrija o fragmento correspondente antes de operar | `tests/` + módulo afetado |
 
-As correções da auditoria foram implementadas nas oito etapas propostas, com testes de regressão e revisão da operação física.
+**Ordem prática de diagnóstico:** leia o erro na interface → consulte o Terminal UGS e os logs → identifique a linha/comando que falhou → encontre o módulo na tabela acima → corrija e execute os testes. **Não contorne bloqueios de segurança só para fazer o movimento acontecer.**
 
-**A — Segurança:** O GRBL físico deixa de ser substituído silenciosamente por uma porta simulada quando USB falha. O Z físico exige conexão GRBL real e estado Idle; Check e outros estados bloqueiam o acionamento. O envio GRBL rejeita coordenadas Z cartesianas, inclusive pelo console. O GPIO é inicializado apenas depois que a conexão GRBL estiver pronta.
+---
 
-**B — Estados da máquina:** Um job e as operações manuais não podem ser executados ao mesmo tempo. Pausa e Abort são observados antes de novos pulsos Z; o tempo em Hold não consome o timeout normal do trabalho. Testes sequenciais não são mais iniciados em threads soltas sem reserva da máquina.
+## 8. Editar, reconstruir e testar
 
-**C — Coordenadas:** Os cantos A/B/C/D são os limites físicos da bancada; a janela de plotagem é uma subárea absoluta dentro deles. O mapeamento e a transformação inversa compartilham as mesmas regras de origem e orientação. Sinais X/Y são persistidos na calibração. O GRBL não recebe zeramento nem jog cartesiano Z.
+O repositório mantém **dez fragmentos** e gera um único `smartv42.py`.
 
-**D — Dados e parâmetros:** Alterar parâmetros do cabeçote/calibração não descarta o arquivo G-code importado. A luminância é reprocessada a partir da imagem original, quando disponível. Na importação, a opção **Z do arquivo** permite escolher explicitamente os tempos e pulsos contidos no arquivo; por padrão prevalece a configuração Z atual do cabeçote.
+### Depois de alterar qualquer `.pyfrag`
 
-**E — Motor de execução único:** Padrões, imagens e G-code importado compartilham o mesmo executor validado. A trajetória completa é inspecionada antes do primeiro movimento e novamente depois de preparar o GRBL.
+```bash
+python3 tools/build_smartv42.py
+python3 -m py_compile smartv42.py
+python3 -m unittest discover -s tests -v
+python3 tools/build_smartv42.py --check
+```
 
-**F — Interface e logs:** OFF=0 e Pausa=0 agora são valores possíveis na interface. Erros de comunicação, reset, jog e telemetria são exibidos; os resultados dos jobs ficam disponíveis no estado da aplicação.
+- `build_smartv42.py`: junta os dez fragmentos, na ordem correta.
+- `--check`: verifica se o arquivo final corresponde aos fragmentos, **sem alterá-lo**.
+- `unittest`: executa os testes automatizados sem CNC ou relés reais.
+- **GitHub Actions**: ao enviar alterações de código/testes à `main`, reconstrói, valida e, se necessário, publica o `smartv42.py` gerado. Mudanças apenas no README não acionam esse workflow.
+- Arquivos `.pyfrag` **não são scripts executáveis isolados**.
 
-**G — Limpeza residual:** Constantes e funções sem referências internas foram removidas. O compilador não emite mais marcadores M3/M5 ou G4 P0 por ponto, pois o sincronismo XY ocorre dentro do controlador. O parser continua aceitando marcadores antigos para compatibilidade.
+### Estrutura essencial
 
-**H — Testes:** Os testes existentes foram ampliados com uma suíte de regressão sem hardware, executada no GitHub Actions a cada alteração dos fragmentos.
+```text
+ic/
+├── README.md
+├── smartv42.py                  # Programa final gerado
+├── smartv42_src/                # Dez partes editáveis
+├── tools/build_smartv42.py     # Montador
+├── tests/                       # Testes automatizados
+├── docs/                        # Explicações técnicas detalhadas
+└── .github/workflows/           # Reconstrução e testes no GitHub
+```
 
-### Atenção antes de acionar a bancada
+---
 
-- Execute primeiro em modo simulado, com o argumento --simulado. A falha de USB em modo físico agora **bloqueia o trabalho**, sem fallback silencioso.
-- Confirme a região de plotagem padrão X=246..270 mm, Y=-50..-29 mm e sua compatibilidade com os quatro cantos reais; confira também o sentido dos motores ($3 do GRBL).
-- O reset mecânico completo envia o comando **D uma única vez**. No modo físico, o firmware do Arduino deve responder **DONE** ou **CONCLUIDO** para confirmar que o ciclo terminou; apenas OK não comprova conclusão.
-- Mesmo com intertravamentos de software, é obrigatório ter uma **parada elétrica de emergência independente**, e validar os GPIOs, a polaridade dos relés e o movimento físico antes de iniciar uma plotagem.
-- Os testes do GitHub Actions são simulados: **não comprovam segurança elétrica ou mecânica**, nem validam uma Raspberry Pi conectada à máquina.
+## 9. Segurança e documentação técnica
 
+A máquina trabalha com motores, relés e atuadores que podem causar movimentos inesperados. O código foi testado em simulação, mas **não é uma função de segurança industrial**. Antes de usar o hardware, providencie e valide parada elétrica independente, proteções mecânicas, limites de percurso, alimentação, polaridade dos relés e funcionamento das chaves.
 
-## 12. Home XY automatico por chaves (sem Z)
+- [Home XY por chaves: configuração, limites e recuo de 2 mm](docs/HOME_XY_CHAVES.md)
+- [Geometria e coordenadas: 100 × 100, 3 mm, 297 mm úteis](docs/MODELO_COORDENADAS_297.md)
+- [Separação entre simulação, XY físico e relés Z](docs/ISOLAMENTO_Z_SIMULACAO.md)
+- [Matriz, G-code importado e parâmetros de cada execução](docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md)
+- [Arquitetura: repositório, plano imutável e executor único](docs/ARQUITETURA_SMARTV42.md)
+- [Histórico de correções técnicas A–H](docs/CORRECOES_A_H.md)
 
-A nova interface executa Home XY (chaves): busca X e Y pelo campo Pn: do GRBL conectado a Raspberry Pi, recua 2 mm de cada sensor e entao grava a origem G54. Esse Home nao envia $H e nao necessita eixo Z fisico.
-
-A funcionalidade verifica $22=0 e $21=0 e **nao altera automaticamente esses parametros**. Como $21=0 desabilita a protecao por hard limits, so deve ser utilizada com parada eletrica de emergencia independente, protecao mecanica, sentidos e cursos verificados. O uso de chaves X/Y pela USB nao equivale a uma funcao de parada de seguranca. Sem referencia XY valida, jobs e deslocamentos absolutos ficam bloqueados.
-
-Veja [docs/HOME_XY_CHAVES.md](docs/HOME_XY_CHAVES.md) para instrucoes e restricoes. A validacao fisica ainda precisa ser realizada na bancada.
-
-## 13. Isolamento de simulacao, teste XY e Z fisico
-
-Existem tres estados operacionais efetivos para os acionamentos Z, exibidos na interface:
-
-- **Simulacao integral**: GRBL selecionado como SIMULADO pela UI ou inicializado com --simulado. Os testes e pulsos de Z sao apenas virtuais; nao chamam OutputDevice.on(), mesmo com objetos antigos de reles em memoria.
-- **Teste fisico XY (padrao em conexao real)**: motores X/Y e Home XY podem operar; Z1..Z8 e testes de reles ficam bloqueados. Nenhuma saida GPIO fisica e inicializada nesse modo.
-- **Operacao fisica completa**: so pode ser habilitada pelo botao Habilitar Z fisico, com confirmacao explicita, GRBL real em Idle, Home XY concluido, sensores X/Y liberados e GPIO disponivel. O programa cria as saidas em repouso e verifica permissoes antes de cada pulso.
-
-A mudanca para SIMULADO, reconexao USB, soft reset ou inicio de um novo Home XY sempre desarma Z e fecha objetos GPIO. Alarmes e comandos que invalidam a referencia XY tambem revogam imediatamente a permissao de Z. Trabalhos que contem comandos Z sao rejeitados no modo Teste fisico XY; trabalhos de XY puro continuam possiveis apos Home XY. Os comandos de reset mecanico do Arduino nao sao encaminhados a hardware real se o GRBL for simulado.
-
-**Importante:** nao se deve confiar somente na Raspberry Pi para manter as bobinas desenergizadas em caso de falha. Contatos normalmente fechados de parada fisica, circuito de desligamento de potencia, fusivel e eletrica adequada sao necessarios. Caso os modulos sejam ativos em nivel baixo, utilize resistores de pull-up apropriados para evitar acionamento quando GPIO estiver em alta impedancia.
-
-Os testes de software usam objetos de rele falsos e executam no CI, sem comprovar a eletrica da bancada.
-
-## 14. Coordenadas físicas unificadas (100 × 100, 3 mm)
-
-A Smart Matrix utiliza 10.000 centros físicos, indexados de 0 a 99 por eixo. O intervalo nominal entre centros adjacentes é 3 mm, totalizando **297 mm entre extremos**. A referência nominal de movimento 0..299 mm **não significa 300 pinos**. O G-code XY utiliza interpolação bilinear dos quatro cantos calibrados, independente de recortes de plotagem. Por padrão, a janela está desativada; se habilitada, somente mascara pontos e não comprime a malha.
-
-O Home XY automático por chaves e recuo de 2 mm foi preservado. O botão de origem manual G92 foi removido, e calibrações antigas incompatíveis são ignoradas. Um G-code importado só pressiona Z em centros da malha (tolerância máxima 0,35 mm). Veja [docs/MODELO_COORDENADAS_297.md](docs/MODELO_COORDENADAS_297.md) antes dos testes físicos.
-
-## 15. Fonte de plotagem e snapshots de execução
-
-A Matriz 100×100 e o G-code importado são mantidos em estados independentes. Os botões **Matriz 100 × 100** e **G-code importado** escolhem qual fonte será plotada; o arquivo importado não é apagado por alterações de geometria, pulsos ou imagem. Para apagá-lo, use **Remover G-code** com confirmação. Os arquivos importados permanecem na memória até o servidor reiniciar.
-
-Ao iniciar um job, o SmartV42 cria cópia profunda das instruções e registra um snapshot dos parâmetros do painel, da geometria e do mapa Z; a escolha **Z do arquivo** determina quais parâmetros do G-code externo têm precedência. A revisão do projeto impede iniciar trabalhos com uma tela desatualizada. Consulte [docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md](docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md).
-
-## 16. Arquitetura interna — projeto, plano e executor
-
-A refatoração dos componentes do SmartV42 mantém as dez seções de código e o HTML inalterado. O `RepositorioProjetoStudio` centraliza o estado editável e a revisão da fonte, o `PlanoJobStudio` representa o trabalho preparado como dados imutáveis, `ConfiguracaoExecucao` congela os parâmetros e `MotorExecucaoGCode` executa **matriz e G-code importado pelo mesmo motor**. As APIs e funções antigas permanecem como adaptadores de compatibilidade. Veja [docs/ARQUITETURA_SMARTV42.md](docs/ARQUITETURA_SMARTV42.md).
+**Resumo:** use `smartv42.py` para executar, `smartv42_src/` para modificar, `tests/` para verificar e este README para operar. Comece em **simulação**, valide **Home XY**, teste **XY com Z bloqueado** e só depois habilite o **cabeçote real**, com proteção elétrica independente.
