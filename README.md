@@ -520,3 +520,9 @@ Os testes de software usam objetos de rele falsos e executam no CI, sem comprova
 A Smart Matrix utiliza 10.000 centros físicos, indexados de 0 a 99 por eixo. O intervalo nominal entre centros adjacentes é 3 mm, totalizando **297 mm entre extremos**. A referência nominal de movimento 0..299 mm **não significa 300 pinos**. O G-code XY utiliza interpolação bilinear dos quatro cantos calibrados, independente de recortes de plotagem. Por padrão, a janela está desativada; se habilitada, somente mascara pontos e não comprime a malha.
 
 O Home XY automático por chaves e recuo de 2 mm foi preservado. O botão de origem manual G92 foi removido, e calibrações antigas incompatíveis são ignoradas. Um G-code importado só pressiona Z em centros da malha (tolerância máxima 0,35 mm). Veja [docs/MODELO_COORDENADAS_297.md](docs/MODELO_COORDENADAS_297.md) antes dos testes físicos.
+
+## 15. Fonte de plotagem e snapshots de execução
+
+A Matriz 100×100 e o G-code importado são mantidos em estados independentes. Os botões **Matriz 100 × 100** e **G-code importado** escolhem qual fonte será plotada; o arquivo importado não é apagado por alterações de geometria, pulsos ou imagem. Para apagá-lo, use **Remover G-code** com confirmação. Os arquivos importados permanecem na memória até o servidor reiniciar.
+
+Ao iniciar um job, o SmartV42 cria cópia profunda das instruções e registra um snapshot dos parâmetros do painel, da geometria e do mapa Z; a escolha **Z do arquivo** determina quais parâmetros do G-code externo têm precedência. A revisão do projeto impede iniciar trabalhos com uma tela desatualizada. Consulte [docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md](docs/ESTADOS_ISOLADOS_MATRIZ_GCODE.md).

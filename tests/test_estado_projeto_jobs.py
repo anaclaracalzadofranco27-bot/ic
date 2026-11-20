@@ -267,6 +267,29 @@ class EstadosIsolados(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 mod.validar_snapshot_geometria_job(cfg)
 
+    def test_gpio_embutido_no_gcode_revalidado_no_inicio(self):
+        arquivo = "G1 X3 Y-297 F900\nM42 P1 ; Z_LEVEL=4 GPIO=27 PULSOS=7"
+        programa = mod.analisar_gcode_hibrido(arquivo)
+        ctrl = GRBLParaJob()
+        # O arquivo foi analisado quando Z4 era GPIO27. Uma reconfiguracao
+        # posterior nao pode redirecionar seus acionamentos para outro pino.
+        com_pinos = list(mod.PINOS_GPIO_Z)
+        com_pinos[3] = 22
+        with patch.object(mod, "PINOS_GPIO_Z", com_pinos):
+            with self.assertRaisesRegex(ValueError, "GPIO de Z4"):
+                mod.validar_programa_antes_movimento(ctrl, programa)
+
+    def test_fonte_gcode_preservada_apos_recompilar_preview(self):
+        self.importar(nome="preservado.gcode")
+        atual = mod.obter_estado_fontes_job()["revisao"]
+        with patch.object(mod, "FEED_RATE", 345.0):
+            mod.atualizar_matriz_global(mod._matriz_atual)
+        estado = mod.obter_estado_fontes_job()
+        self.assertEqual(estado["fonte_ativa"], "gcode")
+        self.assertEqual(estado["nome_gcode"], "preservado.gcode")
+        self.assertGreater(estado["revisao"], atual)
+
+
 
 if __name__ == "__main__":
     unittest.main()
